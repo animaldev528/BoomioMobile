@@ -116,6 +116,27 @@ The schedule fires from the repository's **default branch**, which is why the fo
 is `boomio` rather than the `cmp-rewrite` mirror. `setup-secrets-mobile.sh` sets that up along
 with the secrets.
 
+### Fork hygiene that PRs depend on
+
+Two things, both handled by `setup-secrets-mobile.sh`:
+
+- The default branch must be `boomio`. A `schedule` only fires from the default branch, and
+  `workflow_dispatch` likewise needs the file present there before it can be run at all.
+- `discontinue-legacy-main.yml` is **removed** on this branch. It triggers on
+  `pull_request_target: [opened, reopened]` and closes every PR on the repository with a "the
+  legacy app is being discontinued" comment — upstream's wind-down for the retired React
+  Native codebase, which on a product fork means every PR dies seconds after it opens. That is
+  exactly what happened to the branding PR.
+
+  Because `pull_request_target` reads the workflow from the PR's **base** branch, deleting it
+  here only helps once `boomio` is also the default branch (so new PRs base against it rather
+  than against `cmp-rewrite`). Reinstating it is a one-file revert.
+
+There is deliberately **no PR for the branding work itself**: `boomio` is the product branch,
+so a PR would need a base other than itself and would show every upstream commit as a
+difference against the stale `cmp-rewrite` mirror. The branch is the artifact. PRs are for the
+port clusters, which land *into* `boomio`.
+
 ## Verification status
 
 Nothing here has been compiled. Building on the dev machine is against the project's rules, so
