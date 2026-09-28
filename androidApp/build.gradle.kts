@@ -24,14 +24,16 @@ val localProps = Properties().apply {
     val propsFile = rootProject.file("local.properties")
     if (propsFile.exists()) propsFile.inputStream().use { load(it) }
 }
-val releaseStoreFile = localProps.getProperty("NUVIO_RELEASE_STORE_FILE")?.takeIf { it.isNotBlank() }
-val releaseStorePassword = localProps.getProperty("NUVIO_RELEASE_STORE_PASSWORD")?.takeIf { it.isNotBlank() }
-val releaseKeyAlias = localProps.getProperty("NUVIO_RELEASE_KEY_ALIAS")?.takeIf { it.isNotBlank() }
-val releaseKeyPassword = localProps.getProperty("NUVIO_RELEASE_KEY_PASSWORD")?.takeIf { it.isNotBlank() }
-val releaseKeystore = releaseStoreFile?.let(rootProject::file)
 fun envOrLocalProperty(key: String): String? =
     providers.environmentVariable(key).orNull?.trim()?.takeIf { it.isNotBlank() }
         ?: localProps.getProperty(key)?.trim()?.takeIf { it.isNotBlank() }
+
+// Env first, so CI can supply the signing material without rewriting local.properties.
+val releaseStoreFile = envOrLocalProperty("NUVIO_RELEASE_STORE_FILE")
+val releaseStorePassword = envOrLocalProperty("NUVIO_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = envOrLocalProperty("NUVIO_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = envOrLocalProperty("NUVIO_RELEASE_KEY_PASSWORD")
+val releaseKeystore = releaseStoreFile?.let(rootProject::file)
 
 val sentryAuthToken = envOrLocalProperty("SENTRY_AUTH_TOKEN")
 val sentryOrg = envOrLocalProperty("SENTRY_ORG")
@@ -82,10 +84,24 @@ android {
         create("playstore") {
             dimension = "distribution"
         }
+        // Boomio: its own application id so it installs alongside the official Nuvio app,
+        // with `full`'s sideload-capable manifest rather than `playstore`'s.
+        create("boomio") {
+            dimension = "distribution"
+            applicationId = "com.boomio.mobile"
+        }
     }
 
     sourceSets.getByName("full") {
         manifest.srcFile("src/full/AndroidManifest.xml")
+        jniLibs.directories.add("../composeApp/src/full/jniLibs")
+    }
+    // `boomio` mirrors `full`'s wiring, not just its id. The manifest is the load-bearing
+    // part (REQUEST_INSTALL_PACKAGES, i.e. self-update). The jniLibs line is parity with
+    // `full`; that directory does not exist upstream today — the native decoders ship as
+    // the committed AARs under composeApp/libs — so it is currently a no-op either way.
+    sourceSets.getByName("boomio") {
+        manifest.srcFile("src/boomio/AndroidManifest.xml")
         jniLibs.directories.add("../composeApp/src/full/jniLibs")
     }
 
@@ -145,7 +161,12 @@ android {
 
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.applicationId.set("com.nuviodebug.com")
+        // Flavor-aware: a flat override hands boomio debug the same id as full debug, so the
+        // two could never be installed side by side.
+        val distribution = variant.productFlavors.firstOrNull { it.first == "distribution" }?.second
+        variant.applicationId.set(
+            if (distribution == "boomio") "com.boomio.debug" else "com.nuviodebug.com"
+        )
     }
 }
 
