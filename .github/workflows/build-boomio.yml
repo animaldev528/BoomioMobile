@@ -124,6 +124,10 @@ jobs:
             } >> "${GITHUB_OUTPUT}"
           fi
 
+      # Issues are currently DISABLED on this fork, so the gh issue calls below cannot
+      # succeed and are best-effort — the run's real signal is the non-zero exit and the
+      # ::error:: annotation, which surface regardless. If issues are ever enabled, this
+      # starts filing/updating an `upstream-sync` issue on its own with no further change.
       - name: Report a merge conflict
         if: steps.merge.outputs.conflict == 'true'
         env:
