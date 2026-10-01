@@ -132,6 +132,8 @@ internal fun PlayerScreenRuntime.resetIdentityStateIfNeeded() {
         isUserExplicitAudioSelection = false
         isUserExplicitSubtitleSelection = false
         hasScannedTextTracksOnce = false
+        PlayerTtfbProbe.clear()
+        dismissStreamInfo()
     }
 
     val videoIdentity = "$identity:$activeVideoId:$activeSeasonNumber:$activeEpisodeNumber"

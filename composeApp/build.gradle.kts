@@ -44,6 +44,9 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val tmdbApiKey: Property<String>
 
+    @get:Input
+    abstract val companionBaseUrl: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -92,6 +95,18 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
             )
         }
 
+        outDir.resolve("com/nuvio/app/features/boomio").apply {
+            mkdirs()
+            resolve("BoomioCompanionConfig.kt").writeText(
+                """
+                |package com.nuvio.app.features.boomio
+                |
+                |object BoomioCompanionConfig {
+                |    const val BASE_URL = "${companionBaseUrl.get()}"
+                |}
+                """.trimMargin()
+            )
+        }
         outDir.resolve("com/nuvio/app/features/trakt").apply {
             mkdirs()
             resolve("TraktConfig.kt").writeText(
@@ -330,6 +345,7 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
             else -> "production"
         }
     )
+    companionBaseUrl.set(runtimeConfigValue("BOOMIO_COMPANION_URL"))
 }
 
 tasks.withType<KotlinCompilationTask<*>>().configureEach {
@@ -509,6 +525,8 @@ kotlin {
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.kotlinx.atomicfu)
+            implementation(libs.ktor.client.core)
+            implementation(libs.ktor.client.websockets)
             implementation(libs.kmpalette.core)
             implementation(libs.androidx.navigation3.ui)
             implementation(libs.kermit)
