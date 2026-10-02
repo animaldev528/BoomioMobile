@@ -28,32 +28,47 @@ Instead:
 | Signing | `NUVIO_RELEASE_*` now resolve **environment first**, then `local.properties`. CI injects the keystore without rewriting `local.properties`; upstream's own workflow is unaffected because it leaves the environment unset. |
 | Debug id | `com.boomio.debug` instead of the flat `com.nuviodebug.com`, so Boomio debug and full debug can be installed side by side. |
 | Icons | 21 files under `androidApp/src/boomio/res` — legacy, round, adaptive foreground, themed monochrome, and the splash logo, at the same pixel geometry as the upstream set they shadow. |
-| Launcher label | `app_name` → "Boomio" in `values/` and `values-es/`. |
+| Launcher label | `app_name` → "Boomio" in `values/`, `values-es/` and `values-bn/`. Every qualifier the library defines needs its own file: resources resolve per qualifier, so `values-bn/` was needed or a Bengali-locale device read "Nuvio". |
+| In-app wordmark | 8 PNGs under `androidApp/src/boomio/assets/composeResources/…/drawable/` — the Boomio wordmark in all 7 theme tints plus the default. See below. |
+| Updater | Repointed from `NuvioMedia/NuvioMobile` to `animaldev528/BoomioMobile`. |
 | CI | `.github/workflows/build-boomio.yml` — weekly Android build (below). |
 
 ## Outstanding
 
-### 1. In-app brand name and strings
+### 1. In-app brand name and strings — wordmark DONE, strings open
 
-`app_name` only covers the launcher label, which is an Android resource. The in-app name is
-`app_brand_name`, and it lives in **Compose Multiplatform Resources**
-(`composeApp/src/commonMain/composeResources/values-*/strings.xml`, ~22 locales) generated
-into `nuvio.composeapp.generated.resources`. An `androidApp` flavor overlay cannot shadow
-generated Compose resources, so branding them requires a third `nuvio.android.distribution`
-value that points composeApp at a `src/androidBoomio/` resource set.
+The visible brand inside the UI is not a string: it is the wordmark **image**, drawn by
+`AppBrandWordmark` via `painterResource` over `app_logo_wordmark[_<theme>].png` (7 tints +
+default). `app_brand_name` ("Nuvio", ~22 locale files) is only that image's accessibility
+`contentDescription`.
 
-Deliberately deferred to keep this branch's diff small. Until it lands, the app shows Nuvio's
-name inside the UI.
+Compose Multiplatform packages those images at
+`assets/composeResources/<pkg>/drawable/` inside the APK. An app flavor's assets are merged
+**above** the library's, so the same path under `androidApp/src/boomio/assets/` shadows the
+copy inside `composeApp` — no third `nuvio.android.distribution` value is needed. That claim
+is **verified, not assumed**: `aapt`-extracting all 8 packaged wordmarks from a real
+`assembleBoomioRelease` APK gives an alpha channel identical to the Boomio master
+(`9ada899cf20c`) in 8/8 files, with Nuvio's alphas (`4ef4a378182a`, `a9f67ee52ff0`) absent.
+Alpha is the discriminator because the letterforms differ geometrically; PNG bytes do not
+compare, since the build recompresses them.
 
-### 2. Updater still points at Nuvio
+Regenerate with `docs/boomio/branding/gen-wordmarks.py` (needs PIL). Do not move it to
+`tools/` — upstream's `.gitignore` excludes that directory.
 
-`composeApp/src/commonMain/.../updater/AppUpdaterRepository.kt` hardcodes
-`https://api.github.com/repos/NuvioMedia/NuvioMobile/...`, and the User-Agent `NuvioMobile`.
+Still open: ~47 ordinary UI strings that mention "Nuvio" (`settings_licenses_*` and friends).
+These are plain Compose string resources, shadowed by the same asset path
+(`values*/strings.cvr`). Not started deliberately — several are attribution/licence strings
+where renaming would be wrong, so the set needs picking over rather than a blanket sed.
 
-This is shared `commonMain`, so repointing it is not a one-line edit — it would leak into all
-three flavors. It needs a flavor-aware seam, the way the TV fork exposes `GITHUB_OWNER` /
-`GITHUB_REPO` as build config. Until then, a Boomio install would offer upstream Nuvio
-releases as its own update.
+### 2. Updater — DONE
+
+Was hardcoded to `NuvioMedia/NuvioMobile`. Repointed to `animaldev528/BoomioMobile`, so a
+Boomio install updates from this fork instead of offering Nuvio's releases as its own.
+
+The related trap is the release **tag format**: `VersionUtils.parse` is an anchored semver
+regex and `ReleaseSelector` drops anything it cannot parse, silently. The CI therefore tags
+bare `X.Y.Z`; a decorated tag such as `boomio-0.5.3-135` would make every release invisible
+to the updater with no error surfaced anywhere.
 
 ### 3. Deep-link scheme — do not change blindly
 

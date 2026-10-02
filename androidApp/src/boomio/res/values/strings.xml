@@ -3,8 +3,11 @@
     <!-- Boomio identity. Overrides the library's value by name so
          composeApp/src/androidMain/res is never edited on this branch.
 
-         Note: this reaches Android resource lookups only (the launcher label). The in-app
-         brand name is `app_brand_name` in composeApp's Compose Resources, which a flavor
-         overlay cannot shadow — see docs/boomio/PORT-PLAN.md. -->
+         This reaches Android resource lookups (the launcher label). The in-app wordmark
+         is a separate mechanism and lives under this flavor's `assets/` — see the header
+         of app_logo_wordmark.png's generator, docs/boomio/branding/gen-wordmarks.py.
+
+         Resources resolve per qualifier: a locale-qualified value in the library beats a
+         default-only value here, which is why values-bn/ also exists. -->
     <string name="app_name">Boomio</string>
 </resources>

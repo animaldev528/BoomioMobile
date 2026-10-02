@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The library ships a Bengali `app_name` of its own
+         (composeApp/src/androidMain/res/values-bn/strings.xml). Resources resolve per
+         qualifier, so a default-only override loses here and a Bengali-locale device
+         showed "Nuvio" in the launcher while every other locale showed "Boomio".
+         Verified against the packaged APK: `aapt2 dump resources` listed
+         `string/app_name () "Boomio"` alongside `(bn) "Nuvio"`. -->
+    <string name="app_name">Boomio</string>
+</resources>
