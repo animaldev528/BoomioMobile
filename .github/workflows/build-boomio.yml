@@ -214,7 +214,9 @@ jobs:
 
       - name: Set up Gradle
         if: steps.guard.outputs.proceed == 'true'
-        uses: actions/gradle/setup-gradle@v6
+        # `gradle/actions`, not `actions/gradle` -- the latter does not exist, and the
+        # job dies at "Set up job" with "Unable to resolve action" before any step runs.
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Configure signing and build properties
         if: steps.guard.outputs.proceed == 'true'
