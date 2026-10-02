@@ -57,8 +57,32 @@ Regenerate with `docs/boomio/branding/gen-wordmarks.py` (needs PIL). Do not move
 
 Still open: ~47 ordinary UI strings that mention "Nuvio" (`settings_licenses_*` and friends).
 These are plain Compose string resources, shadowed by the same asset path
-(`values*/strings.cvr`). Not started deliberately — several are attribution/licence strings
+(`values*/strings.cvr`). Not started deliberately — several name real third-party things
 where renaming would be wrong, so the set needs picking over rather than a blanket sed.
+
+**Some of these MUST NOT change, and upstream is GPL-3.0.** `LicensesAttributionsPage.kt`
+carries `NuvioRepositoryUrl = "https://github.com/NuvioMedia/NuvioMobile"`, and GPL-3 §5
+obliges a modified version to preserve the original's attribution. That link, the
+`settings_licenses_attributions_*` bodies and `settings_licenses_attributions_nuvio_title`
+are licence notices, not branding. They are also the only remaining `NuvioMedia/NuvioMobile`
+reference in the shipped dex — its presence there is **correct**, and a grep that flags it as
+a leak is misreading it. Do not "clean it up".
+
+Also leave alone, because they name something real rather than the app itself:
+`compose_auth_link_open` (`nuvio.tv/link` — the live device-authorisation page),
+`server_error_official_*` (`api.nuvio.tv`, the actual official server),
+`profile_background_member_note` (the Nuvio web panel), and the `community_*` /
+`*_membership_*` strings (Nuvio's Patreon). The genuinely safe set is the app referring to
+itself — `app_brand_name`, `addons_appstore_empty_title`, `action_support_nuvio`,
+`settings_notifications_*`, `details_servers_unreachable`, `companion_*`, and similar.
+
+**Mechanism caveat before doing this work:** a flavor asset overlay shadows the whole
+`values*/strings.cvr` file, it does not merge per key. An override therefore has to carry the
+complete locale file and goes stale the moment upstream adds a string — which would silently
+drop it. This wants a regeneration script (derive the overlay from upstream's current `.cvr`,
+apply a substitution map) rather than a checked-in copy, the same shape as
+`docs/boomio/branding/gen-wordmarks.py`. Not verified yet whether Compose falls back to the
+library's copy for keys absent from the shadowing file; confirm before relying on it.
 
 ### 2. Updater — DONE
 
