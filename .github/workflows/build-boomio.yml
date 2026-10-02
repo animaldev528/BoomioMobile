@@ -170,7 +170,20 @@ jobs:
           name="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION[[:space:]]*=[[:space:]]*(.+)$/\1/p' "${f}" | tail -1 | tr -d '[:space:]')"
           code="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION[[:space:]]*=[[:space:]]*(.+)$/\1/p' "${f}" | tail -1 | tr -d '[:space:]')"
           [[ -n "${name}" && -n "${code}" ]] || { echo "Could not parse version from ${f}" >&2; exit 1; }
-          tag="boomio-${name}-${code}"
+          # The tag MUST be a bare `X.Y.Z`. The in-app updater parses it with an anchored
+          # semver regex (VersionUtils.parse) and DROPS any release it cannot parse, so a
+          # decorated tag like `boomio-0.5.3-135` makes every future update invisible to
+          # the app -- silently, with no error surfaced anywhere.
+          #
+          # Appending the build code is not an option either: semver reads `0.5.3-135` as a
+          # PRERELEASE, and the STABLE channel filters prereleases out. Build metadata
+          # (`0.5.3+boomio.135`) would parse, but semver ignores it when comparing, so the
+          # updater would never treat a rebuild as newer -- and the skip-if-released guard
+          # below would, which is the mismatch we are avoiding.
+          #
+          # Bare `X.Y.Z` is free: upstream tags every 0.5.x as `-beta`, and the fork's
+          # inherited bare tags stop at 0.4.13.
+          tag="${name}"
           echo "name=${name}" >> "${GITHUB_OUTPUT}"
           echo "code=${code}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"

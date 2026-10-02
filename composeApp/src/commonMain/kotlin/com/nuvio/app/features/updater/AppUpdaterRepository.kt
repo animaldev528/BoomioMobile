@@ -40,7 +40,14 @@ internal object AppUpdaterRepository {
     suspend fun getLatestChannelUpdate(channel: UpdateChannel): Result<AppUpdate> = runCatching {
         val response = httpRequestRaw(
             method = "GET",
-            url = "https://api.github.com/repos/NuvioMedia/NuvioMobile/${releasePath(channel)}",
+            // Boomio fork: this must point at the fork, not upstream. Left as upstream's
+            // repo, the app offers Nuvio's own releases as Boomio updates and "updates"
+            // itself onto the official build.
+            //
+            // The fork's releases are tagged with a bare `X.Y.Z` -- see the tag step in
+            // .github/workflows/build-boomio.yml -- because VersionUtils.parse is anchored
+            // and silently drops anything else.
+            url = "https://api.github.com/repos/animaldev528/BoomioMobile/${releasePath(channel)}",
             headers = mapOf(
                 "Accept" to "application/vnd.github+json",
                 "User-Agent" to "NuvioMobile",
