@@ -90,6 +90,7 @@ import com.nuvio.app.features.catalog.CatalogTarget
 import com.nuvio.app.features.cloud.CloudLibraryContentType
 import com.nuvio.app.features.cloud.CloudLibraryFile
 import com.nuvio.app.features.boomio.CompanionScreen
+import com.nuvio.app.features.boomio.IptvChannelsScreen
 import com.nuvio.app.features.boomio.WatchPartyScreen
 import com.nuvio.app.features.cloud.CloudLibraryItem
 import com.nuvio.app.features.cloud.CloudLibraryPlaybackResult
@@ -353,6 +354,7 @@ internal fun MainAppContent(
     val addonsSettingsTitle = stringResource(Res.string.compose_settings_page_addons)
     val pluginsSettingsTitle = stringResource(Res.string.compose_settings_page_plugins)
     val companionTitle = stringResource(Res.string.compose_settings_page_companion)
+    val iptvTitle = stringResource(Res.string.iptv_title)
     val accountSettingsTitle = stringResource(Res.string.compose_settings_page_account)
     val supportersSettingsTitle = stringResource(Res.string.compose_settings_page_supporters_contributors)
     val licensesSettingsTitle = stringResource(Res.string.compose_settings_page_licenses_attributions)
@@ -1565,7 +1567,15 @@ internal fun MainAppContent(
                 }
                 entry<CompanionRoute> { route ->
                     SettingsDestination(route, navController) { onBack ->
-                        CompanionScreen(onBack = onBack)
+                        CompanionScreen(
+                            onBack = onBack,
+                            onOpenLiveTv = { navController.navigate(IptvChannelsRoute(iptvTitle)) },
+                        )
+                    }
+                }
+                entry<IptvChannelsRoute> { route ->
+                    SettingsDestination(route, navController) { onBack ->
+                        IptvChannelsScreen(onBack = onBack)
                     }
                 }
                 if (AppFeaturePolicy.pluginsEnabled) {

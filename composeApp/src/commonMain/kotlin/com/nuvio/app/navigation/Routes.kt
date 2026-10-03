@@ -97,6 +97,14 @@ data class AddonsSettingsRoute(override val title: String = "") : SettingsDestin
 @Serializable
 data class CompanionRoute(override val title: String = "") : SettingsDestinationRoute
 
+/**
+ * P5 live-TV channel picker. Reached from the companion screen rather than the
+ * settings root, because sending a tune needs an ACTIVE companion session — a
+ * root-level entry could be opened unpaired and would silently do nothing.
+ */
+@Serializable
+data class IptvChannelsRoute(override val title: String = "") : SettingsDestinationRoute
+
 /** N3 watch-party flow, launched from a title's detail screen. */
 @Serializable
 data class WatchPartyRoute(

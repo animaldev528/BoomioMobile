@@ -33,8 +33,24 @@ object BoomioConfig {
      */
     var companionBaseUrl: String = BoomioCompanionConfig.BASE_URL
 
+    /**
+     * Base URL of the bss-iptv live edge, e.g. `https://bss-iptv.example.com`.
+     * Sourced from `BOOMIO_IPTV_URL` in `local.properties` (via the generated
+     * [BoomioIptvConfig]). This is a DIFFERENT host from [companionBaseUrl]: the
+     * channel catalogue is served by the IPTV role edge, while the companion
+     * socket and the party REST live on bsc.
+     *
+     * The phone reads the catalogue directly from the edge — its existing
+     * `bs_ses_*` token is valid there because both services share the same
+     * session validator and the same Redis. No proxy route is involved.
+     */
+    var iptvBaseUrl: String = BoomioIptvConfig.BASE_URL
+
     /** True when the companion seam is configured ([companionBaseUrl] is set). */
     fun companionEnabled(): Boolean = companionBaseUrl.isNotBlank()
+
+    /** True when the live IPTV edge is configured ([iptvBaseUrl] is set). */
+    fun iptvEnabled(): Boolean = iptvBaseUrl.isNotBlank()
 }
 
 /** REST (`https://`) variant of [BoomioConfig.companionBaseUrl] for the bsc companion API. */
@@ -46,3 +62,9 @@ val BoomioConfig.companionRestBaseUrl: String
 /** Phone companion websocket endpoint (`{base}/ws/phone`). */
 val BoomioConfig.companionPhoneWsUrl: String
     get() = companionBaseUrl.trimEnd('/') + "/ws/phone"
+
+/** REST base of the bss-iptv edge, normalised to `http(s)://…` with no trailing slash. */
+val BoomioConfig.iptvRestBaseUrl: String
+    get() = iptvBaseUrl.trimEnd('/')
+        .replaceFirst("wss://", "https://")
+        .replaceFirst("ws://", "http://")

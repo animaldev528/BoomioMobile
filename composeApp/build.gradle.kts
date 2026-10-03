@@ -47,6 +47,10 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val companionBaseUrl: Property<String>
 
+    /** bss-iptv edge base URL — the live channel catalogue the picker browses. */
+    @get:Input
+    abstract val iptvBaseUrl: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -103,6 +107,18 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object BoomioCompanionConfig {
                 |    const val BASE_URL = "${companionBaseUrl.get()}"
+                |}
+                """.trimMargin()
+            )
+            // The live IPTV edge (bss-iptv). A separate host from the companion
+            // hub: the channel catalogue is served by the role edge, while the
+            // phone's companion socket and party REST stay on bsc.
+            resolve("BoomioIptvConfig.kt").writeText(
+                """
+                |package com.nuvio.app.features.boomio
+                |
+                |object BoomioIptvConfig {
+                |    const val BASE_URL = "${iptvBaseUrl.get()}"
                 |}
                 """.trimMargin()
             )
@@ -346,6 +362,7 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
         }
     )
     companionBaseUrl.set(runtimeConfigValue("BOOMIO_COMPANION_URL"))
+    iptvBaseUrl.set(runtimeConfigValue("BOOMIO_IPTV_URL"))
 }
 
 tasks.withType<KotlinCompilationTask<*>>().configureEach {

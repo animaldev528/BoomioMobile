@@ -2469,4 +2469,36 @@
     <string name="movie_status_rumored">Rumored</string>
     <string name="movie_status_in_production">In Production</string>
     <string name="movie_status_post_production">Post Production</string>
+
+    <!-- Live TV (bss-iptv) channel picker. Only the default locale is translated
+         here; the other 22 fall back to these, which is standard Android behaviour. -->
+    <string name="iptv_title">Live TV</string>
+    <string name="iptv_open_description">Pick a channel on this phone and play it on your TV</string>
+    <string name="iptv_search_hint">Search channels</string>
+    <string name="iptv_group_all">All groups</string>
+    <string name="iptv_loading">Loading channels…</string>
+    <string name="iptv_empty_unscoped">No channel groups are followed yet. Follow groups in your IPTV panel, then reload.</string>
+    <string name="iptv_empty_group">No channels in this group.</string>
+    <string name="iptv_empty_search">No channels match that search.</string>
+    <string name="iptv_reload">Reload</string>
+    <string name="iptv_error_generic">Couldn\'t load channels.</string>
+    <string name="iptv_tune_sent">Playing %1$s on your TV</string>
+    <string name="iptv_tune_offline">Your TV isn\'t connected right now.</string>
+    <!-- Live watch party (P6). Live has no pause or seek, so the whole control
+         vocabulary is: start, change channel, end. -->
+    <string name="iptv_party_start">Start watch party</string>
+    <string name="iptv_party_invite_title">Who\'s joining?</string>
+    <string name="iptv_party_invite_hint">Pick the TVs to bring onto this channel</string>
+    <string name="iptv_party_active_title">Watch party</string>
+    <string name="iptv_party_on">Everyone is on %1$s</string>
+    <string name="iptv_party_members">%1$d watching</string>
+    <string name="iptv_party_end">End party</string>
+    <string name="iptv_party_started">Watch party started on %1$s</string>
+    <string name="iptv_party_ended">Watch party ended</string>
+    <string name="iptv_party_conflict_unknown">A watch party is already running</string>
+    <string name="iptv_device_offline">offline</string>
+    <string name="iptv_party_needs_channel">Pick a channel first, then start the party</string>
+    <string name="iptv_party_changed">Everyone moved to %1$s</string>
+    <string name="iptv_cancel">Cancel</string>
+    <string name="iptv_start">Start</string>
 </resources>

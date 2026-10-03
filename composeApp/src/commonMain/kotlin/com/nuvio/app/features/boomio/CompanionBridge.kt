@@ -367,6 +367,27 @@ object CompanionBridge {
         sendFrame { put("type", "audio_fork_stop") }
 
     /**
+     * Put the paired TV on a live IPTV channel.
+     *
+     * Sends a channel ID, never a playlist URL: the TV reserves the tuner itself
+     * and resolves its own URL, so the IPTV session token never leaves the TV.
+     *
+     * @return false when there is no live companion socket to send on. Callers
+     *   must surface that — a dropped frame and a successful tune look identical
+     *   from the picker otherwise, and silently doing nothing is the one outcome
+     *   it must not report as success.
+     */
+    fun tuneChannel(streamId: String, channelName: String?): Boolean {
+        if (streamId.isBlank() || wsSession == null) return false
+        sendFrame {
+            put("type", "iptv_tune")
+            put("streamId", streamId)
+            channelName?.takeIf { it.isNotBlank() }?.let { put("channelName", it) }
+        }
+        return true
+    }
+
+    /**
      * Register a completer for the next `started`/`error` `audio_fork` ack.
      *
      * Called synchronously *before* the `audio_fork_start` frame is sent, so no

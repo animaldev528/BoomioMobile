@@ -121,6 +121,8 @@ import nuvio.composeapp.generated.resources.companion_private_listening_starting
 import nuvio.composeapp.generated.resources.companion_private_listening_stopping
 import nuvio.composeapp.generated.resources.companion_volume
 import nuvio.composeapp.generated.resources.compose_settings_page_companion
+import nuvio.composeapp.generated.resources.iptv_open_description
+import nuvio.composeapp.generated.resources.iptv_title
 import org.jetbrains.compose.resources.stringResource
 
 /** Interval between device-list refreshes while a companion session is active. */
@@ -135,6 +137,7 @@ private const val DEVICE_REFRESH_INTERVAL_MILLIS = 5_000L
 fun CompanionScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenLiveTv: () -> Unit = {},
 ) {
     LaunchedEffect(Unit) {
         BoomioSessionRepository.initialize()
@@ -204,8 +207,36 @@ fun CompanionScreen(
                     )
                 }
             }
+            item { LiveTvRow(onOpen = onOpenLiveTv) }
             item { UnlinkRow() }
         }
+    }
+}
+
+/**
+ * Entry point to the P5 channel picker.
+ *
+ * It lives inside the companion screen, not the settings root, on purpose: sending
+ * a tune needs a live companion session, so a root-level row could be opened
+ * unpaired and would appear broken. Here it is only reachable once a TV is paired.
+ */
+@Composable
+private fun LiveTvRow(onOpen: () -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        TextButton(onClick = onOpen) {
+            Icon(
+                imageVector = Icons.Rounded.PlayArrow,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(stringResource(Res.string.iptv_title))
+        }
+        Text(
+            text = stringResource(Res.string.iptv_open_description),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
