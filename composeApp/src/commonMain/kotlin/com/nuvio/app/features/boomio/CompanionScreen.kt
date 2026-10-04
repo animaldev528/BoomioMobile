@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
@@ -19,7 +21,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Headphones
-import androidx.compose.material.icons.rounded.LibraryAdd
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowLeft
@@ -34,6 +35,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -60,6 +62,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -80,7 +83,6 @@ import nuvio.composeapp.generated.resources.companion_connect
 import nuvio.composeapp.generated.resources.companion_disconnect_tv
 import nuvio.composeapp.generated.resources.companion_music_ask
 import nuvio.composeapp.generated.resources.companion_music_ask_again
-import nuvio.composeapp.generated.resources.companion_music_already_saved
 import nuvio.composeapp.generated.resources.companion_music_fail_network
 import nuvio.composeapp.generated.resources.companion_music_fail_network_hint
 import nuvio.composeapp.generated.resources.companion_music_fail_no_link
@@ -104,9 +106,14 @@ import nuvio.composeapp.generated.resources.companion_music_no_stream
 import nuvio.composeapp.generated.resources.companion_music_no_stream_hint
 import nuvio.composeapp.generated.resources.companion_music_rate_limited
 import nuvio.composeapp.generated.resources.companion_music_rate_limited_hint
-import nuvio.composeapp.generated.resources.companion_music_save
-import nuvio.composeapp.generated.resources.companion_music_saved
-import nuvio.composeapp.generated.resources.companion_music_saving
+import nuvio.composeapp.generated.resources.companion_music_listen_amazon
+import nuvio.composeapp.generated.resources.companion_music_listen_apple
+import nuvio.composeapp.generated.resources.companion_music_listen_deezer
+import nuvio.composeapp.generated.resources.companion_music_listen_failed
+import nuvio.composeapp.generated.resources.companion_music_listen_on
+import nuvio.composeapp.generated.resources.companion_music_listen_shazam
+import nuvio.composeapp.generated.resources.companion_music_listen_spotify
+import nuvio.composeapp.generated.resources.companion_music_listen_youtube
 import nuvio.composeapp.generated.resources.companion_music_title
 import nuvio.composeapp.generated.resources.companion_key_back
 import nuvio.composeapp.generated.resources.companion_key_down
@@ -525,7 +532,6 @@ private fun RemoteControls(
 @Composable
 private fun MusicIdentifyCard() {
     val state by CompanionMusicController.state.collectAsStateWithLifecycle()
-    val saveState by CompanionMusicController.saveState.collectAsStateWithLifecycle()
 
     val title = stringResource(Res.string.companion_music_title)
     val hint = stringResource(Res.string.companion_music_hint)
@@ -553,10 +559,6 @@ private fun MusicIdentifyCard() {
     val failNetworkHint = stringResource(Res.string.companion_music_fail_network_hint)
     val mismatchLabel = stringResource(Res.string.companion_music_mismatch)
     val fromIndexLabel = stringResource(Res.string.companion_music_from_index)
-    val saveLabel = stringResource(Res.string.companion_music_save)
-    val savingLabel = stringResource(Res.string.companion_music_saving)
-    val savedLabel = stringResource(Res.string.companion_music_saved)
-    val alreadySavedLabel = stringResource(Res.string.companion_music_already_saved)
 
     val listening = state is CompanionMusicState.Listening
 
@@ -630,20 +632,8 @@ private fun MusicIdentifyCard() {
             when (val s = state) {
                 is CompanionMusicState.Found -> FoundTrackBody(
                     found = s,
-                    saveState = saveState,
                     mismatchLabel = mismatchLabel,
                     fromIndexLabel = fromIndexLabel,
-                    saveLabel = saveLabel,
-                    savingLabel = savingLabel,
-                    savedLabel = savedLabel,
-                    alreadySavedLabel = alreadySavedLabel,
-                    saveFailedLabel = when (val f = saveState) {
-                        is CompanionMusicSaveState.Failed -> when (f.reason) {
-                            CompanionMusicFailure.NotLinked -> failNotLinked
-                            else -> failNetwork
-                        }
-                        else -> failNetwork
-                    },
                 )
 
                 is CompanionMusicState.NoMatch -> Text(
@@ -679,21 +669,25 @@ private fun MusicIdentifyCard() {
 }
 
 /**
- * The identified song: artwork, credits, and the two things about the answer
- * that are not visible in a title and artist.
+ * The identified song: artwork, credits, the two things about the answer that
+ * are not visible in a title and artist, and the handoff row.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FoundTrackBody(
     found: CompanionMusicState.Found,
-    saveState: CompanionMusicSaveState,
     mismatchLabel: String,
     fromIndexLabel: String,
-    saveLabel: String,
-    savingLabel: String,
-    savedLabel: String,
-    alreadySavedLabel: String,
-    saveFailedLabel: String,
 ) {
+    val listenOnLabel = stringResource(Res.string.companion_music_listen_on)
+    val listenFailedLabel = stringResource(Res.string.companion_music_listen_failed)
+    val uriHandler = LocalUriHandler.current
+
+    // Keyed on the match so a failed open does not follow the viewer to the
+    // next song they ask about.
+    var openFailed by remember(found.match) { mutableStateOf(false) }
+    val handoffs = remember(found.match) { found.match.handoffs() }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             val artwork = found.match.artworkUrl
@@ -753,45 +747,55 @@ private fun FoundTrackBody(
             )
         }
 
-        when (saveState) {
-            CompanionMusicSaveState.Idle -> FilledTonalButton(
-                onClick = { CompanionMusicController.save() },
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.LibraryAdd,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
+        // Hand the track off rather than keeping it. Nothing here adds the song
+        // to a library — no service publishes a URL that does — so each chip
+        // opens the song in an app the viewer already listens in and leaves them
+        // the one tap that saves it.
+        Text(
+            listenOnLabel,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            handoffs.forEach { handoff ->
+                FilterChip(
+                    selected = false,
+                    onClick = {
+                        // Every URL resolved to http(s), so this is close to
+                        // unreachable — but a click handler that throws would
+                        // take the app down, and a chip that quietly does
+                        // nothing is worth saying out loud either way.
+                        openFailed = runCatching { uriHandler.openUri(handoff.url) }.isFailure
+                    },
+                    label = { Text(handoff.service.label()) },
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(saveLabel)
             }
-
-            CompanionMusicSaveState.Saving -> Text(
-                savingLabel,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            CompanionMusicSaveState.Saved -> Text(
-                savedLabel,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-            )
-
-            CompanionMusicSaveState.AlreadySaved -> Text(
-                alreadySavedLabel,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            is CompanionMusicSaveState.Failed -> Text(
-                saveFailedLabel,
+        }
+        if (openFailed) {
+            Text(
+                listenFailedLabel,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
         }
     }
 }
+
+/** The chip label for a service. Brand names, so they read the same everywhere. */
+@Composable
+private fun CompanionMusicService.label(): String = stringResource(
+    when (this) {
+        CompanionMusicService.Spotify -> Res.string.companion_music_listen_spotify
+        CompanionMusicService.YouTubeMusic -> Res.string.companion_music_listen_youtube
+        CompanionMusicService.Deezer -> Res.string.companion_music_listen_deezer
+        CompanionMusicService.AppleMusic -> Res.string.companion_music_listen_apple
+        CompanionMusicService.AmazonMusic -> Res.string.companion_music_listen_amazon
+        CompanionMusicService.Shazam -> Res.string.companion_music_listen_shazam
+    },
+)
 
 /**
  * TV-search input for the phone remote — for TVs whose own search bar has no

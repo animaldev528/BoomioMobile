@@ -428,46 +428,6 @@ object CompanionBridge {
     }
 
     /**
-     * Keep a recognised track in the viewer's library, under the session this
-     * phone is already holding.
-     *
-     * Sent from here rather than round-tripped through the TV: the library row
-     * belongs to whoever is signed in *here*, and the TV's companion session
-     * exists precisely so the phone does not have to hand its token to a screen
-     * in the living room. The server takes the owner from this session, so the
-     * caller cannot put a song in the wrong library.
-     */
-    suspend fun saveMusicToLibrary(match: CompanionMusicMatch): CompanionMusicSaveResult {
-        val token = BoomioSessionRepository.bearerToken()
-            ?: return CompanionMusicSaveResult.Failed(CompanionMusicFailure.NoLink)
-
-        return try {
-            val response = http.post("${BoomioConfig.companionRestBaseUrl}/api/music/library") {
-                header(HttpHeaders.Authorization, "Bearer $token")
-                contentType(ContentType.Application.Json)
-                setBody(json.encodeToString(match.toSaveRequest()))
-            }
-            val text = response.bodyAsText()
-            when {
-                response.status.isSuccess() -> CompanionMusicSaveResult.Stored(
-                    runCatching { json.parseToJsonElement(text).jsonObject["duplicate"]?.jsonPrimitive?.contentOrNull }
-                        .getOrNull() == "true",
-                )
-                // The session has no user behind it, so there is no library to
-                // write into. Its own outcome, not a network fault: it has a fix
-                // (re-link the phone), and "something went wrong" would hide it.
-                response.status.value == 409 -> CompanionMusicSaveResult.Failed(CompanionMusicFailure.NotLinked)
-                else -> CompanionMusicSaveResult.Failed(CompanionMusicFailure.Network)
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            log.w(error) { "saveMusicToLibrary failed" }
-            CompanionMusicSaveResult.Failed(CompanionMusicFailure.Network)
-        }
-    }
-
-    /**
      * Register a completer for the next `started`/`error` `audio_fork` ack.
      *
      * Called synchronously *before* the `audio_fork_start` frame is sent, so no

@@ -1,6 +1,8 @@
 package com.nuvio.app.features.boomio
 
 import co.touchlab.kermit.Logger
+import io.ktor.http.encodeURLParameterValue
+import io.ktor.http.encodeURLPathPart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,6 +45,12 @@ data class CompanionMusicMatch(
     val providerTrackId: String? = null,
     /** Where in the title the cue sits, per the server — not where playback is now. */
     val positionMs: Long? = null,
+    /**
+     * The provider's own handoff links, keyed by service — `spotify`, `youtube`,
+     * `deezer`, `apple`, `amazon`, `shazam`. Empty when it returned none; see
+     * [handoffs], which falls back to a search rather than showing nothing.
+     */
+    val links: Map<String, String> = emptyMap(),
 )
 
 /** Why there is no song to show. */
@@ -56,7 +64,7 @@ enum class CompanionMusicFailure {
     /** The press reached the TV and the TV never answered. */
     Timeout,
 
-    /** The session carries no user, so there is no library to write into. */
+    /** The session carries no user, so there is no profile to ask on behalf of. */
     NotLinked,
 
     /** The call itself failed: offline, timeout, or a 5xx. */
@@ -93,14 +101,6 @@ sealed interface CompanionMusicAnswer {
     data class Unavailable(val reason: CompanionMusicFailure) : CompanionMusicAnswer
 }
 
-/** How keeping a track ended. */
-sealed interface CompanionMusicSaveResult {
-    /** [duplicate] is true when it was already in the library. */
-    data class Stored(val duplicate: Boolean) : CompanionMusicSaveResult
-
-    data class Failed(val reason: CompanionMusicFailure) : CompanionMusicSaveResult
-}
-
 /** What the phone's music card is showing. */
 sealed interface CompanionMusicState {
     /** Nothing asked yet. */
@@ -121,19 +121,6 @@ sealed interface CompanionMusicState {
     data object RateLimited : CompanionMusicState
 
     data class Unavailable(val reason: CompanionMusicFailure) : CompanionMusicState
-}
-
-/** Keeping the found song, tracked separately so a failed save can't wipe the answer. */
-sealed interface CompanionMusicSaveState {
-    data object Idle : CompanionMusicSaveState
-
-    data object Saving : CompanionMusicSaveState
-
-    data object Saved : CompanionMusicSaveState
-
-    data object AlreadySaved : CompanionMusicSaveState
-
-    data class Failed(val reason: CompanionMusicFailure) : CompanionMusicSaveState
 }
 
 /**
@@ -159,9 +146,6 @@ object CompanionMusicController {
     private val _state = MutableStateFlow<CompanionMusicState>(CompanionMusicState.Idle)
     val state: StateFlow<CompanionMusicState> = _state.asStateFlow()
 
-    private val _saveState = MutableStateFlow<CompanionMusicSaveState>(CompanionMusicSaveState.Idle)
-    val saveState: StateFlow<CompanionMusicSaveState> = _saveState.asStateFlow()
-
     /** Ask the paired TV what it is playing. A second press while one is in flight is ignored. */
     fun identify() {
         if (_state.value is CompanionMusicState.Listening) return
@@ -174,10 +158,6 @@ object CompanionMusicController {
             return
         }
 
-        // A fresh question means a fresh answer, so a save state left over from
-        // the previous one is cleared — otherwise a new song would open already
-        // claiming to be in the library.
-        _saveState.value = CompanionMusicSaveState.Idle
         _state.value = CompanionMusicState.Listening
 
         scope.launch {
@@ -201,40 +181,79 @@ object CompanionMusicController {
         }
     }
 
-    /**
-     * Keep the song that was just identified.
-     *
-     * Sends back what the identify answer already returned rather than asking
-     * again: the track is in hand, and a second identification would spend the
-     * daily cap to arrive at the same row.
-     */
-    fun save() {
-        val found = _state.value as? CompanionMusicState.Found ?: return
-        if (_saveState.value is CompanionMusicSaveState.Saving ||
-            _saveState.value is CompanionMusicSaveState.Saved ||
-            _saveState.value is CompanionMusicSaveState.AlreadySaved
-        ) {
-            return
-        }
-
-        _saveState.value = CompanionMusicSaveState.Saving
-        scope.launch {
-            _saveState.value = when (val result = CompanionBridge.saveMusicToLibrary(found.match)) {
-                is CompanionMusicSaveResult.Stored ->
-                    if (result.duplicate) CompanionMusicSaveState.AlreadySaved
-                    else CompanionMusicSaveState.Saved
-
-                is CompanionMusicSaveResult.Failed -> CompanionMusicSaveState.Failed(result.reason)
-            }
-        }
-    }
-
     /** Close the card. */
     fun clear() {
         _state.value = CompanionMusicState.Idle
-        _saveState.value = CompanionMusicSaveState.Idle
     }
 }
+
+// ── Handoff ──────────────────────────────────────────────────────────────────
+// Where the identified track goes next. Nothing here keeps the song: the phone
+// holds an identification, and the handoff is the point at which it leaves.
+//
+// The honest ceiling: no music service publishes a URL that *adds* a track to a
+// library. That is an authenticated in-app action in all of them, so the most a
+// deep link can do is open the app on the right song and leave one tap. That is
+// the whole of what this row promises, and why it is a handoff rather than a
+// save.
+
+/** A music service the track can be handed to. */
+internal enum class CompanionMusicService {
+    Spotify,
+    YouTubeMusic,
+    Deezer,
+    AppleMusic,
+    AmazonMusic,
+    Shazam,
+}
+
+/** One chip in the handoff row: [service]'s label, opening [url]. */
+internal data class MusicHandoff(val service: CompanionMusicService, val url: String)
+
+/**
+ * The handoff row, in a fixed order, one entry per service.
+ *
+ * A service whose provider link we hold opens that link; every other service
+ * gets a search for "title artist" instead. So the row is never empty, which
+ * matters because the provider links are not dependable: AudD returns only
+ * `spotify` and `apple`, Shazam omits a hub provider it has none for, and even
+ * the links it does return are *search* deeplinks rather than track links (see
+ * `links_of` in `bsc/scripts/music-recognize.py`).
+ *
+ * Shazam is the exception. It has no search URL worth guessing at, so it is
+ * listed only when the provider handed us its own link.
+ */
+internal fun CompanionMusicMatch.handoffs(): List<MusicHandoff> {
+    val query = if (artist.isNullOrBlank()) title else "$title $artist"
+    val path = query.encodeURLPathPart()
+    val param = query.encodeURLParameterValue()
+    return listOfNotNull(
+        handoff(CompanionMusicService.Spotify, "spotify", "https://open.spotify.com/search/$path"),
+        handoff(CompanionMusicService.YouTubeMusic, "youtube", "https://music.youtube.com/search?q=$param"),
+        handoff(CompanionMusicService.Deezer, "deezer", "https://www.deezer.com/search/$path"),
+        handoff(CompanionMusicService.AppleMusic, "apple", "https://music.apple.com/search?term=$param"),
+        handoff(CompanionMusicService.AmazonMusic, "amazon", "https://music.amazon.com/search/$path"),
+        linkFor("shazam")?.let { MusicHandoff(CompanionMusicService.Shazam, it) },
+    )
+}
+
+private fun CompanionMusicMatch.handoff(
+    service: CompanionMusicService,
+    key: String,
+    search: String,
+) = MusicHandoff(service, linkFor(key) ?: search)
+
+/**
+ * The provider's own link for [key], if it is one the platform can open.
+ *
+ * Anything that is not `http(s)` is refused rather than opened: a hub action can
+ * carry an app's private scheme (`spotify:track:…`), which resolves on a phone
+ * that has that app and fails on every other. The search link is the worse
+ * answer and the one that always works, so an unrecognised scheme falls back to
+ * it instead of to nothing.
+ */
+private fun CompanionMusicMatch.linkFor(key: String): String? =
+    links[key]?.trim()?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
 
 private val musicJson = Json { ignoreUnknownKeys = true }
 
@@ -317,6 +336,7 @@ internal data class MusicMatchWire(
     val provider: String? = null,
     val providerTrackId: String? = null,
     val positionMs: Long? = null,
+    val links: Map<String, String>? = null,
 )
 
 @Serializable
@@ -324,18 +344,6 @@ internal data class MusicTrackSelectionWire(
     val reported: Int? = null,
     val chosen: Int? = null,
     val reason: String? = null,
-)
-
-/** The library save body, as `bsc/routes/music.js` reads it. */
-@Serializable
-internal data class MusicLibrarySaveRequest(
-    val title: String,
-    val artist: String? = null,
-    val album: String? = null,
-    val isrc: String? = null,
-    val artworkUrl: String? = null,
-    val provider: String? = null,
-    val providerTrackId: String? = null,
 )
 
 private fun MusicMatchWire.toModel() = CompanionMusicMatch(
@@ -347,14 +355,5 @@ private fun MusicMatchWire.toModel() = CompanionMusicMatch(
     provider = provider,
     providerTrackId = providerTrackId,
     positionMs = positionMs,
-)
-
-internal fun CompanionMusicMatch.toSaveRequest() = MusicLibrarySaveRequest(
-    title = title,
-    artist = artist,
-    album = album,
-    isrc = isrc,
-    artworkUrl = artworkUrl,
-    provider = provider,
-    providerTrackId = providerTrackId,
+    links = links.orEmpty(),
 )
