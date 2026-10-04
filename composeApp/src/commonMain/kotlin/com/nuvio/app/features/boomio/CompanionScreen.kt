@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,10 +16,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Headphones
+import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
@@ -31,6 +35,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -49,15 +54,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil3.compose.AsyncImage
 import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioSurfaceCard
@@ -72,6 +81,40 @@ import nuvio.composeapp.generated.resources.companion_connected_hub
 import nuvio.composeapp.generated.resources.companion_connecting_hub
 import nuvio.composeapp.generated.resources.companion_connect
 import nuvio.composeapp.generated.resources.companion_disconnect_tv
+import nuvio.composeapp.generated.resources.companion_music_ask
+import nuvio.composeapp.generated.resources.companion_music_ask_again
+import nuvio.composeapp.generated.resources.companion_music_fail_network
+import nuvio.composeapp.generated.resources.companion_music_fail_network_hint
+import nuvio.composeapp.generated.resources.companion_music_fail_no_link
+import nuvio.composeapp.generated.resources.companion_music_fail_no_link_hint
+import nuvio.composeapp.generated.resources.companion_music_fail_no_player
+import nuvio.composeapp.generated.resources.companion_music_fail_no_player_hint
+import nuvio.composeapp.generated.resources.companion_music_fail_not_linked
+import nuvio.composeapp.generated.resources.companion_music_fail_not_linked_hint
+import nuvio.composeapp.generated.resources.companion_music_fail_timeout
+import nuvio.composeapp.generated.resources.companion_music_fail_timeout_hint
+import nuvio.composeapp.generated.resources.companion_music_found_hint
+import nuvio.composeapp.generated.resources.companion_music_from_index
+import nuvio.composeapp.generated.resources.companion_music_hint
+import nuvio.composeapp.generated.resources.companion_music_listen_hint
+import nuvio.composeapp.generated.resources.companion_music_mismatch
+import nuvio.composeapp.generated.resources.companion_music_no_context
+import nuvio.composeapp.generated.resources.companion_music_no_context_hint
+import nuvio.composeapp.generated.resources.companion_music_no_match
+import nuvio.composeapp.generated.resources.companion_music_no_match_hint
+import nuvio.composeapp.generated.resources.companion_music_no_stream
+import nuvio.composeapp.generated.resources.companion_music_no_stream_hint
+import nuvio.composeapp.generated.resources.companion_music_rate_limited
+import nuvio.composeapp.generated.resources.companion_music_rate_limited_hint
+import nuvio.composeapp.generated.resources.companion_music_listen_amazon
+import nuvio.composeapp.generated.resources.companion_music_listen_apple
+import nuvio.composeapp.generated.resources.companion_music_listen_deezer
+import nuvio.composeapp.generated.resources.companion_music_listen_failed
+import nuvio.composeapp.generated.resources.companion_music_listen_on
+import nuvio.composeapp.generated.resources.companion_music_listen_shazam
+import nuvio.composeapp.generated.resources.companion_music_listen_spotify
+import nuvio.composeapp.generated.resources.companion_music_listen_youtube
+import nuvio.composeapp.generated.resources.companion_music_title
 import nuvio.composeapp.generated.resources.companion_key_back
 import nuvio.composeapp.generated.resources.companion_key_down
 import nuvio.composeapp.generated.resources.companion_key_left
@@ -440,6 +483,8 @@ private fun RemoteControls(
 
         SearchRemoteControl()
 
+        MusicIdentifyCard()
+
         TvControlPad(
             label = tvNavigationLabel,
             upLabel = upLabel,
@@ -471,6 +516,286 @@ private fun RemoteControls(
         }
     }
 }
+
+/**
+ * The music note, for companion mode.
+ *
+ * The TV has its own note button, and it opens a card over the picture. That is
+ * the right shape when the viewer is holding the TV remote; it is the wrong one
+ * when they are holding the phone and looking at it. This is the same question
+ * with the answer rendered where the press happened, and nothing drawn on the TV.
+ *
+ * It is not a phone-side reimplementation. The press still goes to the TV and
+ * the TV still asks bsc — the audio-track ordinal that decides which stream the
+ * server listens to exists only there. See [CompanionBridge.requestMusicIdentify].
+ */
+@Composable
+private fun MusicIdentifyCard() {
+    val state by CompanionMusicController.state.collectAsStateWithLifecycle()
+
+    val title = stringResource(Res.string.companion_music_title)
+    val hint = stringResource(Res.string.companion_music_hint)
+    val askLabel = stringResource(Res.string.companion_music_ask)
+    val askAgainLabel = stringResource(Res.string.companion_music_ask_again)
+    val listeningHint = stringResource(Res.string.companion_music_listen_hint)
+    val foundHint = stringResource(Res.string.companion_music_found_hint)
+    val noMatch = stringResource(Res.string.companion_music_no_match)
+    val noMatchHint = stringResource(Res.string.companion_music_no_match_hint)
+    val noStream = stringResource(Res.string.companion_music_no_stream)
+    val noStreamHint = stringResource(Res.string.companion_music_no_stream_hint)
+    val noContext = stringResource(Res.string.companion_music_no_context)
+    val noContextHint = stringResource(Res.string.companion_music_no_context_hint)
+    val rateLimited = stringResource(Res.string.companion_music_rate_limited)
+    val rateLimitedHint = stringResource(Res.string.companion_music_rate_limited_hint)
+    val failNoPlayer = stringResource(Res.string.companion_music_fail_no_player)
+    val failNoPlayerHint = stringResource(Res.string.companion_music_fail_no_player_hint)
+    val failNoLink = stringResource(Res.string.companion_music_fail_no_link)
+    val failNoLinkHint = stringResource(Res.string.companion_music_fail_no_link_hint)
+    val failTimeout = stringResource(Res.string.companion_music_fail_timeout)
+    val failTimeoutHint = stringResource(Res.string.companion_music_fail_timeout_hint)
+    val failNotLinked = stringResource(Res.string.companion_music_fail_not_linked)
+    val failNotLinkedHint = stringResource(Res.string.companion_music_fail_not_linked_hint)
+    val failNetwork = stringResource(Res.string.companion_music_fail_network)
+    val failNetworkHint = stringResource(Res.string.companion_music_fail_network_hint)
+    val mismatchLabel = stringResource(Res.string.companion_music_mismatch)
+    val fromIndexLabel = stringResource(Res.string.companion_music_from_index)
+
+    val listening = state is CompanionMusicState.Listening
+
+    // One line under the title that always says what is going on. Every string
+    // is resolved above rather than inside a `when` — `stringResource` is a
+    // composable call and cannot be reached from a non-composable lambda such as
+    // `ifBlank {}`.
+    val status = when (val s = state) {
+        CompanionMusicState.Idle -> hint
+        CompanionMusicState.Listening -> listeningHint
+        // Deliberately not artist/album: `FoundTrackBody` already renders both
+        // right underneath, and repeating them here reads as a rendering bug.
+        // The line says where the answer came from instead.
+        is CompanionMusicState.Found -> foundHint
+        is CompanionMusicState.NoMatch -> when (s.status) {
+            "no_stream" -> noStreamHint
+            "no_context" -> noContextHint
+            else -> noMatchHint
+        }
+        CompanionMusicState.RateLimited -> rateLimitedHint
+        is CompanionMusicState.Unavailable -> when (s.reason) {
+            CompanionMusicFailure.NoPlayer -> failNoPlayerHint
+            CompanionMusicFailure.NoLink -> failNoLinkHint
+            CompanionMusicFailure.Timeout -> failTimeoutHint
+            CompanionMusicFailure.NotLinked -> failNotLinkedHint
+            CompanionMusicFailure.Network -> failNetworkHint
+        }
+    }
+
+    NuvioSurfaceCard {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.MusicNote,
+                    contentDescription = null,
+                    tint = if (listening) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(title, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (listening) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    TextButton(onClick = { CompanionMusicController.identify() }) {
+                        Text(if (state is CompanionMusicState.Idle) askLabel else askAgainLabel)
+                    }
+                }
+            }
+
+            when (val s = state) {
+                is CompanionMusicState.Found -> FoundTrackBody(
+                    found = s,
+                    mismatchLabel = mismatchLabel,
+                    fromIndexLabel = fromIndexLabel,
+                )
+
+                is CompanionMusicState.NoMatch -> Text(
+                    when (s.status) {
+                        "no_stream" -> noStream
+                        "no_context" -> noContext
+                        else -> noMatch
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+
+                CompanionMusicState.RateLimited -> Text(
+                    rateLimited,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+
+                is CompanionMusicState.Unavailable -> Text(
+                    when (s.reason) {
+                        CompanionMusicFailure.NoPlayer -> failNoPlayer
+                        CompanionMusicFailure.NoLink -> failNoLink
+                        CompanionMusicFailure.Timeout -> failTimeout
+                        CompanionMusicFailure.NotLinked -> failNotLinked
+                        CompanionMusicFailure.Network -> failNetwork
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+
+                CompanionMusicState.Idle, CompanionMusicState.Listening -> Unit
+            }
+        }
+    }
+}
+
+/**
+ * The identified song: artwork, credits, the two things about the answer that
+ * are not visible in a title and artist, and the handoff row.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FoundTrackBody(
+    found: CompanionMusicState.Found,
+    mismatchLabel: String,
+    fromIndexLabel: String,
+) {
+    val listenOnLabel = stringResource(Res.string.companion_music_listen_on)
+    val listenFailedLabel = stringResource(Res.string.companion_music_listen_failed)
+    val uriHandler = LocalUriHandler.current
+
+    // Keyed on the match so a failed open does not follow the viewer to the
+    // next song they ask about.
+    var openFailed by remember(found.match) { mutableStateOf(false) }
+    val handoffs = remember(found.match) { found.match.handoffs() }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val artwork = found.match.artworkUrl
+            if (!artwork.isNullOrBlank()) {
+                AsyncImage(
+                    model = artwork,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    found.match.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                found.match.artist?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, style = MaterialTheme.typography.bodyMedium)
+                }
+                found.match.album?.takeIf { it.isNotBlank() }?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+
+        // The one caveat worth the space: the server listened to a different
+        // audio track than the one playing, so this may name music the viewer is
+        // not hearing. Silent without it, and the TV's own overlay flags it too.
+        if (found.trackMismatch) {
+            Text(
+                mismatchLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (found.fromIndex) {
+            Text(
+                fromIndexLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        // Hand the track off rather than keeping it. Nothing here adds the song
+        // to a library — no service publishes a URL that does — so each chip
+        // opens the song in an app the viewer already listens in and leaves them
+        // the one tap that saves it.
+        Text(
+            listenOnLabel,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            handoffs.forEach { handoff ->
+                FilterChip(
+                    selected = false,
+                    onClick = {
+                        // Every URL resolved to http(s), so this is close to
+                        // unreachable — but a click handler that throws would
+                        // take the app down, and a chip that quietly does
+                        // nothing is worth saying out loud either way.
+                        openFailed = runCatching { uriHandler.openUri(handoff.url) }.isFailure
+                    },
+                    label = { Text(handoff.service.label()) },
+                )
+            }
+        }
+        if (openFailed) {
+            Text(
+                listenFailedLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
+}
+
+/** The chip label for a service. Brand names, so they read the same everywhere. */
+@Composable
+private fun CompanionMusicService.label(): String = stringResource(
+    when (this) {
+        CompanionMusicService.Spotify -> Res.string.companion_music_listen_spotify
+        CompanionMusicService.YouTubeMusic -> Res.string.companion_music_listen_youtube
+        CompanionMusicService.Deezer -> Res.string.companion_music_listen_deezer
+        CompanionMusicService.AppleMusic -> Res.string.companion_music_listen_apple
+        CompanionMusicService.AmazonMusic -> Res.string.companion_music_listen_amazon
+        CompanionMusicService.Shazam -> Res.string.companion_music_listen_shazam
+    },
+)
 
 /**
  * TV-search input for the phone remote — for TVs whose own search bar has no

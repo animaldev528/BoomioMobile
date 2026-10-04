@@ -38,6 +38,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -116,12 +117,15 @@ object CompanionKeyCodes {
  *   connect  {base}/ws/phone?session_token=…&device_id=…
  *   outbound stealth_playpause | stealth_volume {percent} | scrub_* {positionMs}
  *            | stealth_keyevent {keyCode} | stealth_search | keyboard_input {text}
- *            | keyboard_submit | companion:heartbeat (≤1/s, TTL 30s — sent every 10s)
+ *            | keyboard_submit | music_identify
+ *            | companion:heartbeat (≤1/s, TTL 30s — sent every 10s)
  *   inbound  companion:state_restored | companion:now_playing_changed |
- *            media_changed | audio_fork | companion:timeout | error not_paired
+ *            media_changed | audio_fork | music_identify_result |
+ *            companion:timeout | error not_paired
  *   REST     GET  /api/companion/devices   (Bearer)
  *            POST /api/companion/pair      {deviceId}
  *            POST /api/companion/unpair
+ *            POST /api/music/library       {title, artist, …} (Bearer)
  *
  * Inert when there is no [BoomioSession]. Screen-driven: call [ensureStarted]
  * once from the CompanionScreen; the bridge follows the session flow.
@@ -193,6 +197,11 @@ object CompanionBridge {
     private val audioForkAckLock = Any()
     /** Non-null only while an `audio_fork_start` arm is awaiting its ack. */
     private var pendingAudioForkAck: CompletableDeferred<CompanionEvent.AudioFork>? = null
+
+    /** Guards [pendingMusicIdentify]. */
+    private val musicIdentifyLock = Any()
+    /** Non-null only while a `music_identify` press is awaiting the TV's answer. */
+    private var pendingMusicIdentify: CompletableDeferred<CompanionMusicAnswer>? = null
 
     /**
      * Binds the bridge to [BoomioSessionRepository.session]. Idempotent — call
@@ -388,6 +397,37 @@ object CompanionBridge {
     }
 
     /**
+     * Ask the paired TV what it is playing, and return the answer when it comes.
+     *
+     * The question goes to the TV rather than straight to `POST /api/music/identify`,
+     * even though this phone holds the session token that would let it: the route
+     * picks which audio stream to listen to from the track the viewer is hearing,
+     * and only the TV knows that. Asking bsc directly would identify the file's
+     * default track — the commentary mismatch the TV's own button exists to
+     * avoid — and then index the wrong song for every other device.
+     *
+     * Registration and send are one call, unlike the audio-fork arm's two. There
+     * is exactly one caller, and the only thing splitting them buys is a way to
+     * forget the ordering the ack depends on.
+     *
+     * @return null when there is no live companion socket. Callers must surface
+     *   that; waiting on an answer that cannot come is indistinguishable from a
+     *   slow identification, which is the one thing it must not be mistaken for.
+     */
+    fun requestMusicIdentify(): CompletableDeferred<CompanionMusicAnswer>? {
+        if (wsSession == null) return null
+        val waiter = synchronized(musicIdentifyLock) {
+            // A press that supersedes an unanswered one replaces it: the daily
+            // provider cap counts calls, and a stale answer arriving later would
+            // be shown against the wrong press.
+            pendingMusicIdentify?.cancel()
+            CompletableDeferred<CompanionMusicAnswer>().also { pendingMusicIdentify = it }
+        }
+        sendFrame { put("type", "music_identify") }
+        return waiter
+    }
+
+    /**
      * Register a completer for the next `started`/`error` `audio_fork` ack.
      *
      * Called synchronously *before* the `audio_fork_start` frame is sent, so no
@@ -533,6 +573,16 @@ object CompanionBridge {
                     val pending = synchronized(audioForkAckLock) { pendingAudioForkAck }
                     pending?.complete(ack)
                 }
+            }
+            "music_identify_result" -> {
+                // The TV's answer to our `music_identify` press. Deliberately
+                // not surfaced on [events]: it is a reply to one specific press,
+                // and a toast surface would show it as an unsolicited push. The
+                // waiter is set only while a press is in flight, so a late answer
+                // to a superseded press is dropped rather than shown.
+                val answer = parseMusicIdentifyAnswer(msg)
+                val pending = synchronized(musicIdentifyLock) { pendingMusicIdentify }
+                pending?.complete(answer)
             }
             "companion:timeout" -> _events.tryEmit(CompanionEvent.Timeout)
             "error" -> {
