@@ -1,7 +1,7 @@
 package com.nuvio.app.features.boomio
 
 import co.touchlab.kermit.Logger
-import io.ktor.http.encodeURLParameterValue
+import io.ktor.http.encodeURLParameter
 import io.ktor.http.encodeURLPathPart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -225,8 +225,12 @@ internal data class MusicHandoff(val service: CompanionMusicService, val url: St
  */
 internal fun CompanionMusicMatch.handoffs(): List<MusicHandoff> {
     val query = if (artist.isNullOrBlank()) title else "$title $artist"
+    // Two encoders on purpose: a term in a path segment and one in a query
+    // value are not interchangeable. `&` and `=` are legal inside a path
+    // segment but would split the query string, so Spotify/Deezer/Amazon take
+    // the path form and YouTube/Apple the query form.
     val path = query.encodeURLPathPart()
-    val param = query.encodeURLParameterValue()
+    val param = query.encodeURLParameter()
     return listOfNotNull(
         handoff(CompanionMusicService.Spotify, "spotify", "https://open.spotify.com/search/$path"),
         handoff(CompanionMusicService.YouTubeMusic, "youtube", "https://music.youtube.com/search?q=$param"),
