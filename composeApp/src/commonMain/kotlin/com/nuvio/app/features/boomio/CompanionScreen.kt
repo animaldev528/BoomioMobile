@@ -567,8 +567,10 @@ private fun MusicIdentifyCard() {
     val status = when (val s = state) {
         CompanionMusicState.Idle -> hint
         CompanionMusicState.Listening -> listeningHint
-        is CompanionMusicState.Found ->
-            listOfNotNull(s.match.artist, s.match.album).joinToString(" · ").ifBlank { foundHint }
+        // Deliberately not artist/album: `FoundTrackBody` already renders both
+        // right underneath, and repeating them here reads as a rendering bug.
+        // The line says where the answer came from instead.
+        is CompanionMusicState.Found -> foundHint
         is CompanionMusicState.NoMatch -> when (s.status) {
             "no_stream" -> noStreamHint
             "no_context" -> noContextHint
