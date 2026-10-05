@@ -28,6 +28,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.flowOn
@@ -96,13 +98,13 @@ internal object OverlayLocalDiscovery {
     /**
      * The address the last successful browse pinned, or null when nothing is pinned.
      *
-     * Held so the pin can be **re-applied** to a widened host set without re-browsing.
-     * The host set is not fixed at browse time: the addon catalogue, which is where most
-     * of the app's server hosts come from, loads asynchronously — see
+     * A flow rather than a plain field so the pin can be **re-applied** to a widened host
+     * set without re-browsing, in *either* order. The host set is not fixed at browse
+     * time: the addon catalogue, which is where most of the app's server hosts come from,
+     * loads asynchronously and can land before or after the pin — see
      * [observeAddonChanges].
      */
-    @Volatile
-    private var pinnedAddress: InetAddress? = null
+    private val pinnedAddress = MutableStateFlow<InetAddress?>(null)
 
     fun initialize(context: Context) {
         appContext = context.applicationContext
@@ -189,10 +191,25 @@ internal object OverlayLocalDiscovery {
      *
      * ⚠️ **This is the difference between "auth works" and "the app works".** The addon
      * catalogue is where most of the app's server hosts live (`derivePinnableAddonHosts`),
-     * and it is loaded asynchronously — on 2026-10-05 it arrived about 5 s *after* the
-     * first browse had already pinned, so deriving the host set only inside [refresh]
-     * pinned the server hosts and left the whole catalogue plane pointing at the public
+     * and it is loaded asynchronously — so deriving the host set only inside [refresh]
+     * pins the server hosts and leaves the whole catalogue plane pointing at the public
      * edge for the rest of the session.
+     *
+     * ⚠️ **The two may arrive in either order, and the first version of this assumed the
+     * wrong one.** It collected the host set and read `pinnedAddress` *inside* the
+     * collector, dropping every emission that arrived while the pin was still null — and
+     * because the mapped set is `distinctUntilChanged`, a dropped emission was never
+     * revisited. Measured on device 2026-10-05, the addons beat the pin:
+     *
+     * ```
+     * 11:28:35.428  AddonRepository: initialize() — local addon count: 21
+     * 11:28:39.728  OverlayPinRegistry: Pinned [bsc, bss-iptv, nuvioserver]
+     * ```
+     *
+     * The host set widened four seconds *before* the pin existed, so the widened set was
+     * discarded and the app pinned three hosts for the whole session. [combine] makes the
+     * order irrelevant: whichever changes last produces the pair, so a pin that lands
+     * after the addons still gets the full set.
      *
      * Deliberately does **not** re-browse: the discovered address has not changed, only
      * the list of hosts that should use it. Re-browsing here would cost a 6 s NSD window
@@ -200,12 +217,14 @@ internal object OverlayLocalDiscovery {
      */
     private fun observeAddonChanges() {
         scope.launch {
-            AddonRepository.uiState
-                .map { localServerHosts() }
-                .distinctUntilChanged()
-                .collect { hosts ->
-                    val address = pinnedAddress ?: return@collect
-                    if (hosts.isNotEmpty()) OverlayPinRegistry.pin(hosts, address)
+            combine(
+                AddonRepository.uiState.map { localServerHosts() }.distinctUntilChanged(),
+                pinnedAddress,
+            ) { hosts, address -> hosts to address }
+                .collect { (hosts, address) ->
+                    if (hosts.isNotEmpty() && address != null) {
+                        OverlayPinRegistry.pin(hosts, address)
+                    }
                 }
         }
     }
@@ -221,7 +240,7 @@ internal object OverlayLocalDiscovery {
 
     /** Drops the pin without browsing. Used on network change and on server switch. */
     fun clear() {
-        pinnedAddress = null
+        pinnedAddress.value = null
         OverlayPinRegistry.clear()
         LocalServerState.update(LocalServerStatus.Idle)
     }
@@ -310,8 +329,14 @@ internal object OverlayLocalDiscovery {
                 val target = addresses.single()
                 val candidate = live.firstOrNull { it.address == target }
                     ?: candidates.first { it.address == target }
-                pinnedAddress = candidate.address
-                OverlayPinRegistry.pin(hosts, candidate.address)
+                // ⚠️ Re-derive, do not reuse `hosts` from the top of this function: that
+                // value is 6 s old by now (BROWSE_WINDOW_MS), and the addon catalogue —
+                // where most server hosts live — loads inside that window. Reading the
+                // stale set is what pinned 3 hosts on 2026-10-05 while the addons were
+                // already in state. See `observeAddonChanges`.
+                val pinHosts = localServerHosts().ifEmpty { hosts }
+                pinnedAddress.value = candidate.address
+                OverlayPinRegistry.pin(pinHosts, candidate.address)
                 LocalServerState.update(
                     LocalServerStatus.Found(
                         address = candidate.address.hostAddress.orEmpty(),
@@ -330,7 +355,7 @@ internal object OverlayLocalDiscovery {
         if (status !is LocalServerStatus.Found) {
             // Dropped together with the registry, or `observeAddonChanges` would re-pin
             // an address the user has just invalidated.
-            pinnedAddress = null
+            pinnedAddress.value = null
             OverlayPinRegistry.clear()
         }
         LocalServerState.update(status)
