@@ -34,6 +34,12 @@ object SupabaseProvider {
             supabaseUrl = configuration.backendUrl,
             supabaseKey = configuration.publishableKey,
         ) {
+            // Overlay pin seam. supabase-kt would otherwise build its own engine from the
+            // platform default, which knows nothing about a discovered LAN address -- and
+            // this one client carries auth, the catalogue, profiles and watch progress, so
+            // an unpinned backbone means the whole app ignores the pin. See
+            // `SupabaseHttpPlatform.kt`.
+            httpEngine = createSupabaseHttpEngine()
             httpConfig {
                 install(BackendRateLimitPlugin) {
                     coordinator = rateLimitCoordinator

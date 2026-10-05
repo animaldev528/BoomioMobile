@@ -1,5 +1,6 @@
 package com.nuvio.app.core.overlay
 
+import android.util.Log
 import java.net.InetAddress
 
 /**
@@ -16,6 +17,8 @@ import java.net.InetAddress
  * round trip.
  */
 internal object OverlayPinRegistry {
+
+    private const val TAG = "OverlayPinRegistry"
 
     @Volatile
     private var pins: Map<String, InetAddress> = emptyMap()
@@ -36,6 +39,10 @@ internal object OverlayPinRegistry {
     fun pin(hosts: Collection<String>, address: InetAddress) {
         if (hosts.isEmpty()) return
         pins = hosts.associateWith { address }
+        // The host set is the single most useful line when discovery "works" but the app
+        // still fails: a pin landing on a host nothing requests looks identical, from the
+        // server side, to discovery never having run. Observed 2026-10-05.
+        Log.d(TAG, "Pinned ${hosts.sorted()} -> ${address.hostAddress}")
     }
 
     fun clear() {
