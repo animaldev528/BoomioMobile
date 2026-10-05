@@ -29,6 +29,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -105,11 +106,22 @@ internal object OverlayLocalDiscovery {
     /** Browses on foreground, at most once per [RESULT_TTL_MS]. */
     private fun observeForeground() {
         scope.launch {
-            AppForegroundMonitor.events().collect { visibility ->
-                if (visibility != AppVisibility.Foreground) return@collect
-                if (SystemClock.elapsedRealtime() - lastBrowsedAtMs < RESULT_TTL_MS) return@collect
-                refresh()
-            }
+            AppForegroundMonitor.events()
+                // `events()` is a `callbackFlow` whose block calls
+                // `ProcessLifecycleOwner.lifecycle.addObserver`, and Android requires
+                // that on the main thread. Collecting it straight from this object's
+                // IO scope throws `IllegalStateException: Method addObserver must be
+                // called on the main thread` on the *first* collection — which, because
+                // `initialize` runs in `MainActivity.onCreate`, kills the app on launch.
+                //
+                // `flowOn` moves only the flow's upstream. The collection body below
+                // stays on IO, so browsing still never runs on the UI thread.
+                .flowOn(Dispatchers.Main.immediate)
+                .collect { visibility ->
+                    if (visibility != AppVisibility.Foreground) return@collect
+                    if (SystemClock.elapsedRealtime() - lastBrowsedAtMs < RESULT_TTL_MS) return@collect
+                    refresh()
+                }
         }
     }
 
