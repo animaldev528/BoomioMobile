@@ -125,7 +125,7 @@ internal class OverlayWgTunnel(
             // `Up()` returning is not the same as a handshake having completed — the device
             // comes up before the peer answers. Reading status here captures the *initial*
             // view, which is what makes a later read a comparison rather than a guess.
-            TunnelState.Up(binding.status()).also { _state.value = it }
+            TunnelState.Up(redactKeys(binding.status())).also { _state.value = it }
         } catch (t: Throwable) {
             Log.w(TAG, "Could not bring the overlay tunnel up", t)
             fail(t.message ?: t::class.java.simpleName)
@@ -146,15 +146,40 @@ internal class OverlayWgTunnel(
         _state.value = TunnelState.Down
     }
 
-    /** wireguard-go's own view — handshake time and tx/rx counters. Never throws. */
+    /**
+     * wireguard-go's own view — handshake time and tx/rx counters. Never throws, and **never
+     * carries key material**; see [redactKeys].
+     */
     fun status(): String = try {
-        binding.status()
+        redactKeys(binding.status())
     } catch (t: Throwable) {
         "unavailable: ${t.message}"
     }
 
     private fun fail(reason: String): TunnelState =
         TunnelState.Failed(reason).also { _state.value = it }
+
+    /**
+     * Strips the key lines out of wireguard-go's `IpcGet` dump.
+     *
+     * ⚠️ **`IpcGet` prints the private key, in full, in hex** — and every value this function
+     * returns is display-bound. [TunnelState.Up.status] is documented as the diagnostic string
+     * for the status row, and the first on-device run of the probe wrote one straight into a
+     * report file and the log. A device dump, a screenshot of a diagnostics screen, or a
+     * pasted support log would each carry a working private key off the device.
+     *
+     * The overlay key is not a user credential and its reach is bounded by the server's peer
+     * table, which is why a leak is survivable rather than an incident — but "survivable" is
+     * not a reason to put it in a string that exists to be shown to people. The counters and
+     * handshake time, which are the parts worth reading, are untouched.
+     */
+    private fun redactKeys(raw: String): String =
+        raw.lineSequence().joinToString("\n") { line ->
+            when (line.substringBefore('=').trim()) {
+                "private_key", "preshared_key" -> "${line.substringBefore('=')}=‹redacted›"
+                else -> line
+            }
+        }
 
     companion object {
         /**

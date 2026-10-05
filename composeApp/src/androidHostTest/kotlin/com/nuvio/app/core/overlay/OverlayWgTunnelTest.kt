@@ -4,6 +4,7 @@ import android.app.Application
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import org.junit.runner.RunWith
@@ -158,6 +159,60 @@ class OverlayWgTunnelTest {
         assertIs<TunnelState.Failed>(tunnel.state.value)
     }
 
+    /**
+     * ⚠️ **The test the first on-device run made necessary.** `IpcGet` prints the private key in
+     * full hex, and `status()` is the string the diagnostics row renders — the probe wrote one
+     * straight into a report file and the log, which is how this was noticed.
+     *
+     * The fake returns a realistic `IpcGet` dump, keys and all, and the assertion is that the
+     * counters come through while the key material does not. Testing only that a key is absent
+     * would pass on a status that had been emptied out entirely, so both halves are pinned.
+     */
+    @Test
+    fun `status strips key material but keeps the counters worth reading`() {
+        binding.statusReply = """
+            private_key=1111111111111111111111111111111111111111111111111111111111111111
+            listen_port=38978
+            public_key=2222222222222222222222222222222222222222222222222222222222222222
+            preshared_key=0000000000000000000000000000000000000000000000000000000000000000
+            endpoint=192.168.68.65:51820
+            last_handshake_time_sec=1770000000
+            tx_bytes=444
+            rx_bytes=0
+        """.trimIndent()
+
+        val status = tunnel().status()
+
+        assertFalse(status.contains("1111111111111111111111111111111111111111111111111111111111111111"), "the private key must never leave `status()`")
+        assertFalse(status.contains("0000000000000000000000000000000000000000000000000000000000000000"), "the preshared key line must go too")
+
+        // The parts that are actually worth reading have to survive, or the redaction has
+        // simply broken the diagnostic it exists to serve.
+        assertContains(status, "tx_bytes=444")
+        assertContains(status, "rx_bytes=0")
+        assertContains(status, "endpoint=192.168.68.65:51820")
+        assertContains(status, "listen_port=38978")
+    }
+
+    /** The same string reaches callers through `up()`, which captures it for the state. */
+    @Test
+    fun `the status captured by up is redacted too`() {
+        binding.statusReply = """
+            private_key=3333333333333333333333333333333333333333333333333333333333333333
+            tx_bytes=148
+        """.trimIndent()
+
+        val state = tunnel().up(
+            endpoint = "192.168.68.65:51820",
+            serverPublicKeyBase64 = PUBLISHED_SERVER_KEY_B64,
+            localCidr = "10.77.0.9/32",
+        )
+
+        val up = assertIs<TunnelState.Up>(state)
+        assertFalse(up.status.contains("3333333333333333333333333333333333333333333333333333333333333333"))
+        assertContains(up.status, "tx_bytes=148")
+    }
+
     @Test
     fun `status reports the failure instead of throwing`() {
         binding.failStatusWith = IllegalStateException("device is gone")
@@ -245,6 +300,9 @@ private class RecordingBinding : OverlayWgBinding {
     var failDownWith: Throwable? = null
     var failStatusWith: Throwable? = null
 
+    /** What the binding reports; a realistic `IpcGet` dump where a test needs one. */
+    var statusReply: String = "handshake=1.2s rx=0 tx=0"
+
     override fun up(
         privateKeyHex: String,
         peerPublicKeyHex: String,
@@ -267,7 +325,7 @@ private class RecordingBinding : OverlayWgBinding {
 
     override fun status(): String {
         failStatusWith?.let { throw it }
-        return "handshake=1.2s rx=0 tx=0"
+        return statusReply
     }
 
     override fun generateKeypair(): OverlayWgKeypair {
