@@ -238,6 +238,7 @@ internal object OverlayLocalDiscovery {
         // A candidate the advert named is not necessarily a server that answers.
         val live = withContext(Dispatchers.IO) { candidates.filter { isReachable(it.address) } }
         val addresses = live.map { it.address }.distinctBy { it.hostAddress }
+        Log.d(TAG, "Browse: ${candidates.size} candidate(s), ${live.size} reachable on $EDGE_PORT")
 
         when {
             addresses.isEmpty() ->
@@ -301,6 +302,7 @@ internal object OverlayLocalDiscovery {
                 Log.w(TAG, "Discovery failed to stop: $errorCode")
             }
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                Log.d(TAG, "onServiceFound: '${serviceInfo.serviceName}'")
                 queue.trySend(serviceInfo)
             }
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
@@ -334,13 +336,14 @@ internal object OverlayLocalDiscovery {
         found.values.toList()
     }
 
-    private suspend fun resolve(nsd: NsdManager, info: NsdServiceInfo): Candidate? =
-        withTimeoutOrNull(RESOLVE_TIMEOUT_MS) {
+    private suspend fun resolve(nsd: NsdManager, info: NsdServiceInfo): Candidate? {
+        val resolved = withTimeoutOrNull(RESOLVE_TIMEOUT_MS) {
             suspendCancellableCoroutine { continuation ->
                 nsd.resolveService(
                     info,
                     object : NsdManager.ResolveListener {
                         override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                            Log.d(TAG, "onResolveFailed: '${serviceInfo.serviceName}' code=$errorCode")
                             if (continuation.isActive) continuation.resume(null)
                         }
 
@@ -353,10 +356,21 @@ internal object OverlayLocalDiscovery {
                 )
             }
         }
+        // Distinguishes "the resolver never came back" from "it came back with nothing
+        // usable" -- both used to arrive here as a bare null, which is why a browse that
+        // saw a perfectly good advert could report finding nothing with no trace at all.
+        if (resolved == null) Log.d(TAG, "Resolve gave no candidate for '${info.serviceName}'")
+        return resolved
+    }
 
     private fun candidateOf(info: NsdServiceInfo): Candidate? {
-        val address = addressesOf(info).firstOrNull { it is Inet4Address && it.isUsableLanAddress() }
-            ?: return null
+        val addresses = addressesOf(info)
+        Log.d(TAG, "Resolved '${info.serviceName}': ${addresses.map { it.hostAddress }}")
+        val address = addresses.firstOrNull { it is Inet4Address && it.isUsableLanAddress() }
+        if (address == null) {
+            Log.d(TAG, "No usable IPv4 address for '${info.serviceName}'")
+            return null
+        }
         return Candidate(
             address = address,
             serviceName = info.serviceName,
