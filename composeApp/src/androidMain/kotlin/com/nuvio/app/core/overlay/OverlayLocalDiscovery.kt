@@ -38,7 +38,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 private const val TAG = "OverlayLocalDiscovery"
@@ -73,6 +72,11 @@ internal object OverlayLocalDiscovery {
      */
     private const val EDGE_PORT = 443
 
+    /**
+     * The **maximum** a browse may take — not the time it always takes. The browse is cut
+     * short as soon as a candidate answers the liveness gate (see [collectCandidates]), so
+     * this bounds a *silent* network rather than taxing a responsive one.
+     */
     private const val BROWSE_WINDOW_MS = 6_000L
     private const val RESOLVE_TIMEOUT_MS = 3_000L
     private const val LIVENESS_TIMEOUT_MS = 700
@@ -281,8 +285,29 @@ internal object OverlayLocalDiscovery {
         LocalServerState.update(LocalServerStatus.Searching)
 
         val multicastLock = acquireMulticastLock(context)
+        // Written only by the single browse worker, read after it has been joined, so no
+        // lock is needed. Every entry is a *distinct* address -- the worker dedupes.
+        val verified = mutableListOf<Candidate>()
         val candidates = try {
-            collectCandidates(nsd)
+            collectCandidates(nsd) { candidate ->
+                verified += candidate
+                if (verified.size == 1) {
+                    // ⚠️ **The cold-launch win, and it is worth seconds.** This pin used to
+                    // wait for the whole browse window, so it landed at t≈6 s even though
+                    // mDNS resolved the server in ~180 ms. Every request the app fires at
+                    // process start had by then already gone to the WAN address and hung
+                    // for its full 10 s timeout -- and nothing re-drove it, because the
+                    // failure is a request timeout, not a retryable route failure. Measured
+                    // on device 2026-10-05: launch to usable was **62 s**.
+                    pinCandidate(localServerHosts().ifEmpty { hosts }, candidate)
+                } else {
+                    // Two servers on one LAN is a real situation with no honest tiebreak:
+                    // the adverts carry no identity to choose between them. Picking
+                    // arbitrarily would be worse than not choosing, so the pin placed just
+                    // above is revoked and the app falls back to the public edge.
+                    publish(LocalServerStatus.Unavailable("More than one server on this network"))
+                }
+            }
         } catch (cancellation: CancellationException) {
             // Never swallowed: continuing to publish after cancellation would leave a
             // pin behind that the caller believes it cancelled.
@@ -294,59 +319,57 @@ internal object OverlayLocalDiscovery {
             releaseMulticastLock(multicastLock)
         }
 
-        // A candidate the advert named is not necessarily a server that answers.
-        val live = withContext(Dispatchers.IO) { candidates.filter { isReachable(it.address) } }
-        // The liveness probe is a *preference*, not a veto. A probe that fails must not
-        // throw away a discovery the browse actually made: the pin is pin-first, so a
-        // candidate that turns out to be dead costs one failed connect and the app falls
-        // back to the public edge, whereas *discarding* the candidate means the tier does
-        // nothing at all. Observed on device 2026-10-05 -- the probe timed out on a LAN
-        // the app's own client was reaching in 2.6 ms, and the resulting empty pin
-        // silently disabled discovery everywhere.
-        val verified = live.map { it.address }.distinctBy { it.hostAddress }
-        val addresses = verified.ifEmpty {
-            candidates.map { it.address }.distinctBy { it.hostAddress }.also {
-                if (it.isNotEmpty()) {
-                    Log.w(TAG, "Nothing passed the $EDGE_PORT liveness gate; pinning anyway: $it")
-                }
-            }
-        }
-        Log.d(TAG, "Browse: ${candidates.size} candidate(s), ${live.size} reachable on $EDGE_PORT")
+        Log.d(TAG, "Browse: ${candidates.size} candidate(s), ${verified.size} reachable on $EDGE_PORT")
 
+        // Already decided, from this same information, while the browse was still running.
+        // Re-deciding here could only undo that -- and would undo it *later*, after the app
+        // had begun using the pin.
+        if (verified.isNotEmpty()) return@withLock
+
+        // Nothing answered the liveness gate. The probe is a *preference*, not a veto: a
+        // probe that fails must not throw away a discovery the browse actually made. The
+        // pin is pin-first, so a candidate that turns out to be dead costs one failed
+        // connect and the app falls back to the public edge, whereas *discarding* the
+        // candidate means the tier does nothing at all. Observed on device 2026-10-05 --
+        // the probe timed out on a LAN the app's own client was reaching in 2.6 ms, and
+        // the resulting empty pin silently disabled discovery everywhere.
+        val fallback = candidates.map { it.address }.distinctBy { it.hostAddress }
         when {
-            addresses.isEmpty() ->
+            fallback.isEmpty() ->
                 publish(LocalServerStatus.Unavailable("No server found on this network"))
 
-            // Two servers on one LAN is a real situation with no honest tiebreak: the
-            // adverts carry no identity to choose between them. Picking arbitrarily
-            // would be worse than not choosing, so we fall back to the public edge.
-            addresses.size > 1 ->
+            // The same ambiguity, reached from the probe-less path.
+            fallback.size > 1 ->
                 publish(LocalServerStatus.Unavailable("More than one server on this network"))
 
             else -> {
-                // Prefer the candidate that answered the probe, but fall back to the one
-                // the browse found when nothing answered it (see above).
-                val target = addresses.single()
-                val candidate = live.firstOrNull { it.address == target }
-                    ?: candidates.first { it.address == target }
-                // ⚠️ Re-derive, do not reuse `hosts` from the top of this function: that
-                // value is 6 s old by now (BROWSE_WINDOW_MS), and the addon catalogue —
-                // where most server hosts live — loads inside that window. Reading the
-                // stale set is what pinned 3 hosts on 2026-10-05 while the addons were
-                // already in state. See `observeAddonChanges`.
-                val pinHosts = localServerHosts().ifEmpty { hosts }
-                pinnedAddress.value = candidate.address
-                OverlayPinRegistry.pin(pinHosts, candidate.address)
-                LocalServerState.update(
-                    LocalServerStatus.Found(
-                        address = candidate.address.hostAddress.orEmpty(),
-                        serviceName = candidate.serviceName,
-                        hostName = candidate.hostName,
-                        version = candidate.version,
-                    ),
-                )
+                val target = fallback.single()
+                Log.w(TAG, "Nothing passed the $EDGE_PORT liveness gate; pinning anyway: $target")
+                pinCandidate(localServerHosts().ifEmpty { hosts }, candidates.first { it.address == target })
             }
         }
+    }
+
+    /**
+     * Publishes [candidate] as the pinned server.
+     *
+     * ⚠️ The host set is **re-derived** here, never reused from the top of [refresh]: the
+     * addon catalogue — where most server hosts live — loads asynchronously and may or may
+     * not have landed by now. Pinning the stale set is what left 3 hosts pinned on
+     * 2026-10-05 while the addons were already in state. A widening *after* this call is
+     * covered by [observeAddonChanges], which re-pins when the host set changes.
+     */
+    private fun pinCandidate(hosts: Set<String>, candidate: Candidate) {
+        pinnedAddress.value = candidate.address
+        OverlayPinRegistry.pin(hosts, candidate.address)
+        LocalServerState.update(
+            LocalServerStatus.Found(
+                address = candidate.address.hostAddress.orEmpty(),
+                serviceName = candidate.serviceName,
+                hostName = candidate.hostName,
+                version = candidate.version,
+            ),
+        )
     }
 
     private fun publish(status: LocalServerStatus) {
@@ -369,15 +392,26 @@ internal object OverlayLocalDiscovery {
     )
 
     /**
-     * Browses for [BROWSE_WINDOW_MS] and returns what resolved.
+     * Browses for up to [BROWSE_WINDOW_MS] and returns everything that resolved.
      *
      * `resolveService` handles one service at a time and throws if re-entered, so
      * found services are queued to a single worker rather than resolved inline.
      * `onServiceFound`/`onServiceLost` flapping about once a second is *normal* with
-     * Avahi, so nothing here treats a single event as authoritative — the window is
-     * what decides, and a late re-find simply overwrites the candidate.
+     * Avahi, so nothing here treats a single event as authoritative — a late re-find
+     * simply overwrites the candidate.
+     *
+     * ⚠️ **[onVerified] is what makes the window a maximum instead of an obligatory
+     * wait.** The liveness probe used to run *after* the window closed, so the caller
+     * could not pin until [BROWSE_WINDOW_MS] had elapsed even when mDNS had answered in
+     * ~180 ms. Probing here lets the caller pin on the first server that answers, which
+     * is the difference between a 62 s cold launch and a ~2 s one (measured 2026-10-05).
+     * Only a *distinct* address is reported, so Avahi re-announcing the same server about
+     * once a second cannot read as a second server.
      */
-    private suspend fun collectCandidates(nsd: NsdManager): List<Candidate> = coroutineScope {
+    private suspend fun collectCandidates(
+        nsd: NsdManager,
+        onVerified: (Candidate) -> Unit,
+    ): List<Candidate> = coroutineScope {
         val queue = Channel<NsdServiceInfo>(Channel.UNLIMITED)
         val found = LinkedHashMap<String, Candidate>()
 
@@ -409,7 +443,11 @@ internal object OverlayLocalDiscovery {
             val worker = launch(Dispatchers.IO) {
                 for (info in queue) {
                     val candidate = resolve(nsd, info) ?: continue
-                    found[candidate.address.hostAddress.orEmpty()] = candidate
+                    // `put` returns the previous value: a re-found service is the *same*
+                    // server, so only a genuinely new address may reach the caller.
+                    val isNewAddress =
+                        found.put(candidate.address.hostAddress.orEmpty(), candidate) == null
+                    if (isNewAddress && isReachable(candidate.address)) onVerified(candidate)
                 }
             }
 
