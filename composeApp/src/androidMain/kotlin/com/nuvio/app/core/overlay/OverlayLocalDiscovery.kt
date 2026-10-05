@@ -1,0 +1,324 @@
+package com.nuvio.app.core.overlay
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
+import android.os.Build
+import android.util.Log
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import kotlin.coroutines.resume
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+
+private const val TAG = "OverlayLocalDiscovery"
+
+/**
+ * Finds a boomio server on the local network and pins its address.
+ *
+ * This is the client half of the overlay's Tier 1, and it is deliberately
+ * **tunnel-free**: Android permits one active `VpnService` and that slot belongs to
+ * whichever VPN the user chose, so the app cannot have one. It browses mDNS instead
+ * and repoints the public FQDN's *resolution* — never a URL, because Caddy serves
+ * certificates per named site block and a bare address fails TLS.
+ *
+ * The tier earns its place on a LAN where system DNS does not point at the server:
+ * the server moved, the router changed, a `hosts` entry was lost. At home, where
+ * dnsmasq already resolves, this is a no-op by design.
+ *
+ * A missed path degrades to the public edge rather than breaking, which is why
+ * [LocalServerStatus.Unavailable] never raises and why the pin is additive.
+ */
+internal object OverlayLocalDiscovery {
+
+    /** Must match the A1 publisher exactly (`avahi-publish-service`), or nothing is seen. */
+    private const val SERVICE_TYPE = "_boomio-overlay._udp"
+
+    /**
+     * The edge port, not the advertised SRV port.
+     *
+     * The advert is **tunnel-shaped** — it publishes SRV port 51820 and TXT
+     * `addr=10.77.0.1`/`pubkey=…`, all WireGuard-tier semantics. Tier 1 uses exactly
+     * one field: the SRV target's A record. The port comes from the URL, which is 443.
+     */
+    private const val EDGE_PORT = 443
+
+    private const val BROWSE_WINDOW_MS = 6_000L
+    private const val RESOLVE_TIMEOUT_MS = 3_000L
+    private const val LIVENESS_TIMEOUT_MS = 700
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val browseMutex = Mutex()
+
+    private var appContext: Context? = null
+
+    fun initialize(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    /**
+     * Fire-and-forget [refresh] for callers that are not themselves coroutines —
+     * lifecycle hooks and configuration changes. Never cancelled, so a browse that is
+     * in flight when the app backgrounds still publishes its result.
+     */
+    fun refreshAsync() {
+        scope.launch { refresh() }
+    }
+
+    /** Drops the pin without browsing. Used on network change and on server switch. */
+    fun clear() {
+        OverlayPinRegistry.clear()
+        LocalServerState.update(LocalServerStatus.Idle)
+    }
+
+    /**
+     * Browses and republishes [LocalServerState]. Safe to call repeatedly; concurrent
+     * calls serialise rather than racing the NSD listener.
+     */
+    suspend fun refresh() = browseMutex.withLock {
+        val context = appContext
+        if (context == null) {
+            publish(LocalServerStatus.Unavailable("Local discovery is not initialized"))
+            return@withLock
+        }
+
+        if (!isOnLocalNetwork(context)) {
+            // Cellular cannot see mDNS: it is link-local with TTL 1.
+            publish(LocalServerStatus.Unavailable("Not on Wi-Fi or Ethernet"))
+            return@withLock
+        }
+
+        val nsd = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
+        if (nsd == null) {
+            publish(LocalServerStatus.Unavailable("This device has no service discovery"))
+            return@withLock
+        }
+
+        val hosts = localServerHosts()
+        if (hosts.isEmpty()) {
+            publish(LocalServerStatus.Unavailable("No boomio server is configured"))
+            return@withLock
+        }
+
+        LocalServerState.update(LocalServerStatus.Searching)
+
+        val multicastLock = acquireMulticastLock(context)
+        val candidates = try {
+            collectCandidates(nsd)
+        } catch (error: Exception) {
+            Log.w(TAG, "Browse failed", error)
+            emptyList()
+        } finally {
+            releaseMulticastLock(multicastLock)
+        }
+
+        // A candidate the advert named is not necessarily a server that answers.
+        val live = candidates.filter { isReachable(it.address) }
+        val addresses = live.map { it.address }.distinctBy { it.hostAddress }
+
+        when {
+            addresses.isEmpty() ->
+                publish(LocalServerStatus.Unavailable("No server found on this network"))
+
+            // Two servers on one LAN is a real situation with no honest tiebreak: the
+            // adverts carry no identity to choose between them. Picking arbitrarily
+            // would be worse than not choosing, so we fall back to the public edge.
+            addresses.size > 1 ->
+                publish(LocalServerStatus.Unavailable("More than one server on this network"))
+
+            else -> {
+                val candidate = live.first { it.address == addresses.single() }
+                OverlayPinRegistry.pin(hosts, candidate.address)
+                LocalServerState.update(
+                    LocalServerStatus.Found(
+                        address = candidate.address.hostAddress.orEmpty(),
+                        serviceName = candidate.serviceName,
+                        hostName = candidate.hostName,
+                        version = candidate.version,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun publish(status: LocalServerStatus) {
+        // Any status that is not Found means there is nothing to pin. Clearing here is
+        // the main stale-pin defence: an address from another network is worse than none.
+        if (status !is LocalServerStatus.Found) OverlayPinRegistry.clear()
+        LocalServerState.update(status)
+    }
+
+    private data class Candidate(
+        val address: InetAddress,
+        val serviceName: String?,
+        val hostName: String?,
+        val version: String?,
+    )
+
+    /**
+     * Browses for [BROWSE_WINDOW_MS] and returns what resolved.
+     *
+     * `resolveService` handles one service at a time and throws if re-entered, so
+     * found services are queued to a single worker rather than resolved inline.
+     * `onServiceFound`/`onServiceLost` flapping about once a second is *normal* with
+     * Avahi, so nothing here treats a single event as authoritative — the window is
+     * what decides, and a late re-find simply overwrites the candidate.
+     */
+    private suspend fun collectCandidates(nsd: NsdManager): List<Candidate> = coroutineScope {
+        val queue = Channel<NsdServiceInfo>(Channel.UNLIMITED)
+        val found = LinkedHashMap<String, Candidate>()
+
+        val listener = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(serviceType: String) = Unit
+            override fun onDiscoveryStopped(serviceType: String) = Unit
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.w(TAG, "Discovery failed to start: $errorCode")
+            }
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+                Log.w(TAG, "Discovery failed to stop: $errorCode")
+            }
+            override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                queue.trySend(serviceInfo)
+            }
+            override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                // Deliberately inert. A lost event is *not* authority to drop a candidate:
+                // Avahi flaps these about once a second, and a real departure is caught by
+                // the liveness gate below, which is the test that cannot be fooled.
+            }
+        }
+
+        var started = false
+        try {
+            nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            started = true
+
+            val worker = launch(Dispatchers.IO) {
+                for (info in queue) {
+                    val candidate = resolve(nsd, info) ?: continue
+                    found[candidate.address.hostAddress.orEmpty()] = candidate
+                }
+            }
+
+            delay(BROWSE_WINDOW_MS)
+            queue.close()
+            worker.join()
+        } finally {
+            // Calling stopServiceDiscovery before onDiscoveryStarted throws, hence `started`.
+            if (started) runCatching { nsd.stopServiceDiscovery(listener) }
+                .onFailure { Log.w(TAG, "stopServiceDiscovery failed", it) }
+        }
+
+        found.values.toList()
+    }
+
+    private suspend fun resolve(nsd: NsdManager, info: NsdServiceInfo): Candidate? =
+        withTimeoutOrNull(RESOLVE_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                nsd.resolveService(
+                    info,
+                    object : NsdManager.ResolveListener {
+                        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                            if (continuation.isActive) continuation.resume(null)
+                        }
+
+                        override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                            if (continuation.isActive) {
+                                continuation.resume(candidateOf(serviceInfo))
+                            }
+                        }
+                    },
+                )
+            }
+        }
+
+    private fun candidateOf(info: NsdServiceInfo): Candidate? {
+        val address = addressesOf(info).firstOrNull { it is Inet4Address && it.isUsableLanAddress() }
+            ?: return null
+        return Candidate(
+            address = address,
+            serviceName = info.serviceName,
+            hostName = runCatching { info.host?.hostName }.getOrNull(),
+            version = attributeVersion(info),
+        )
+    }
+
+    /**
+     * `getHost()` returns a single [InetAddress] and is the only form before API 34;
+     * `getHostAddresses()` was added in 34. Read the older one first, then widen.
+     */
+    private fun addressesOf(info: NsdServiceInfo): List<InetAddress> {
+        val addresses = mutableListOf<InetAddress>()
+        runCatching { info.host }.getOrNull()?.let { addresses += it }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            runCatching { info.hostAddresses }.getOrNull()?.let { addresses += it }
+        }
+        return addresses
+    }
+
+    private fun attributeVersion(info: NsdServiceInfo): String? = runCatching {
+        info.attributes?.get("v")?.toString(Charsets.UTF_8)
+    }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun InetAddress.isUsableLanAddress(): Boolean =
+        !isLoopbackAddress && !isMulticastAddress && !isAnyLocalAddress && !isLinkLocalAddress
+
+    private suspend fun isReachable(address: InetAddress): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(address, EDGE_PORT), LIVENESS_TIMEOUT_MS)
+                true
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun isOnLocalNetwork(context: Context): Boolean {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        val capabilities = manager.activeNetwork?.let { manager.getNetworkCapabilities(it) }
+            ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+    }
+
+    /**
+     * The single most-recommended fix for Avahi services not being found. Held for one
+     * browse and released in a `finally` — never long-lived, which is why reception is
+     * foreground-scoped.
+     */
+    private fun acquireMulticastLock(context: Context): WifiManager.MulticastLock? {
+        val permission = context.checkSelfPermission(Manifest.permission.CHANGE_WIFI_MULTICAST_STATE)
+        // A denial degrades to "browse without the lock", never a crash.
+        if (permission != PackageManager.PERMISSION_GRANTED) return null
+        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            ?: return null
+        return runCatching {
+            wifi.createMulticastLock("boomio-overlay-discovery").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }.getOrNull()
+    }
+
+    private fun releaseMulticastLock(lock: WifiManager.MulticastLock?) {
+        if (lock == null) return
+        runCatching { if (lock.isHeld) lock.release() }
+            .onFailure { Log.w(TAG, "MulticastLock release failed", it) }
+    }
+}
