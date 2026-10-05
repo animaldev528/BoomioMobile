@@ -62,6 +62,34 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val overlayAddr: Property<String>
 
+    /**
+     * Absolute URL of the loopback HTTP CONNECT relay the app runs for its own userspace
+     * WireGuard tunnel, e.g. `http://127.0.0.1:8100`.
+     *
+     * This is the one lever that reaches **libmpv**. Every other engine resolves through the
+     * app's DNS seam, but libmpv resolves inside libcurl's `getaddrinfo`, which no application
+     * can hook — so a proxy is the only way it participates in the overlay.
+     *
+     * Blank by default, and blank means *no option is set at all*, so a build without
+     * `BOOMIO_OVERLAY_PROXY` behaves exactly as one built before this seam existed.
+     */
+    @get:Input
+    abstract val overlayProxy: Property<String>
+
+    /**
+     * Playback engine a fresh install resolves to, e.g. `Libmpv`.
+     *
+     * Exists because `AndroidPlaybackEngine.Auto` resolves to ExoPlayer, so an ordinary
+     * play exercises the wrong engine — and the S-U2 spike reads an *empty* proxy log as a
+     * negative when it is really the wrong engine running. Blank (the default) leaves the
+     * existing fallback alone, so this is inert in every normal build.
+     *
+     * It only supplies the *default*: it is consulted where the stored setting is absent,
+     * so a user who picks an engine in Settings still wins.
+     */
+    @get:Input
+    abstract val overlayEngine: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -142,6 +170,8 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object BoomioOverlayConfig {
                 |    const val ADDR = "${overlayAddr.get()}"
+                |    const val PROXY = "${overlayProxy.get()}"
+                |    const val ENGINE = "${overlayEngine.get()}"
                 |}
                 """.trimMargin()
             )
@@ -387,6 +417,8 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     companionBaseUrl.set(runtimeConfigValue("BOOMIO_COMPANION_URL"))
     iptvBaseUrl.set(runtimeConfigValue("BOOMIO_IPTV_URL"))
     overlayAddr.set(runtimeConfigValue("BOOMIO_OVERLAY_ADDR"))
+    overlayProxy.set(runtimeConfigValue("BOOMIO_OVERLAY_PROXY"))
+    overlayEngine.set(runtimeConfigValue("BOOMIO_OVERLAY_ENGINE"))
 }
 
 tasks.withType<KotlinCompilationTask<*>>().configureEach {

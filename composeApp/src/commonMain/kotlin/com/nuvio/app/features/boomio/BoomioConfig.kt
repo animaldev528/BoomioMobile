@@ -69,6 +69,36 @@ object BoomioConfig {
      */
     var overlayServerAddress: String = BoomioOverlayConfig.ADDR
 
+    /**
+     * Absolute URL of the loopback HTTP CONNECT relay this app runs for its own userspace
+     * WireGuard tunnel, e.g. `http://127.0.0.1:8100`. Blank (the default) means no relay:
+     * every engine dials directly, exactly as it does today.
+     *
+     * Only libmpv actually needs this. The OkHttp and Ktor clients can be pointed at the
+     * tunnel through the DNS seam, but libmpv resolves inside libcurl's `getaddrinfo`, which
+     * is not hookable from the application — a proxy is the only way in.
+     *
+     * Sourced from `BOOMIO_OVERLAY_PROXY` in `local.properties` (via the generated
+     * [BoomioOverlayConfig]).
+     */
+    var overlayProxyUrl: String = BoomioOverlayConfig.PROXY
+
+    /**
+     * Playback engine a fresh install should resolve to, or `null` for "leave it alone".
+     *
+     * `AndroidPlaybackEngine.Auto` resolves to ExoPlayer, so an ordinary play never touches
+     * libmpv — which matters because the S-U2 spike's oracle is a proxy log that only
+     * libmpv can write to. Without this, a *correct* build looks like a failed spike.
+     *
+     * It supplies the **default only**: the caller consults it where the stored setting is
+     * absent, so an engine chosen in Settings still wins. Blank (the default) returns null
+     * and every normal build behaves exactly as before.
+     *
+     * Sourced from `BOOMIO_OVERLAY_ENGINE` (via the generated [BoomioOverlayConfig]).
+     */
+    fun overlayEngineDefault(): String? =
+        BoomioOverlayConfig.ENGINE.trim().takeIf { it.isNotEmpty() }
+
     /** True when the companion seam is configured ([companionBaseUrl] is set). */
     fun companionEnabled(): Boolean = companionBaseUrl.isNotBlank()
 

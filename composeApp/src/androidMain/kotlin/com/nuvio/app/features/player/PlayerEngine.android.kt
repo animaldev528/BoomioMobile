@@ -29,6 +29,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import kotlinx.coroutines.runBlocking
+import com.nuvio.app.features.boomio.BoomioConfig
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.getString
 import androidx.lifecycle.LifecycleEventObserver
@@ -1296,6 +1297,14 @@ private class NuvioLibmpvView(
         mpv.setOptionString("demuxer-max-bytes", "${libmpvCacheBytes()}").logIfMpvError("demuxer-max-bytes")
         mpv.setOptionString("demuxer-max-back-bytes", "${libmpvCacheBytes()}").logIfMpvError("demuxer-max-back-bytes")
         mpv.setOptionString("vd-lavc-film-grain", "cpu")
+        // The overlay relay, when one is configured. libmpv is the one engine the app's DNS
+        // seam cannot reach — it resolves inside libcurl's getaddrinfo — so pointing it at a
+        // proxy is the only way it joins the overlay. Blank (the default) sets NO option at
+        // all, so a build without BOOMIO_OVERLAY_PROXY is byte-for-byte the old build.
+        BoomioConfig.overlayProxyUrl.trim().takeIf { it.isNotEmpty() }?.let { proxy ->
+            mpv.setOptionString("http-proxy", proxy).logIfMpvError("http-proxy")
+            Log.i(TAG, "libmpv http-proxy=$proxy")
+        }
         mpv.setPropertyBoolean("keep-open", true)
         mpv.setPropertyBoolean("input-default-bindings", true)
         mpv.setPropertyBoolean("audio-fallback-to-null", true)
