@@ -11,6 +11,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.network.ServerConfigurationStorage
+import com.nuvio.app.core.overlay.OverlayEnrollment
 import com.nuvio.app.core.overlay.OverlayEndpointDiscovery
 import com.nuvio.app.core.overlay.OverlayLocalDiscovery
 import com.nuvio.app.core.overlay.OverlayRelay
@@ -129,6 +130,13 @@ open class MainActivity : AppCompatActivity() {
         // freeze the state at `Down` forever. `DeferredTunnelDialer` is what makes the
         // relay safe to start first — and it starts before the ladder has walked anything.
         OverlaySession.initialize(applicationContext)
+        // Last of the overlay group, and it has to be: it needs the keypair the tunnel
+        // created (it enrols *as* that public key), the ladder it nudges via `offerManual`
+        // once an address arrives, and the companion session it authenticates with. This is
+        // the piece that ends the build-time constants — before it, a device's own overlay
+        // address (`BOOMIO_OVERLAY_LOCAL_CIDR`) was fixed at compile time and the second
+        // client on an overlay could never be right.
+        OverlayEnrollment.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)
