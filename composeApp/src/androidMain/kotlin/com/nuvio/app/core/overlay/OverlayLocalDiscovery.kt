@@ -237,7 +237,21 @@ internal object OverlayLocalDiscovery {
 
         // A candidate the advert named is not necessarily a server that answers.
         val live = withContext(Dispatchers.IO) { candidates.filter { isReachable(it.address) } }
-        val addresses = live.map { it.address }.distinctBy { it.hostAddress }
+        // The liveness probe is a *preference*, not a veto. A probe that fails must not
+        // throw away a discovery the browse actually made: the pin is pin-first, so a
+        // candidate that turns out to be dead costs one failed connect and the app falls
+        // back to the public edge, whereas *discarding* the candidate means the tier does
+        // nothing at all. Observed on device 2026-10-05 -- the probe timed out on a LAN
+        // the app's own client was reaching in 2.6 ms, and the resulting empty pin
+        // silently disabled discovery everywhere.
+        val verified = live.map { it.address }.distinctBy { it.hostAddress }
+        val addresses = verified.ifEmpty {
+            candidates.map { it.address }.distinctBy { it.hostAddress }.also {
+                if (it.isNotEmpty()) {
+                    Log.w(TAG, "Nothing passed the $EDGE_PORT liveness gate; pinning anyway: $it")
+                }
+            }
+        }
         Log.d(TAG, "Browse: ${candidates.size} candidate(s), ${live.size} reachable on $EDGE_PORT")
 
         when {
@@ -251,7 +265,11 @@ internal object OverlayLocalDiscovery {
                 publish(LocalServerStatus.Unavailable("More than one server on this network"))
 
             else -> {
-                val candidate = live.first { it.address == addresses.single() }
+                // Prefer the candidate that answered the probe, but fall back to the one
+                // the browse found when nothing answered it (see above).
+                val target = addresses.single()
+                val candidate = live.firstOrNull { it.address == target }
+                    ?: candidates.first { it.address == target }
                 OverlayPinRegistry.pin(hosts, candidate.address)
                 LocalServerState.update(
                     LocalServerStatus.Found(
@@ -400,12 +418,24 @@ internal object OverlayLocalDiscovery {
         !isLoopbackAddress && !isMulticastAddress && !isAnyLocalAddress && !isLinkLocalAddress
 
     /** Blocking; the caller runs it on an IO dispatcher. */
-    private fun isReachable(address: InetAddress): Boolean = runCatching {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(address, EDGE_PORT), LIVENESS_TIMEOUT_MS)
-            true
-        }
-    }.getOrDefault(false)
+    private fun isReachable(address: InetAddress): Boolean {
+        val startedAt = SystemClock.elapsedRealtime()
+        return runCatching {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(address, EDGE_PORT), LIVENESS_TIMEOUT_MS)
+                true
+            }
+        }.onFailure {
+            // This used to be swallowed, which is why a gate that failed on *every* run
+            // was invisible: the browse reported "found nothing" and nothing said why.
+            Log.w(
+                TAG,
+                "Liveness probe to ${address.hostAddress}:$EDGE_PORT failed after " +
+                    "${SystemClock.elapsedRealtime() - startedAt}ms",
+                it,
+            )
+        }.getOrDefault(false)
+    }
 
     private fun isOnLocalNetwork(context: Context): Boolean {
         val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
