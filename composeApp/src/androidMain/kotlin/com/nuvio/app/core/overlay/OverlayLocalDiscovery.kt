@@ -4,23 +4,32 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
+import com.nuvio.app.core.network.ServerConfigurationRepository
+import com.nuvio.app.core.sync.AppForegroundMonitor
+import com.nuvio.app.core.sync.AppVisibility
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import kotlin.coroutines.resume
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -64,13 +73,90 @@ internal object OverlayLocalDiscovery {
     private const val RESOLVE_TIMEOUT_MS = 3_000L
     private const val LIVENESS_TIMEOUT_MS = 700
 
+    /**
+     * How long a browse result is trusted. Re-browsing on every foreground would be
+     * pointless traffic on a network that has not changed; the network callback below
+     * is what catches the case that actually matters.
+     */
+    private const val RESULT_TTL_MS = 5 * 60 * 1000L
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val browseMutex = Mutex()
 
     private var appContext: Context? = null
 
+    /** Elapsed-realtime of the last browse *attempt*; a clock change cannot confuse it. */
+    @Volatile
+    private var lastBrowsedAtMs = 0L
+
+    private var lifecycleStarted = false
+
     fun initialize(context: Context) {
         appContext = context.applicationContext
+        // Idempotent: onCreate can run again after a configuration-forced restart, and
+        // a second set of observers would double every browse.
+        if (lifecycleStarted) return
+        lifecycleStarted = true
+        observeForeground()
+        observeNetworkChanges()
+        observeServerChanges()
+    }
+
+    /** Browses on foreground, at most once per [RESULT_TTL_MS]. */
+    private fun observeForeground() {
+        scope.launch {
+            AppForegroundMonitor.events().collect { visibility ->
+                if (visibility != AppVisibility.Foreground) return@collect
+                if (SystemClock.elapsedRealtime() - lastBrowsedAtMs < RESULT_TTL_MS) return@collect
+                refresh()
+            }
+        }
+    }
+
+    /**
+     * Drops the pin the moment the default network changes.
+     *
+     * This is the main stale-pin defence: a LAN address is meaningless on a different
+     * network, and keeping it would point the app at a host that is not there. Waiting
+     * for the next browse to notice would instead fail the *first* request after every
+     * network change.
+     */
+    private fun observeNetworkChanges() {
+        val manager = appContext?.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = onDefaultNetworkChanged()
+            override fun onLost(network: Network) = onDefaultNetworkChanged()
+        }
+        runCatching { manager.registerDefaultNetworkCallback(callback) }
+            .onFailure { Log.w(TAG, "Could not observe network changes", it) }
+    }
+
+    private fun onDefaultNetworkChanged() {
+        clear()
+        lastBrowsedAtMs = 0L
+        refreshAsync()
+    }
+
+    /**
+     * Re-derives the host set when the configured server changes.
+     *
+     * The pin is host-scoped, so switching servers changes what may be pinned at all —
+     * and leaving the old pin in place would apply it to the new server's host.
+     */
+    private fun observeServerChanges() {
+        scope.launch {
+            ServerConfigurationRepository.active
+                .map { it.backendUrl }
+                .distinctUntilChanged()
+                // The value already in the flow at assembly is not a change.
+                .drop(1)
+                .collect {
+                    clear()
+                    lastBrowsedAtMs = 0L
+                    refresh()
+                }
+        }
     }
 
     /**
@@ -93,6 +179,10 @@ internal object OverlayLocalDiscovery {
      * calls serialise rather than racing the NSD listener.
      */
     suspend fun refresh() = browseMutex.withLock {
+        // Stamped on entry, not on success: a browse that finds nothing is still a
+        // browse, and re-running it on every foreground would be pure traffic.
+        lastBrowsedAtMs = SystemClock.elapsedRealtime()
+
         val context = appContext
         if (context == null) {
             publish(LocalServerStatus.Unavailable("Local discovery is not initialized"))
@@ -122,6 +212,10 @@ internal object OverlayLocalDiscovery {
         val multicastLock = acquireMulticastLock(context)
         val candidates = try {
             collectCandidates(nsd)
+        } catch (cancellation: CancellationException) {
+            // Never swallowed: continuing to publish after cancellation would leave a
+            // pin behind that the caller believes it cancelled.
+            throw cancellation
         } catch (error: Exception) {
             Log.w(TAG, "Browse failed", error)
             emptyList()
@@ -130,7 +224,7 @@ internal object OverlayLocalDiscovery {
         }
 
         // A candidate the advert named is not necessarily a server that answers.
-        val live = candidates.filter { isReachable(it.address) }
+        val live = withContext(Dispatchers.IO) { candidates.filter { isReachable(it.address) } }
         val addresses = live.map { it.address }.distinctBy { it.hostAddress }
 
         when {
@@ -279,14 +373,13 @@ internal object OverlayLocalDiscovery {
     private fun InetAddress.isUsableLanAddress(): Boolean =
         !isLoopbackAddress && !isMulticastAddress && !isAnyLocalAddress && !isLinkLocalAddress
 
-    private suspend fun isReachable(address: InetAddress): Boolean = withContext(Dispatchers.IO) {
-        runCatching {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(address, EDGE_PORT), LIVENESS_TIMEOUT_MS)
-                true
-            }
-        }.getOrDefault(false)
-    }
+    /** Blocking; the caller runs it on an IO dispatcher. */
+    private fun isReachable(address: InetAddress): Boolean = runCatching {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(address, EDGE_PORT), LIVENESS_TIMEOUT_MS)
+            true
+        }
+    }.getOrDefault(false)
 
     private fun isOnLocalNetwork(context: Context): Boolean {
         val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager

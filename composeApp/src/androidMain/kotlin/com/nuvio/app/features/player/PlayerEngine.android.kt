@@ -308,6 +308,7 @@ private fun ExoPlayerSurface(
             useYoutubeChunkedPlayback = useYoutubeChunkedPlayback,
             useLongReadTimeout = isLoopbackPlaybackSource(sourceUrl),
             externalSubtitles = externalSubtitles,
+            sourceUrl = sourceUrl,
         )
     }
 

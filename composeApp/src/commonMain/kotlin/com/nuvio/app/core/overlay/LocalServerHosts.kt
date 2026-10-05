@@ -4,10 +4,21 @@ import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.network.isPublicServerHost
 import com.nuvio.app.features.boomio.BoomioConfig
 
-/** The registry host of [url], lowercased, or null when it is blank or unparseable. */
-internal fun hostOf(url: String): String? = runCatching { io.ktor.http.Url(url).host.lowercase() }
-    .getOrNull()
-    ?.takeIf { it.isNotBlank() }
+/**
+ * The registry host of [url], lowercased, or null when it is blank or unparseable.
+ *
+ * ⚠️ The `://` check is load-bearing, not cosmetic. Ktor's `URLBuilder` defaults
+ * `host` to `"localhost"`, so `Url("")` and `Url("nonsense")` both parse
+ * **successfully** into a URL that claims to be localhost. Without the check this
+ * helper hands out `"localhost"` for every blank config value — which is how a blank
+ * URL would have matched a blank fallback and made two servers look like one.
+ */
+internal fun hostOf(url: String): String? {
+    if (!url.contains("://")) return null
+    return runCatching { io.ktor.http.Url(url).host.lowercase() }
+        .getOrNull()
+        ?.takeIf { it.isNotBlank() }
+}
 
 /**
  * The subset of [urls] that may be pinned to a discovered LAN address.

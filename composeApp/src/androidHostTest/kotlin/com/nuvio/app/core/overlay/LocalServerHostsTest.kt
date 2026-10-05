@@ -1,5 +1,6 @@
 package com.nuvio.app.core.overlay
 
+import android.app.Application
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -8,8 +9,13 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+// The repository this test reads is backed by platform storage, so Robolectric is
+// required. The SDK is pinned because the module compiles against SDK 37, which
+// Robolectric does not map — without it the runner fails to pick an SDK at all.
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class)
 class LocalServerHostsTest {
 
     @Test

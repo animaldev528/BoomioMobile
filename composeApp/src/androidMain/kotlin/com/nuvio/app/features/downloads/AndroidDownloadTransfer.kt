@@ -1,5 +1,6 @@
 package com.nuvio.app.features.downloads
 
+import com.nuvio.app.core.network.IPv4FirstDns
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -14,6 +15,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 
 internal val downloadHttpClient = OkHttpClient.Builder()
+    .dns(IPv4FirstDns())
     .connectTimeout(60, TimeUnit.SECONDS)
     .readTimeout(60, TimeUnit.SECONDS)
     .writeTimeout(60, TimeUnit.SECONDS)

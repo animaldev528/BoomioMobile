@@ -39,6 +39,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.nuvio.app.core.network.ServerConfiguration
 import com.nuvio.app.core.network.ServerDiscoveryFailure
+import com.nuvio.app.core.overlay.LocalServerStatusRow
 import com.nuvio.app.core.ui.DialogButton
 import com.nuvio.app.core.ui.DialogButtons
 import com.nuvio.app.core.ui.DialogButtonStyle
@@ -177,6 +178,10 @@ internal fun ServerConnectionSheet(
                 style = MaterialTheme.typography.bodyMedium,
                 color = tokens.colors.textMuted,
             )
+            // Only ever the *found* state here. This sheet is where a user types a server
+            // in, so a failure line would compete with the field they came to use; the
+            // reasons live in Settings, where someone goes specifically to ask.
+            LocalServerStatusRow(modifier = Modifier.padding(top = NuvioTokens.Space.s8))
             Spacer(modifier = Modifier.height(NuvioTokens.Space.s20))
             OutlinedTextField(
                 value = url,

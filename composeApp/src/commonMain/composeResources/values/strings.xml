@@ -380,6 +380,12 @@
     <string name="server_connect_url_placeholder">https://backend.example.com</string>
     <string name="server_connect_action">Check server</string>
     <string name="server_connect_checking">Checking…</string>
+    <!-- Overlay Tier 1 discovery. Found is shown wherever the app talks about servers;
+         the other two only in Settings, where the user asked for the detail. -->
+    <string name="server_local_found">Local server detected — %1$s</string>
+    <string name="server_local_searching">Looking for a server on this network…</string>
+    <string name="server_local_unavailable">No local server on this network (%1$s)</string>
+    <string name="server_local_label">Local server</string>
     <string name="server_review_title">Review custom server</string>
     <string name="server_review_description">The discovery document is valid. Connecting will sign you out of the current server and restart the app. Confirm that this is a server you own or trust.</string>
     <string name="server_review_verified_label">Discovered backend</string>

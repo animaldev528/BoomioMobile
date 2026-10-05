@@ -2,6 +2,7 @@ package com.nuvio.app.features.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -13,8 +14,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nuvio.app.core.overlay.LocalServerState
+import com.nuvio.app.core.overlay.LocalServerStatus
+import com.nuvio.app.core.overlay.LocalServerStatusRow
 import com.nuvio.app.core.ui.DialogButton
 import com.nuvio.app.core.ui.DialogButtons
 import com.nuvio.app.core.ui.DialogButtonStyle
@@ -50,12 +56,38 @@ import nuvio.composeapp.generated.resources.sentry_sent_body
 import nuvio.composeapp.generated.resources.sentry_sent_title
 import nuvio.composeapp.generated.resources.sentry_turn_off
 import nuvio.composeapp.generated.resources.sentry_turn_on
+import nuvio.composeapp.generated.resources.server_local_label
 import org.jetbrains.compose.resources.stringResource
 
 internal fun LazyListScope.advancedSettingsContent(
     isTablet: Boolean,
     rememberLastProfileEnabled: Boolean,
 ) {
+    item {
+        // ⚠️ The whole section is withheld until discovery has something to say. An
+        // `Idle` state would otherwise leave a titled card with nothing in it, which
+        // reads as a broken row rather than as "this device found no local server".
+        val localServer by LocalServerState.status.collectAsStateWithLifecycle()
+        if (localServer !is LocalServerStatus.Idle) {
+            SettingsSection(
+                title = stringResource(Res.string.server_local_label),
+                isTablet = isTablet,
+            ) {
+                SettingsGroup(isTablet = isTablet) {
+                    LocalServerStatusRow(
+                        modifier = Modifier.padding(
+                            horizontal = if (isTablet) 20.dp else 16.dp,
+                            vertical = if (isTablet) 16.dp else 14.dp,
+                        ),
+                        // The opposite of the connect sheet: here the failure reasons are
+                        // the point, because this is where a user comes to ask why the
+                        // app is not using a server they know is on their network.
+                        showUnavailable = true,
+                    )
+                }
+            }
+        }
+    }
     item {
         SettingsSection(
             title = stringResource(Res.string.settings_advanced_section_startup),

@@ -11,6 +11,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.network.ServerConfigurationStorage
+import com.nuvio.app.core.overlay.OverlayLocalDiscovery
 import com.nuvio.app.features.boomio.BoomioSessionRepository
 import com.nuvio.app.features.boomio.BoomioSessionStorage
 import com.nuvio.app.features.boomio.PrivateListeningSession
@@ -99,6 +100,9 @@ open class MainActivity : AppCompatActivity() {
         BoomioSessionRepository.initialize()
         PrivateListeningSession.initialize(applicationContext)
         ServerConfigurationStorage.initialize(applicationContext)
+        // Beside the server configuration because the browse reads the host list from
+        // it. This only stores the context; the browse itself is foreground-triggered.
+        OverlayLocalDiscovery.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)

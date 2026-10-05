@@ -93,13 +93,7 @@ object BoomioSessionRepository {
     private val log = Logger.withTag("BoomioSessionRepository")
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val http = HttpClient {
-        install(HttpTimeout) {
-            requestTimeoutMillis = 15_000
-            connectTimeoutMillis = 10_000
-        }
-        expectSuccess = false
-    }
+    private val http = createBoomioHttpClient()
 
     private val _session = MutableStateFlow<BoomioSession?>(null)
     /** Non-null once linked. Cleared by [unlink] or storage reset. */

@@ -22,6 +22,16 @@ internal object OverlayPinRegistry {
 
     fun snapshot(): Map<String, InetAddress> = pins
 
+    /**
+     * True when [url]'s host is currently pinned.
+     *
+     * This is the gate that decides whether a connection may use a pin at all. A pin
+     * is only ever safe to follow under real certificate validation, so callers that
+     * cannot validate must not consult it — see the two clients in
+     * `PlayerPlaybackNetworking`.
+     */
+    fun isPinnedHost(url: String): Boolean = hostOf(url)?.let { pins.containsKey(it) } == true
+
     /** Pins every host in [hosts] to [address]. Hostnames must already be normalized. */
     fun pin(hosts: Collection<String>, address: InetAddress) {
         if (hosts.isEmpty()) return

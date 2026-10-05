@@ -87,13 +87,7 @@ object WatchPartyRepository {
     private val log = Logger.withTag("WatchPartyRepository")
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val http = HttpClient {
-        install(HttpTimeout) {
-            requestTimeoutMillis = 15_000
-            connectTimeoutMillis = 10_000
-        }
-        expectSuccess = false
-    }
+    private val http = createBoomioHttpClient()
 
     private fun requireSession(): BoomioSession {
         val session = BoomioSessionRepository.session.value
