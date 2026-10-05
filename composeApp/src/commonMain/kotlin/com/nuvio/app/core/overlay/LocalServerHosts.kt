@@ -60,8 +60,13 @@ internal fun localServerHostCandidates(): List<String> = listOf(
  * own configuration already named, so it can only widen the pin to hosts on the **same
  * domain as the server**. A multi-label public suffix (`co.uk`) would over-match; the
  * pin is pin-first, so the cost of an over-match is one failed connect, not a break.
+ *
+ * [OverlayPinRegistry] reuses this at *lookup* time, not only to filter addon hosts.
+ * That is what covers the media-plane hosts (`bss-dav`, `bss-tor`, `nzbdav`, …), which
+ * appear in no configuration and in no manifest — they arrive inside the stream URLs
+ * bsf returns, so no enumeration performed earlier in the session can contain them.
  */
-private fun serverDomainSuffixes(serverHosts: Set<String>): Set<String> = serverHosts
+internal fun serverDomainSuffixes(serverHosts: Set<String>): Set<String> = serverHosts
     .mapNotNull { host ->
         val labels = host.split('.').filter { it.isNotBlank() }
         if (labels.size < 2) null else labels.takeLast(2).joinToString(".")

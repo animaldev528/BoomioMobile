@@ -26,7 +26,10 @@ class IPv4FirstDns(
     private val usePins: Boolean = true,
 ) : Dns {
     override fun lookup(hostname: String): List<InetAddress> {
-        val pin = if (usePins) OverlayPinRegistry.snapshot()[hostname] else null
+        // `lookup`, not a map read: a pin covers the server's whole domain, so a host
+        // that appears in no configuration — a `bss-dav`/`bss-tor` stream URL, learned
+        // only from bsf's response — is still answered with the LAN address.
+        val pin = if (usePins) OverlayPinRegistry.lookup(hostname) else null
 
         val resolved = try {
             delegate.lookup(hostname)

@@ -1,5 +1,6 @@
 package com.nuvio.app.core.network
 
+import android.app.Application
 import com.nuvio.app.core.overlay.OverlayPinRegistry
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -11,7 +12,18 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import okhttp3.Dns
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+// ⚠️ Robolectric is required here, not stylistic. `OverlayPinRegistry.pin()` calls
+// `android.util.Log`, which a plain JVM host test leaves **unmocked** — every test that
+// pins dies with `RuntimeException: Method d in android.util.Log not mocked` before it
+// reaches an assertion, so the pin behaviour would go untested while looking present.
+// The SDK is pinned because the module compiles against SDK 37, which Robolectric does
+// not map. Same treatment as `LocalServerHostsTest` in the overlay package.
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = Application::class)
 class IPv4FirstDnsTest {
 
     private val publicHost = "bsc.tracemonkey.org"
@@ -96,13 +108,48 @@ class IPv4FirstDnsTest {
     }
 
     @Test
-    fun `a pin for one host does not affect another`() {
+    fun `a pin covers every host on the server's domain, including ones learned at runtime`() {
+        // The media plane. `bss-dav` and `bss-tor` arrive inside the stream URLs bsf
+        // returns, so they are in no configuration and in no addon manifest — a pin set
+        // built by enumerating hosts missed them, and the player sat on
+        // `failed to connect to bss-dav.tracemonkey.org/153.68.210.49 after 15000ms`
+        // while the catalogue worked. Matching the domain is what makes the pin complete.
         OverlayPinRegistry.pin(listOf(publicHost), pinned)
         val dns = dnsOf(publicV4)
 
-        val other = dns.lookup("other.tracemonkey.org")
+        val stream = dns.lookup("bss-dav.tracemonkey.org")
 
-        assertEquals(listOf(publicV4), other)
-        assertTrue(other.none { it == pinned })
+        assertEquals(pinned, stream.first())
+        assertTrue(stream.contains(publicV4))
+    }
+
+    @Test
+    fun `a pin never covers a third-party host`() {
+        // Posters are `image.tmdb.org`, two addons are third-party, and Supabase lives
+        // in the cloud. Repointing any of them at a LAN address would simply be wrong.
+        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        val dns = dnsOf(publicV4)
+
+        for (thirdParty in listOf(
+            "image.tmdb.org",
+            "catalog.nuvio.tv",
+            "opensubtitles-v3.strem.io",
+        )) {
+            val result = dns.lookup(thirdParty)
+            assertEquals(listOf(publicV4), result, "$thirdParty must keep resolving publicly")
+            assertTrue(result.none { it == pinned }, "$thirdParty must not be pinned")
+        }
+    }
+
+    @Test
+    fun `a pin does not cover a domain that merely ends with the server's domain`() {
+        // `eviltracemonkey.org` ends with the string `tracemonkey.org` but is a different
+        // domain. The leading `.` in the suffix match is what keeps the two apart.
+        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+
+        val result = dnsOf(publicV4).lookup("eviltracemonkey.org")
+
+        assertEquals(listOf(publicV4), result)
+        assertTrue(result.none { it == pinned })
     }
 }
