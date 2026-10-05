@@ -90,6 +90,34 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val overlayEngine: Property<String>
 
+    /**
+     * The WireGuard **endpoint** the userspace tunnel dials, `host:port` — e.g.
+     * `192.168.68.65:51820` on the LAN or `153.68.210.49:51820` off it.
+     *
+     * ⚠️ Distinct from [overlayAddr], and the distinction is the whole reason this exists.
+     * [overlayAddr] is the address the app's *traffic* takes on the overlay (`10.77.0.1`) and
+     * is what the DNS seam resolves names to; this is where the *tunnel* sends its UDP. They
+     * are different addresses in different planes and conflating them is an easy mistake.
+     *
+     * Blank by default. Blank means the tunnel is never brought up, which is what every
+     * build that is not deliberately testing the overlay wants.
+     */
+    @get:Input
+    abstract val overlayEndpoint: Property<String>
+
+    /**
+     * The **server's** WireGuard public key, base64 — the peer this client handshakes with.
+     *
+     * It is a public key, so it is not a secret; the mDNS advert and the DuckDNS TXT record
+     * both publish the same value (`pk=…`). Baking it here is what lets a debug probe bring a
+     * tunnel up before the discovery ladder (arch. §4.4) exists to fetch it at runtime.
+     *
+     * ⚠️ Base64, not hex — that is the encoding both publication channels use, and the
+     * controller converts to the hex `IpcSet` wants rather than asking the operator to.
+     */
+    @get:Input
+    abstract val overlayPubkey: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -172,6 +200,8 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |    const val ADDR = "${overlayAddr.get()}"
                 |    const val PROXY = "${overlayProxy.get()}"
                 |    const val ENGINE = "${overlayEngine.get()}"
+                |    const val ENDPOINT = "${overlayEndpoint.get()}"
+                |    const val PUBKEY = "${overlayPubkey.get()}"
                 |}
                 """.trimMargin()
             )
@@ -419,6 +449,8 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     overlayAddr.set(runtimeConfigValue("BOOMIO_OVERLAY_ADDR"))
     overlayProxy.set(runtimeConfigValue("BOOMIO_OVERLAY_PROXY"))
     overlayEngine.set(runtimeConfigValue("BOOMIO_OVERLAY_ENGINE"))
+    overlayEndpoint.set(runtimeConfigValue("BOOMIO_OVERLAY_ENDPOINT"))
+    overlayPubkey.set(runtimeConfigValue("BOOMIO_OVERLAY_PUBKEY"))
 }
 
 tasks.withType<KotlinCompilationTask<*>>().configureEach {

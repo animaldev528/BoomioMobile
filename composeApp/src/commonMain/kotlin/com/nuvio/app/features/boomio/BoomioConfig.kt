@@ -99,6 +99,35 @@ object BoomioConfig {
     fun overlayEngineDefault(): String? =
         BoomioOverlayConfig.ENGINE.trim().takeIf { it.isNotEmpty() }
 
+    /**
+     * The WireGuard endpoint the userspace tunnel dials, `host:port` — e.g.
+     * `192.168.68.65:51820` on the LAN, `153.68.210.49:51820` off it. Blank disables the
+     * tunnel, which is the default.
+     *
+     * ⚠️ **Not the same thing as [overlayServerAddress], and the two are easy to confuse.**
+     * That one is `10.77.0.1` — the address the app's *traffic* takes on the overlay, which
+     * is what names resolve to. This one is where the *tunnel's UDP* goes, in the clear, over
+     * whatever network the device is on. Different planes, different addresses.
+     *
+     * In the end state this is **discovered**, not configured — the ladder in architecture
+     * §4.4 tries mDNS, then `boomio-local`, then asks the user. This field is what a debug
+     * build bakes in so the transport can be exercised before that ladder exists.
+     *
+     * Sourced from `BOOMIO_OVERLAY_ENDPOINT` in `local.properties`.
+     */
+    var overlayEndpoint: String = BoomioOverlayConfig.ENDPOINT
+
+    /**
+     * The **server's** WireGuard public key, base64. Public, not secret: the mDNS advert and
+     * the DuckDNS TXT record publish the identical value as `pk=…`.
+     *
+     * Base64 rather than hex because that is what both publication channels use; the
+     * controller converts to the hex `IpcSet` takes, so nothing here has to know.
+     *
+     * Sourced from `BOOMIO_OVERLAY_PUBKEY` in `local.properties`.
+     */
+    var overlayServerPubKey: String = BoomioOverlayConfig.PUBKEY
+
     /** True when the companion seam is configured ([companionBaseUrl] is set). */
     fun companionEnabled(): Boolean = companionBaseUrl.isNotBlank()
 
