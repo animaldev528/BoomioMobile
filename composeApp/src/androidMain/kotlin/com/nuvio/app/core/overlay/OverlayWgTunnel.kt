@@ -300,7 +300,7 @@ private fun base64ToBytes(value: String): ByteArray =
  * misconfiguration, and saying so at the point of configuration is worth far more than the
  * two lines it costs.
  */
-private fun decodeWireGuardKey(value: String): ByteArray? = try {
+internal fun decodeWireGuardKey(value: String): ByteArray? = try {
     base64ToBytes(value).takeIf { it.size == WIREGUARD_KEY_BYTES }
 } catch (t: IllegalArgumentException) {
     null

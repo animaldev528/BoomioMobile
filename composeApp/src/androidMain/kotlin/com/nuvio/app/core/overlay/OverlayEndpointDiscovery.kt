@@ -1,0 +1,524 @@
+package com.nuvio.app.core.overlay
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.SystemClock
+import android.util.Log
+import com.nuvio.app.core.sync.AppForegroundMonitor
+import com.nuvio.app.core.sync.AppVisibility
+import com.nuvio.app.features.boomio.BoomioConfig
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+
+private const val TAG = "OverlayEndpointDiscovery"
+
+/**
+ * How long the reachability gate waits for a TCP connect, in milliseconds.
+ *
+ * ⚠️ **File-level, not a member of the object below**, because `isReachable` is a free function
+ * at the bottom of this file — the gate has to be callable from `resolve()` without dragging the
+ * object's state along, and a constant declared inside the object is not visible from there.
+ *
+ * 900 ms is deliberately shorter than rung 2's whole-record budget: the gate may run once per
+ * candidate, so its cost multiplies where the resolver's does not. On a LAN the connect either
+ * completes in single-digit milliseconds or the host is not there — see `OverlayLocalDiscovery`,
+ * where a 2.6 ms LAN round trip was once mistaken for a dead server by a probe that waited too
+ * briefly to be meaningful and too long to be free.
+ */
+private const val GATE_TIMEOUT_MS = 900
+
+/**
+ * The endpoint ladder: mDNS → `boomio-local` DNS → a person.
+ *
+ * ### Why this is not a convenience
+ *
+ * Architecture §10.7 chose **"no LAN fallback"**: the tunnel is the only route to the server, on
+ * the LAN as much as off it, so when it cannot be brought up the app has nowhere else to go. The
+ * ladder is therefore not an optimisation that makes the app nicer when discovery works — it is
+ * the only thing between a missing mDNS advert and a dead app at home, which is why the failure
+ * state ([OverlayEndpointStatus.NeedsManual]) carries an action rather than a message.
+ *
+ * ### The rungs, and the rule that binds them
+ *
+ * | # | Rung | Yields |
+ * |---|---|---|
+ * | 1 | the mDNS advert `_boomio-overlay._udp` | TXT `pubkey`/`port` + the SRV target's `A` |
+ * | 2 | the `boomio-local` record | an `A` + the same TXT tuple |
+ * | 3 | a person | whatever they typed, plus the server's public key |
+ *
+ * ⚠️ **"Working" means it passed the gate, not that it resolved.** A rung that returns a record
+ * the client cannot reach is *worse* than one that returns nothing, because the ladder would
+ * stop on it: on the LAN the boomio FQDNs resolve publicly to the WAN address and hairpin is
+ * off, so an endpoint that looks fine and routes nowhere is the exact failure §7 describes. Each
+ * candidate is therefore TCP-probed before it is accepted, and the ladder keeps walking rungs
+ * until one answers.
+ *
+ * ⚠️ **The gate is reachability, and the terminal verdict is still the handshake.** A TCP
+ * connect to the edge proves the host is up and its Caddy is listening; it does **not** prove
+ * the UDP port is forwarded or that the server holds this peer's key. Nothing here can prove
+ * that — a WireGuard handshake is the only oracle, and it happens after this object is done. So
+ * the gate is documented as a *preference*, it never rejects a candidate outright (it only
+ * decides the order), and the failure it can miss is a tunnel that comes up against a dead
+ * forward. See `OverlayWgTunnel.up` and `wg show boomio-overlay` for the real check.
+ *
+ * ### What it deliberately does not do
+ *
+ * It does not bring the tunnel up, and it does not touch the relay. U3 owns the wiring; this
+ * object's whole contract is to publish **one endpoint** and say where it came from.
+ */
+internal object OverlayEndpointDiscovery {
+
+    /**
+     * Rung 2's name.
+     *
+     * ⚠️ **The name is the one thing architecture §10.8 leaves open, and this constant is where
+     * that decision lands.** The owner has not yet chosen whether `boomio-local` is published
+     * publicly (resolvable everywhere, unroutable off-LAN, needing the probe below) or only in
+     * the house dnsmasq (NXDOMAIN everywhere else, which is cleaner). **The client does not
+     * care** — both options are a name the platform resolver either answers or does not, and
+     * both are gated on reachability here — so this is one string to change, not a code change.
+     *
+     * It is a single name rather than a list on purpose. Resolving several would multiply rung
+     * 2's budget by the number of misses, and §4.4 requires a miss to stay cheap.
+     */
+    internal const val LOCAL_RECORD = "boomio-local.tracemonkey.org"
+
+    /** The WireGuard port, when nothing published one. */
+    private const val DEFAULT_WG_PORT = OverlayAdvertTuple.DEFAULT_PORT
+
+    /**
+     * Rung 2's whole budget, in and out.
+     *
+     * ⚠️ **This exists because rung 1 already taught the lesson.** The mDNS window used to be an
+     * obligatory wait and cost every cold launch six seconds (`1aa62092`); a DNS timeout on the
+     * same critical path would put it straight back. A miss has to be cheap, so the whole rung —
+     * address, tuple, and CNAME follow — is bounded here and gives up quietly.
+     */
+    private const val RUNG2_BUDGET_MS = 1_200L
+
+    /**
+     * Rung 3's resolution budget, for a person who typed a hostname rather than an address.
+     *
+     * Longer than rung 2's because it is not on the cold path in the same way — by the time
+     * anyone is typing, the app is already running and the wait is a deliberate one they are
+     * watching.
+     */
+    private const val MANUAL_RESOLVE_BUDGET_MS = 1_500L
+
+    /**
+     * The reachability gate's port.
+     *
+     * The **edge**, not the WireGuard port: what is being asked is "is the server there", and a
+     * dead UDP forward is invisible to TCP. The same port and the same reasoning as
+     * `OverlayLocalDiscovery`'s liveness gate.
+     */
+    private const val EDGE_PORT = 443
+
+    /** The same foreground cadence the two pin sources use. */
+    private const val RESULT_TTL_MS = 5 * 60 * 1000L
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val ladderMutex = Mutex()
+
+    private var appContext: Context? = null
+    private var lifecycleStarted = false
+
+    @Volatile
+    private var lastResolvedAtMs = 0L
+
+    /** The endpoint last accepted, so a re-run that finds nothing does not erase a good answer. */
+    @Volatile
+    private var current: OverlayEndpoint? = null
+
+    fun initialize(context: Context) {
+        appContext = context.applicationContext
+        if (lifecycleStarted) return
+        lifecycleStarted = true
+        observeForeground()
+        observeNetworkChanges()
+    }
+
+    /** Re-runs the ladder on foreground, at most once per [RESULT_TTL_MS]. */
+    private fun observeForeground() {
+        scope.launch {
+            AppForegroundMonitor.events()
+                // Same reason as the two pin sources: `events()` installs a lifecycle observer
+                // and Android requires that on the main thread. `flowOn` moves only the
+                // upstream, so the ladder still runs on IO.
+                .flowOn(Dispatchers.Main.immediate)
+                .collect { visibility ->
+                    if (visibility != AppVisibility.Foreground) return@collect
+                    if (SystemClock.elapsedRealtime() - lastResolvedAtMs < RESULT_TTL_MS) return@collect
+                    resolve()
+                }
+        }
+    }
+
+    /**
+     * Re-runs the ladder the moment the network changes.
+     *
+     * ⚠️ **Without the TTL reset this would be a no-op in the case that matters.** The ladder has
+     * a five-minute foreground cadence, and the interesting transition — home Wi-Fi to cellular —
+     * happens well inside it, so the discovery that answers "which endpoint" would not re-run
+     * until long after the answer changed. The endpoint itself is also network-dependent in a way
+     * the overlay address is not: rung 1 yields the *LAN* address, which is meaningless on the
+     * next network.
+     */
+    private fun observeNetworkChanges() {
+        val manager = appContext?.getSystemService(Context.CONNECTIVITY_SERVICE)
+            as? ConnectivityManager ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = onNetworkChanged()
+            override fun onLost(network: Network) = onNetworkChanged()
+        }
+        runCatching { manager.registerDefaultNetworkCallback(callback) }
+            .onFailure { Log.w(TAG, "Could not observe network changes", it) }
+    }
+
+    private fun onNetworkChanged() {
+        lastResolvedAtMs = 0L
+        // The *accepted* endpoint is deliberately kept: it is re-tested by the next run, and
+        // dropping it here would leave the app with no endpoint for the length of a ladder walk.
+        // A tunnel that no longer works fails visibly, which §10.7 chose over a silent fallback.
+        refreshAsync()
+    }
+
+    /** Fire-and-forget [resolve] for lifecycle hooks. */
+    fun refreshAsync() {
+        scope.launch { resolve() }
+    }
+
+    /** The endpoint currently in force, or null when the ladder has not produced one. */
+    fun current(): OverlayEndpoint? = current
+
+    /**
+     * Walks the rungs and publishes the first endpoint that passes the gate.
+     *
+     * Safe to call repeatedly; concurrent calls serialise rather than racing each other into
+     * three simultaneous mDNS browses.
+     */
+    suspend fun resolve(): OverlayEndpointStatus = ladderMutex.withLock {
+        lastResolvedAtMs = SystemClock.elapsedRealtime()
+
+        val context = appContext
+        if (context == null) {
+            return@withLock publish(
+                OverlayEndpointStatus.Unavailable("Endpoint discovery is not initialized"),
+            )
+        }
+
+        OverlayEndpointState.update(OverlayEndpointStatus.Searching)
+
+        // ⚠️ **Every rung is asked, and the gate then picks — the rungs do not short-circuit each
+        // other.** §4.4 is explicit that the ladder stops at the first rung yielding an endpoint
+        // that *works*, and "works" cannot be known until the candidate is in hand. A ladder that
+        // stopped at the first rung that merely *answered* would stop on rung 1's advert and
+        // never learn that the address it names is unreachable — which on the LAN is the normal
+        // way for things to go wrong, since the boomio FQDNs resolve publicly to a WAN address
+        // hairpin cannot reach (§7).
+        val candidates = mutableListOf<OverlayEndpoint>()
+        rung1Mdns()?.let(candidates::add)
+        rung2LocalRecord(context)?.let(candidates::add)
+        rung3Manual()?.let(candidates::add)
+
+        if (candidates.isEmpty()) {
+            return@withLock publish(
+                OverlayEndpointStatus.NeedsManual(
+                    "No boomio server was found — tried mDNS, $LOCAL_RECORD and any saved " +
+                        "address. Enter the server's address to continue.",
+                ),
+            )
+        }
+
+        // ⚠️ **The gate is a blocking connect, so it is pinned to IO explicitly.** `resolve()` is
+        // reachable from `offerManual`, which a settings screen calls from the main thread — and
+        // an un-dispatched `Socket.connect` there is a `NetworkOnMainThreadException` at best and
+        // a frozen UI at worst. Inheriting the caller's dispatcher would make that latent.
+        val working = withContext(Dispatchers.IO) {
+            candidates.firstOrNull { isReachable(it.host, EDGE_PORT) }
+        }
+        working?.let { return@withLock accept(it) }
+
+        // ⚠️ **Nothing answered the gate, so the first candidate is taken anyway** — and this is
+        // the one place the ladder deliberately overrules its own probe. It is the same call
+        // `OverlayLocalDiscovery` makes, and it learned it the hard way: a liveness probe once
+        // timed out on a LAN the app's own client was reaching in 2.6 ms, and because the
+        // candidate was *discarded* rather than merely deprioritised, discovery went silently
+        // dead everywhere. The gate's job is to choose between candidates; it has no business
+        // throwing the last one away.
+        val fallback = candidates.first()
+        Log.w(TAG, "No candidate answered the gate on $EDGE_PORT; taking ${fallback.authority} anyway")
+        accept(fallback)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Rungs
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Rung 1 — the mDNS advert, borrowed from the browse that already ran.
+     *
+     * ⚠️ **It *drives* the browse rather than reading a cache.** `OverlayLocalDiscovery.refresh()`
+     * is mutex-guarded and idempotent, and calling it here is what makes rung 1 honest: the
+     * ladder never stops on an advert that the current network has since invalidated, and it
+     * never opens a *second* browse on the same service, which would double both the multicast
+     * traffic and the six-second window for one answer.
+     *
+     * On a network that is not Wi-Fi or Ethernet the browse returns immediately ("Not on Wi-Fi or
+     * Ethernet") and the advert is cleared, so this costs nothing off-LAN — which is the case
+     * where rung 2 is the one that matters.
+     */
+    private suspend fun rung1Mdns(): OverlayEndpoint? {
+        OverlayLocalDiscovery.refresh()
+        val advert = OverlayLocalDiscovery.lastVerifiedAdvert() ?: return null
+        val key = validServerKeyOrNull(advert.serverPublicKeyBase64)
+        if (key == null) {
+            Log.d(TAG, "Rung 1: advert has no usable pubkey; falling through")
+            return null
+        }
+        return endpointOf(
+            address = advert.address,
+            port = advert.port ?: DEFAULT_WG_PORT,
+            key = key,
+            source = OverlayEndpointSource.MDNS,
+        )
+    }
+
+    /**
+     * Rung 2 — the `boomio-local` record.
+     *
+     * ⚠️ **A record with no `TXT` is not an endpoint, and is not treated as one.** An address
+     * without the server's public key cannot produce a handshake, so accepting it would stop the
+     * ladder one rung early on something that cannot work — the precise failure §4.4 warns about
+     * ("the third record needs the tuple, not just the address"). Falling through to rung 3 is
+     * both safer and more honest: rung 3 carries a key by construction.
+     */
+    private suspend fun rung2LocalRecord(context: Context): OverlayEndpoint? {
+        val resolved = OverlayDnsClient.resolve(context, LOCAL_RECORD, RUNG2_BUDGET_MS) ?: return null
+        val key = validServerKeyOrNull(resolved.tuple.serverPublicKeyBase64)
+        if (key == null) {
+            Log.d(TAG, "Rung 2: '$LOCAL_RECORD' resolved but published no usable key")
+            return null
+        }
+        return endpointOf(
+            address = resolved.address,
+            port = resolved.tuple.port ?: DEFAULT_WG_PORT,
+            key = key,
+            source = OverlayEndpointSource.LOCAL_DNS,
+        )
+    }
+
+    /**
+     * Rung 3 — a person.
+     *
+     * One rung, two sources, because they are one fact: `BoomioConfig.overlayEndpoint` is where a
+     * typed value is *persisted*, and [offerManual] is how it gets there. Splitting "typed just
+     * now" from "typed last week" would produce two states with identical behaviour.
+     *
+     * ⚠️ **The host is resolved to a literal here, before it is published.** The value goes to
+     * `OverlayWgTunnel.up`, which hands it to `IpcSet`'s `endpoint=` verbatim — and whether
+     * wireguard-go's own resolver works inside a gomobile AAR on Android (Go's resolver looks for
+     * an `/etc/resolv.conf` that does not exist there) is unverified. Resolving on this side
+     * removes the question rather than betting on the answer, and it means the endpoint the
+     * tunnel sees is the same one the gate just proved reachable.
+     */
+    private suspend fun rung3Manual(): OverlayEndpoint? {
+        val raw = BoomioConfig.overlayEndpoint.trim()
+        if (raw.isEmpty()) return null
+        val key = validServerKeyOrNull(BoomioConfig.overlayServerPubKey)
+        if (key == null) {
+            Log.d(TAG, "Rung 3: an endpoint is configured but no usable server key is")
+            return null
+        }
+        val authority = parseEndpointAuthority(raw, DEFAULT_WG_PORT) ?: return null
+        val address = resolveHost(authority.first, MANUAL_RESOLVE_BUDGET_MS) ?: return null
+        return OverlayEndpoint(
+            host = address.hostAddress ?: return null,
+            port = authority.second,
+            serverPublicKeyBase64 = key,
+            source = OverlayEndpointSource.MANUAL,
+        )
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The gate, and what happens to a winner
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Builds a candidate from an address the rung already resolved.
+     *
+     * Deliberately **does not gate** — the gate is [resolve]'s, applied across all candidates at
+     * once so it can choose between them. A rung that gated its own candidate could only ever
+     * discard it, which is the mistake the browse already made once.
+     *
+     * ⚠️ **No resolution happens here**: rungs 1 and 2 hold an [InetAddress] already, and
+     * re-resolving a literal on the cold path would be a syscall for nothing.
+     */
+    private fun endpointOf(
+        address: InetAddress,
+        port: Int,
+        key: String,
+        source: OverlayEndpointSource,
+    ): OverlayEndpoint? = OverlayEndpoint(
+        host = address.hostAddress ?: return null,
+        port = port,
+        serverPublicKeyBase64 = key,
+        source = source,
+    )
+
+    private fun accept(endpoint: OverlayEndpoint): OverlayEndpointStatus {
+        current = endpoint
+        // ⚠️ **Written through to `BoomioConfig`, which is the documented end state** — "in the
+        // end state this is *learned*, not configured". The probe and U3's bring-up both read
+        // these fields, so a ladder that only published a flow would leave them on the
+        // build-time value and the tunnel would dial the wrong address while the status said
+        // otherwise. `BoomioConfig` is runtime state, not persisted, so nothing here survives a
+        // process death — which is right: the network may have changed by then.
+        BoomioConfig.overlayEndpoint = endpoint.authority
+        endpoint.serverPublicKeyBase64?.let { BoomioConfig.overlayServerPubKey = it }
+
+        Log.i(TAG, "Endpoint accepted from ${endpoint.source}: ${endpoint.authority}")
+        return publish(OverlayEndpointStatus.Found(endpoint))
+    }
+
+    private fun publish(status: OverlayEndpointStatus): OverlayEndpointStatus {
+        OverlayEndpointState.update(status)
+        return status
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Rung 3's input
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Records a user-supplied endpoint and re-runs the ladder.
+     *
+     * Returns the resulting status so the caller can render it directly: a typed address that
+     * the **gate** cannot reach still becomes `Found`, because preference-not-veto applies to a
+     * human's answer too — they may know something the probe cannot see (a server behind a
+     * forward that is briefly down, a name that only resolves on their network). Only a value
+     * that is not an endpoint at all is rejected, and it returns `NeedsManual` with the reason
+     * rather than throwing.
+     */
+    suspend fun offerManual(rawAuthority: String, serverPublicKeyBase64: String?): OverlayEndpointStatus {
+        val authority = parseEndpointAuthority(rawAuthority, DEFAULT_WG_PORT)
+        if (authority == null) {
+            return publish(
+                OverlayEndpointStatus.NeedsManual(
+                    "\"${rawAuthority.trim()}\" is not an address — expected a host, or host:port.",
+                ),
+            )
+        }
+        val key = validServerKeyOrNull(serverPublicKeyBase64)
+            ?: validServerKeyOrNull(BoomioConfig.overlayServerPubKey)
+        if (key == null) {
+            // The server's key is public and is published by both channels; it is the one field
+            // a user cannot invent, so its absence is named rather than guessed at.
+            return publish(
+                OverlayEndpointStatus.NeedsManual(
+                    "The server's public key is needed as well — it is published by the server's " +
+                        "mDNS advert and its DuckDNS TXT record.",
+                ),
+            )
+        }
+        BoomioConfig.overlayEndpoint = rawAuthority.trim()
+        BoomioConfig.overlayServerPubKey = key
+        return resolve()
+    }
+}
+
+/**
+ * `host:port` → its parts, or null if [raw] is not an address at all.
+ *
+ * Deliberately forgiving about the shapes a person actually pastes — a scheme, a trailing slash,
+ * a path, brackets round an IPv6 literal — and unforgiving about anything that is not an
+ * address. A default is supplied for the port because "the server's address" is how the question
+ * will be asked, and the WireGuard port is a constant of this deployment.
+ *
+ * ⚠️ **Two or more colons and no brackets is read as an address, not as `host:port`.** `::1:51820`
+ * is a valid IPv6 address *and* a plausible IPv4-style address-plus-port, and splitting on that
+ * colon would send the tunnel to a host the user never named. Taking it whole and leaving the
+ * port at the default is the reading that cannot be wrong about *which host*; the port was always
+ * going to be the default anyway, since this deployment has one.
+ *
+ * **A saved value the ladder itself wrote reads back as rung 3.** [accept] publishes a discovered
+ * endpoint into `BoomioConfig`, which is what rung 3 reads, so the next run can present last
+ * run's answer as a manual one. That is accurate in the only sense that matters — it *is* the
+ * configured address now — and it is what makes the rung useful when discovery is transiently
+ * down.
+ */
+internal fun parseEndpointAuthority(raw: String, defaultPort: Int): Pair<String, Int>? {
+    var text = raw.trim()
+    if (text.isEmpty()) return null
+
+    // A pasted URL is the common case, and the scheme is noise here.
+    val scheme = text.indexOf("://")
+    if (scheme > 0) text = text.substring(scheme + 3)
+    text = text.substringBefore('/').trim()
+    if (text.isEmpty()) return null
+
+    if (text.startsWith("[")) {
+        val close = text.indexOf(']')
+        if (close <= 1) return null
+        val host = text.substring(1, close)
+        val rest = text.substring(close + 1)
+        val port = if (rest.startsWith(":")) rest.substring(1).toPortOrNull() ?: return null else defaultPort
+        return host to port
+    }
+
+    val colons = text.count { it == ':' }
+    return when (colons) {
+        0 -> text to defaultPort
+        1 -> {
+            val host = text.substringBefore(':')
+            val port = text.substringAfter(':').toPortOrNull() ?: return null
+            if (host.isEmpty()) null else host to port
+        }
+        // Two or more colons and no brackets: an unbracketed IPv6 literal. Port stays default.
+        else -> text to defaultPort
+    }
+}
+
+/**
+ * A literal address for [host], or null.
+ *
+ * Blocks; callers run it off the main thread and inside a timeout. A value that is already a
+ * literal returns without a resolver round trip — which is the case for everything rungs 1 and 2
+ * produce, so this is only ever really exercised by a person typing a name.
+ */
+internal suspend fun resolveHost(host: String, budgetMs: Long): InetAddress? =
+    withTimeoutOrNull(budgetMs) {
+        withContext(Dispatchers.IO) {
+            runCatching { InetAddress.getByName(host) }
+                .onFailure { Log.d(TAG, "'$host' did not resolve: ${it.message}") }
+                .getOrNull()
+        }
+    }
+
+/** True when a TCP connect to [host]:[port] completes inside [GATE_TIMEOUT_MS]. */
+private fun isReachable(host: String, port: Int): Boolean {
+    val startedAt = SystemClock.elapsedRealtime()
+    return runCatching {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(host, port), GATE_TIMEOUT_MS)
+            true
+        }
+    }.onFailure {
+        Log.w(
+            TAG,
+            "Gate probe to $host:$port failed after ${SystemClock.elapsedRealtime() - startedAt}ms",
+            it,
+        )
+    }.getOrDefault(false)
+}

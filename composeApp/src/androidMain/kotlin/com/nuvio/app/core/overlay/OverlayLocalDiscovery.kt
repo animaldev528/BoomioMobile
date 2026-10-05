@@ -116,6 +116,25 @@ internal object OverlayLocalDiscovery {
      */
     private val pinnedAddress = MutableStateFlow<InetAddress?>(null)
 
+    /**
+     * The last advert this browse **verified**, tuple and all, for the endpoint ladder.
+     *
+     * The browse has always resolved the whole advert and then thrown away everything but the
+     * address; [parseMdnsAdvertTxt] now reads the `pubkey`/`port` it was already receiving.
+     * Publishing it here is what lets rung 1 be free: `OverlayEndpointDiscovery` reads this
+     * instead of opening a *second* NSD browse on the same service, which would double the
+     * multicast traffic and the six-second window for one answer nobody needed twice.
+     *
+     * Cleared with the pin, and for the same reason: an advert from the network the phone has
+     * just left is worse than none. `@Volatile` rather than a flow — one writer, and the reader
+     * is a coroutine that has already awaited the browse.
+     */
+    @Volatile
+    private var lastVerifiedAdvert: OverlayMdnsAdvert? = null
+
+    /** The most recent advert a completed browse verified, or null when nothing is known. */
+    fun lastVerifiedAdvert(): OverlayMdnsAdvert? = lastVerifiedAdvert
+
     fun initialize(context: Context) {
         appContext = context.applicationContext
         // Idempotent: onCreate can run again after a configuration-forced restart, and
@@ -251,6 +270,9 @@ internal object OverlayLocalDiscovery {
     /** Drops the pin without browsing. Used on network change and on server switch. */
     fun clear() {
         pinnedAddress.value = null
+        // The advert goes with the pin. The endpoint ladder reads this, and an advert resolved
+        // on the network the phone has just left names a host that is not on this one.
+        lastVerifiedAdvert = null
         OverlayPinRegistry.clear(LocalServerSource.LAN)
         LocalServerState.update(LocalServerSource.LAN, LocalServerStatus.Idle)
     }
@@ -367,6 +389,16 @@ internal object OverlayLocalDiscovery {
      */
     private fun pinCandidate(hosts: Set<String>, candidate: Candidate) {
         pinnedAddress.value = candidate.address
+        // Published for the endpoint ladder (architecture §4.4 rung 1) — the tuple this browse
+        // has always received and never read. Set here rather than in the browse so it is only
+        // ever an advert that was actually *used*, and so the failure path that clears the pin
+        // clears this with it.
+        lastVerifiedAdvert = OverlayMdnsAdvert(
+            address = candidate.address,
+            serverPublicKeyBase64 = candidate.serverPublicKey,
+            port = candidate.wgPort,
+            serviceName = candidate.serviceName,
+        )
         OverlayPinRegistry.pin(LocalServerSource.LAN, hosts, candidate.address)
         LocalServerState.update(
             LocalServerSource.LAN,
@@ -397,6 +429,15 @@ internal object OverlayLocalDiscovery {
         val serviceName: String?,
         val hostName: String?,
         val version: String?,
+        /**
+         * The advert's `pubkey` and `port` — the WireGuard half of the tuple.
+         *
+         * Null when the advert did not carry them, which is a real case worth representing:
+         * a server older than the tunnel publishes `addr`/`v` and nothing else, and the ladder
+         * must see an unusable candidate rather than a fabricated key.
+         */
+        val serverPublicKey: String? = null,
+        val wgPort: Int? = null,
     )
 
     /**
@@ -506,13 +547,27 @@ internal object OverlayLocalDiscovery {
             Log.d(TAG, "No usable IPv4 address for '${info.serviceName}'")
             return null
         }
+        val tuple = parseMdnsAdvertTxt(attributesOf(info))
+        if (tuple.serverPublicKeyBase64 == null) {
+            // Not fatal to the *pin* — the address is what Tier 1 pins, and it is valid
+            // regardless. It is fatal to the *ladder* rung, which needs the whole tuple, so it
+            // is worth a line: from the server side, an advert missing its key and an advert
+            // nothing ever looked at are indistinguishable.
+            Log.d(TAG, "Advert '${info.serviceName}' carries no usable pubkey; rung 1 cannot use it")
+        }
         return Candidate(
             address = address,
             serviceName = info.serviceName,
             hostName = runCatching { info.host?.hostName }.getOrNull(),
             version = attributeVersion(info),
+            serverPublicKey = validServerKeyOrNull(tuple.serverPublicKeyBase64),
+            wgPort = tuple.port,
         )
     }
+
+    /** `attributes` throws on some platform builds when the record was never resolved. */
+    private fun attributesOf(info: NsdServiceInfo): Map<String, ByteArray>? =
+        runCatching { info.attributes }.getOrNull()
 
     /**
      * `getHost()` returns a single [InetAddress] and is the only form before API 34;

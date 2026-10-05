@@ -11,6 +11,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.network.ServerConfigurationStorage
+import com.nuvio.app.core.overlay.OverlayEndpointDiscovery
 import com.nuvio.app.core.overlay.OverlayLocalDiscovery
 import com.nuvio.app.core.overlay.OverlayRelay
 import com.nuvio.app.core.overlay.OverlayTunnel
@@ -109,6 +110,11 @@ open class MainActivity : AppCompatActivity() {
         // user's WireGuard app has established — and does nothing at all until
         // `BOOMIO_OVERLAY_ADDR` is set.
         OverlayTunnel.initialize(applicationContext)
+        // The endpoint ladder (architecture §4.4): mDNS, then `boomio-local`, then a person. It
+        // is *after* the two above on purpose — rung 1 borrows `OverlayLocalDiscovery`'s browse
+        // rather than opening its own, so the browse has to exist first. Like them it only
+        // stores the context here; the walk is foreground- and network-triggered.
+        OverlayEndpointDiscovery.initialize(applicationContext)
         // The relay every engine has to be pointed at explicitly, because a userspace
         // tunnel captures nothing on its own. Process-scoped and takes no `Context`; it
         // opens no socket at all until `BOOMIO_OVERLAY_ADDR` is set. Deliberately inert
