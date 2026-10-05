@@ -51,6 +51,17 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val iptvBaseUrl: Property<String>
 
+    /**
+     * The server's address on the WireGuard overlay, e.g. `10.77.0.1`. Blank means the
+     * overlay resolver is off, which is the default and the correct one for anyone not
+     * running the overlay.
+     *
+     * An address, not a URL: the app keeps naming the public FQDNs and only changes what
+     * they resolve to, because Caddy selects a site block by name.
+     */
+    @get:Input
+    abstract val overlayAddr: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -119,6 +130,18 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object BoomioIptvConfig {
                 |    const val BASE_URL = "${iptvBaseUrl.get()}"
+                |}
+                """.trimMargin()
+            )
+            // The server's address on the WireGuard overlay. Not a URL: it is what the
+            // public FQDNs above resolve to while the tunnel is up, never what the app
+            // dials. Blank by default, which leaves the overlay resolver inert.
+            resolve("BoomioOverlayConfig.kt").writeText(
+                """
+                |package com.nuvio.app.features.boomio
+                |
+                |object BoomioOverlayConfig {
+                |    const val ADDR = "${overlayAddr.get()}"
                 |}
                 """.trimMargin()
             )
@@ -363,6 +386,7 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     )
     companionBaseUrl.set(runtimeConfigValue("BOOMIO_COMPANION_URL"))
     iptvBaseUrl.set(runtimeConfigValue("BOOMIO_IPTV_URL"))
+    overlayAddr.set(runtimeConfigValue("BOOMIO_OVERLAY_ADDR"))
 }
 
 tasks.withType<KotlinCompilationTask<*>>().configureEach {

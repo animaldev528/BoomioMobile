@@ -46,6 +46,29 @@ object BoomioConfig {
      */
     var iptvBaseUrl: String = BoomioIptvConfig.BASE_URL
 
+    /**
+     * The server's address on the WireGuard overlay, e.g. `10.77.0.1`. Blank disables
+     * the overlay resolver entirely.
+     *
+     * ⚠️ **This is an address, not a URL and not a hostname.** The app never *dials* it:
+     * every request keeps naming `bsc.tracemonkey.org` and Caddy picks the site block
+     * from that name, so a bare address has nothing to match and fails TLS. All this
+     * value does is tell the DNS seam what those names should resolve to while the
+     * tunnel is up — see `OverlayTunnel`. A hostname here is refused rather than
+     * resolved, because resolving it is the exact behaviour the seam replaces.
+     *
+     * Sourced from `BOOMIO_OVERLAY_ADDR` in `local.properties` (via the generated
+     * [BoomioOverlayConfig]); override at startup if needed. Blank-inert, like the
+     * seams above: [iptvBaseUrl] and [companionBaseUrl] are the hosts, this is the
+     * address they take on the overlay.
+     *
+     * In the end state this is *learned*, not configured — pairing (phase 3) mints a
+     * code on the server and the client receives the overlay address with it, which is
+     * what makes a fresh client work with no manual configuration. Until that exists,
+     * it is one field, and it is the only one.
+     */
+    var overlayServerAddress: String = BoomioOverlayConfig.ADDR
+
     /** True when the companion seam is configured ([companionBaseUrl] is set). */
     fun companionEnabled(): Boolean = companionBaseUrl.isNotBlank()
 

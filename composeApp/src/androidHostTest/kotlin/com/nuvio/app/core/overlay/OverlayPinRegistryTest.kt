@@ -26,10 +26,11 @@ import org.robolectric.annotation.Config
 class OverlayPinRegistryTest {
 
     private val pinned = InetAddress.getByName("192.168.68.65")
+    private val overlay = InetAddress.getByName("10.77.0.1")
 
     @AfterTest
     fun tearDown() {
-        OverlayPinRegistry.clear()
+        OverlayPinRegistry.clearAll()
     }
 
     @Test
@@ -44,7 +45,11 @@ class OverlayPinRegistryTest {
         // they arrive inside bsf's stream URLs. When this gate said false for them, the
         // player used the trust-all client, resolved to the WAN address and sat on
         // `failed to connect to bss-dav.tracemonkey.org/153.68.210.49 after 15000ms`.
-        OverlayPinRegistry.pin(listOf("bsc.tracemonkey.org", "bsf.tracemonkey.org"), pinned)
+        OverlayPinRegistry.pin(
+            LocalServerSource.LAN,
+            listOf("bsc.tracemonkey.org", "bsf.tracemonkey.org"),
+            pinned,
+        )
 
         assertTrue(
             OverlayPinRegistry.isPinnedHost(
@@ -57,7 +62,7 @@ class OverlayPinRegistryTest {
 
     @Test
     fun `a third-party url never selects the pinned client`() {
-        OverlayPinRegistry.pin(listOf("bsc.tracemonkey.org"), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
 
         assertFalse(OverlayPinRegistry.isPinnedHost("https://image.tmdb.org/t/p/w500/a.jpg"))
         assertFalse(OverlayPinRegistry.isPinnedHost("https://catalog.nuvio.tv/manifest.json"))
@@ -68,7 +73,7 @@ class OverlayPinRegistryTest {
 
     @Test
     fun `a blank or unparseable url is not pinned`() {
-        OverlayPinRegistry.pin(listOf("bsc.tracemonkey.org"), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
 
         assertFalse(OverlayPinRegistry.isPinnedHost(""))
         assertFalse(OverlayPinRegistry.isPinnedHost("nonsense"))
@@ -77,8 +82,8 @@ class OverlayPinRegistryTest {
 
     @Test
     fun `clear removes the domain match as well as the exact host`() {
-        OverlayPinRegistry.pin(listOf("bsc.tracemonkey.org"), pinned)
-        OverlayPinRegistry.clear()
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
+        OverlayPinRegistry.clear(LocalServerSource.LAN)
 
         assertNull(OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
         assertNull(OverlayPinRegistry.lookup("bss-dav.tracemonkey.org"))
@@ -89,9 +94,41 @@ class OverlayPinRegistryTest {
         // `OverlayLocalDiscovery.refresh` falls back to the browsed set when the live
         // derivation comes back empty; a pin must not evaporate just because a caller
         // had nothing to say.
-        OverlayPinRegistry.pin(listOf("bsc.tracemonkey.org"), pinned)
-        OverlayPinRegistry.pin(emptyList(), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, emptyList(), pinned)
 
         assertEquals(pinned, OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+    }
+
+    @Test
+    fun `the two sources hold their own pins and are ranked`() {
+        // The tiers are driven by independent triggers that know nothing about each
+        // other. With one slot, a tunnel probe landing a second after a browse would
+        // replace a working LAN pin with the overlay address — silently, and for the
+        // rest of the session.
+        OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf("bsc.tracemonkey.org"), overlay)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
+
+        assertEquals(pinned, OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+    }
+
+    @Test
+    fun `clearing one source does not disturb the other`() {
+        OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf("bsc.tracemonkey.org"), overlay)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
+
+        OverlayPinRegistry.clear(LocalServerSource.LAN)
+
+        assertEquals(overlay, OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+        assertEquals(overlay, OverlayPinRegistry.lookup("bss-dav.tracemonkey.org"))
+    }
+
+    @Test
+    fun `a tunnel pin alone covers the domain exactly as a LAN pin does`() {
+        OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf("bsc.tracemonkey.org"), overlay)
+
+        assertTrue(OverlayPinRegistry.isPinnedHost("https://bsf.tracemonkey.org/find/x"))
+        assertTrue(OverlayPinRegistry.isPinnedHost("https://bss-tor.tracemonkey.org/x"))
+        assertFalse(OverlayPinRegistry.isPinnedHost("https://image.tmdb.org/x.jpg"))
     }
 }

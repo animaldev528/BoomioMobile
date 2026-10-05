@@ -1,6 +1,7 @@
 package com.nuvio.app.core.network
 
 import android.app.Application
+import com.nuvio.app.core.overlay.LocalServerSource
 import com.nuvio.app.core.overlay.OverlayPinRegistry
 import java.net.Inet4Address
 import java.net.Inet6Address
@@ -28,12 +29,13 @@ class IPv4FirstDnsTest {
 
     private val publicHost = "bsc.tracemonkey.org"
     private val pinned = InetAddress.getByName("192.168.68.65")
+    private val overlay = InetAddress.getByName("10.77.0.1")
     private val publicV4 = InetAddress.getByName("203.0.113.10") as Inet4Address
     private val publicV6 = InetAddress.getByName("2001:db8::1") as Inet6Address
 
     @AfterTest
     fun tearDown() {
-        OverlayPinRegistry.clear()
+        OverlayPinRegistry.clearAll()
     }
 
     private fun dnsOf(vararg answers: InetAddress) = IPv4FirstDns(
@@ -55,7 +57,7 @@ class IPv4FirstDnsTest {
 
     @Test
     fun `puts the pin first and keeps the delegate results behind it`() {
-        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
 
         val result = dnsOf(publicV6, publicV4).lookup(publicHost)
 
@@ -67,14 +69,14 @@ class IPv4FirstDnsTest {
 
     @Test
     fun `never re-sorts the pin behind an ipv6 from the delegate`() {
-        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
 
         assertEquals(pinned, dnsOf(publicV6).lookup(publicHost).first())
     }
 
     @Test
     fun `drops a duplicate when the delegate already returns the pinned address`() {
-        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
 
         assertEquals(listOf(pinned, publicV4), dnsOf(pinned, publicV4).lookup(publicHost))
     }
@@ -82,7 +84,7 @@ class IPv4FirstDnsTest {
     @Test
     fun `falls back to the pin when system dns fails`() {
         // The case the feature exists for: a LAN where system DNS does not know the name.
-        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
 
         assertEquals(listOf(pinned), failingDns().lookup(publicHost))
     }
@@ -96,7 +98,7 @@ class IPv4FirstDnsTest {
     fun `usePins false ignores the registry entirely`() {
         // The escape hatch for the trust-all playback client, where TLS would not
         // catch a hostile pin.
-        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
         val dns = IPv4FirstDns(
             delegate = object : Dns {
                 override fun lookup(hostname: String): List<InetAddress> = listOf(publicV4)
@@ -114,7 +116,7 @@ class IPv4FirstDnsTest {
         // built by enumerating hosts missed them, and the player sat on
         // `failed to connect to bss-dav.tracemonkey.org/153.68.210.49 after 15000ms`
         // while the catalogue worked. Matching the domain is what makes the pin complete.
-        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
         val dns = dnsOf(publicV4)
 
         val stream = dns.lookup("bss-dav.tracemonkey.org")
@@ -127,7 +129,7 @@ class IPv4FirstDnsTest {
     fun `a pin never covers a third-party host`() {
         // Posters are `image.tmdb.org`, two addons are third-party, and Supabase lives
         // in the cloud. Repointing any of them at a LAN address would simply be wrong.
-        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
         val dns = dnsOf(publicV4)
 
         for (thirdParty in listOf(
@@ -145,11 +147,59 @@ class IPv4FirstDnsTest {
     fun `a pin does not cover a domain that merely ends with the server's domain`() {
         // `eviltracemonkey.org` ends with the string `tracemonkey.org` but is a different
         // domain. The leading `.` in the suffix match is what keeps the two apart.
-        OverlayPinRegistry.pin(listOf(publicHost), pinned)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
 
         val result = dnsOf(publicV4).lookup("eviltracemonkey.org")
 
         assertEquals(listOf(publicV4), result)
         assertTrue(result.none { it == pinned })
+    }
+
+    @Test
+    fun `the tunnel answers with the overlay address when both tiers are pinned`() {
+        // The phase-4 path, end to end through the seam. On a foreign network the LAN
+        // tier has nothing; the tunnel pin is what keeps the app off the public edge.
+        OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf(publicHost), overlay)
+
+        val result = dnsOf(publicV4).lookup(publicHost)
+
+        assertEquals(overlay, result.first())
+        // Pin-first, not pin-only: the public address is still there to fall back to, so
+        // a dropped tunnel costs one failed connect rather than stranding the client.
+        assertTrue(result.contains(publicV4))
+    }
+
+    @Test
+    fun `the tunnel pin covers the media plane too`() {
+        // The phase-5 property, and the reason the domain match is not a LAN-only
+        // detail: a stream URL names `bss-dav`, which appears in no configuration, and
+        // over the tunnel it would otherwise resolve to the public edge and leave it.
+        OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf(publicHost), overlay)
+        val dns = dnsOf(publicV4)
+
+        assertEquals(overlay, dns.lookup("bss-dav.tracemonkey.org").first())
+        assertEquals(overlay, dns.lookup("nzbdav.tracemonkey.org").first())
+        // A third-party host is still never covered, on either tier.
+        assertEquals(listOf(publicV4), dns.lookup("image.tmdb.org"))
+    }
+
+    @Test
+    fun `the LAN pin outranks the tunnel pin when both are present`() {
+        OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf(publicHost), overlay)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
+
+        assertEquals(pinned, dnsOf(publicV4).lookup(publicHost).first())
+    }
+
+    @Test
+    fun `clearing the tunnel leaves the LAN pin in place`() {
+        // The two tiers are driven by independent triggers, so one reporting "nothing"
+        // must not silently unpin the other. A single-slot registry did exactly that.
+        OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf(publicHost), overlay)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
+
+        OverlayPinRegistry.clear(LocalServerSource.TUNNEL)
+
+        assertEquals(pinned, dnsOf(publicV4).lookup(publicHost).first())
     }
 }

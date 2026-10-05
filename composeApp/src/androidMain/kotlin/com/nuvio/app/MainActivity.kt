@@ -12,6 +12,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.network.ServerConfigurationStorage
 import com.nuvio.app.core.overlay.OverlayLocalDiscovery
+import com.nuvio.app.core.overlay.OverlayTunnel
 import com.nuvio.app.features.boomio.BoomioSessionRepository
 import com.nuvio.app.features.boomio.BoomioSessionStorage
 import com.nuvio.app.features.boomio.PrivateListeningSession
@@ -103,6 +104,10 @@ open class MainActivity : AppCompatActivity() {
         // Beside the server configuration because the browse reads the host list from
         // it. This only stores the context; the browse itself is foreground-triggered.
         OverlayLocalDiscovery.initialize(applicationContext)
+        // The Tier 2 sibling. It owns no tunnel — it watches for one the platform or the
+        // user's WireGuard app has established — and does nothing at all until
+        // `BOOMIO_OVERLAY_ADDR` is set.
+        OverlayTunnel.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)

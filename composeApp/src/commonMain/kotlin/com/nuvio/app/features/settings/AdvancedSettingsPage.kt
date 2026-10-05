@@ -56,7 +56,7 @@ import nuvio.composeapp.generated.resources.sentry_sent_body
 import nuvio.composeapp.generated.resources.sentry_sent_title
 import nuvio.composeapp.generated.resources.sentry_turn_off
 import nuvio.composeapp.generated.resources.sentry_turn_on
-import nuvio.composeapp.generated.resources.server_local_label
+import nuvio.composeapp.generated.resources.server_discovery_label
 import org.jetbrains.compose.resources.stringResource
 
 internal fun LazyListScope.advancedSettingsContent(
@@ -66,11 +66,14 @@ internal fun LazyListScope.advancedSettingsContent(
     item {
         // ⚠️ The whole section is withheld until discovery has something to say. An
         // `Idle` state would otherwise leave a titled card with nothing in it, which
-        // reads as a broken row rather than as "this device found no local server".
+        // reads as a broken row rather than as "this device found no server". `Idle` is
+        // also the honest answer for the overlay tier whenever no such tunnel is up,
+        // which is most devices — so this gate is what keeps the section off the screen
+        // for everyone not running one.
         val localServer by LocalServerState.status.collectAsStateWithLifecycle()
         if (localServer !is LocalServerStatus.Idle) {
             SettingsSection(
-                title = stringResource(Res.string.server_local_label),
+                title = stringResource(Res.string.server_discovery_label),
                 isTablet = isTablet,
             ) {
                 SettingsGroup(isTablet = isTablet) {

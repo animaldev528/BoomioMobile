@@ -11,6 +11,7 @@ import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.server_local_found
 import nuvio.composeapp.generated.resources.server_local_searching
 import nuvio.composeapp.generated.resources.server_local_unavailable
+import nuvio.composeapp.generated.resources.server_overlay_found
 import org.jetbrains.compose.resources.stringResource
 
 /**
@@ -33,8 +34,14 @@ internal fun LocalServerStatusRow(
     // casts do not apply to `by` delegates, so `current.address` would not compile.
     val text: String? = when (val status = current) {
         LocalServerStatus.Idle -> null
-        is LocalServerStatus.Found ->
-            stringResource(Res.string.server_local_found, status.address)
+        // ⚠️ The tunnel is not "local", and saying so would be wrong in the one place it
+        // matters: this row is how a user confirms the app is off the public edge, and
+        // `10.77.0.1` presented as a local server would send them looking on their own
+        // network for a machine that is somewhere else entirely.
+        is LocalServerStatus.Found -> when (status.source) {
+            LocalServerSource.LAN -> stringResource(Res.string.server_local_found, status.address)
+            LocalServerSource.TUNNEL -> stringResource(Res.string.server_overlay_found, status.address)
+        }
         LocalServerStatus.Searching ->
             if (showUnavailable) stringResource(Res.string.server_local_searching) else null
         is LocalServerStatus.Unavailable ->

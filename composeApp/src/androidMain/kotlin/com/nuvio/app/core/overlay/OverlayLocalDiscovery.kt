@@ -55,6 +55,12 @@ private const val TAG = "OverlayLocalDiscovery"
  * the server moved, the router changed, a `hosts` entry was lost. At home, where
  * dnsmasq already resolves, this is a no-op by design.
  *
+ * [OverlayTunnel] is the sibling that covers every network this one cannot reach, and
+ * the two publish into the same registry under different [LocalServerSource]s. They are
+ * independent on purpose: neither can be blamed for the other's failure, and on the
+ * reference deployment they are mutually exclusive in practice, because the tunnel's
+ * endpoint is the public WAN address and hairpin NAT is off.
+ *
  * A missed path degrades to the public edge rather than breaking, which is why
  * [LocalServerStatus.Unavailable] never raises and why the pin is additive.
  */
@@ -227,7 +233,7 @@ internal object OverlayLocalDiscovery {
             ) { hosts, address -> hosts to address }
                 .collect { (hosts, address) ->
                     if (hosts.isNotEmpty() && address != null) {
-                        OverlayPinRegistry.pin(hosts, address)
+                        OverlayPinRegistry.pin(LocalServerSource.LAN, hosts, address)
                     }
                 }
         }
@@ -245,8 +251,8 @@ internal object OverlayLocalDiscovery {
     /** Drops the pin without browsing. Used on network change and on server switch. */
     fun clear() {
         pinnedAddress.value = null
-        OverlayPinRegistry.clear()
-        LocalServerState.update(LocalServerStatus.Idle)
+        OverlayPinRegistry.clear(LocalServerSource.LAN)
+        LocalServerState.update(LocalServerSource.LAN, LocalServerStatus.Idle)
     }
 
     /**
@@ -282,7 +288,7 @@ internal object OverlayLocalDiscovery {
             return@withLock
         }
 
-        LocalServerState.update(LocalServerStatus.Searching)
+        LocalServerState.update(LocalServerSource.LAN, LocalServerStatus.Searching)
 
         val multicastLock = acquireMulticastLock(context)
         // Written only by the single browse worker, read after it has been joined, so no
@@ -361,10 +367,12 @@ internal object OverlayLocalDiscovery {
      */
     private fun pinCandidate(hosts: Set<String>, candidate: Candidate) {
         pinnedAddress.value = candidate.address
-        OverlayPinRegistry.pin(hosts, candidate.address)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, hosts, candidate.address)
         LocalServerState.update(
+            LocalServerSource.LAN,
             LocalServerStatus.Found(
                 address = candidate.address.hostAddress.orEmpty(),
+                source = LocalServerSource.LAN,
                 serviceName = candidate.serviceName,
                 hostName = candidate.hostName,
                 version = candidate.version,
@@ -379,9 +387,9 @@ internal object OverlayLocalDiscovery {
             // Dropped together with the registry, or `observeAddonChanges` would re-pin
             // an address the user has just invalidated.
             pinnedAddress.value = null
-            OverlayPinRegistry.clear()
+            OverlayPinRegistry.clear(LocalServerSource.LAN)
         }
-        LocalServerState.update(status)
+        LocalServerState.update(LocalServerSource.LAN, status)
     }
 
     private data class Candidate(
