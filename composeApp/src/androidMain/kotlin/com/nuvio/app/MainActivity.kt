@@ -12,6 +12,7 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.network.ServerConfigurationStorage
 import com.nuvio.app.core.overlay.OverlayLocalDiscovery
+import com.nuvio.app.core.overlay.OverlayRelay
 import com.nuvio.app.core.overlay.OverlayTunnel
 import com.nuvio.app.features.boomio.BoomioSessionRepository
 import com.nuvio.app.features.boomio.BoomioSessionStorage
@@ -108,6 +109,12 @@ open class MainActivity : AppCompatActivity() {
         // user's WireGuard app has established — and does nothing at all until
         // `BOOMIO_OVERLAY_ADDR` is set.
         OverlayTunnel.initialize(applicationContext)
+        // The relay every engine has to be pointed at explicitly, because a userspace
+        // tunnel captures nothing on its own. Process-scoped and takes no `Context`; it
+        // opens no socket at all until `BOOMIO_OVERLAY_ADDR` is set. Deliberately inert
+        // until then — nothing is wired to it yet, and every client behaves exactly as it
+        // does today while `OverlayRelay.state` is `Down`.
+        OverlayRelay.initialize()
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)
