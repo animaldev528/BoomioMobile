@@ -52,16 +52,42 @@ private const val TAG = "OverlayTunnel"
  * ⚠️ **There is no `VpnService` here, and that is the point.** This object does not
  * create or own a tunnel; it observes one. Android grants exactly one active
  * `VpnService`, and coexistence with a VPN the user already runs (NordVPN) is a hard
- * requirement, so the app cannot take that slot. The tunnel is whatever the platform —
- * or the user's WireGuard app — has already established, and all this does is notice it
- * and point DNS at it. When no such tunnel exists, this reports [LocalServerStatus.Idle]
- * and the app falls back to the public edge, which still works.
+ * requirement, so the app cannot take that slot. When no tunnel exists, this reports
+ * [LocalServerStatus.Idle] and the app falls back to the public edge, which still works.
  *
- * **The gate is the probe, not the interface.** Detecting "a VPN is up" is not enough:
- * NordVPN also satisfies that, and it routes nothing the app wants. So the identifying
- * signal is the VPN link's own address lying on the overlay subnet, and the confirming
- * signal is a real TCP connect to the server's overlay address. A pin is placed only
- * when both hold.
+ * ---
+ *
+ * ## The two overlay paths, and why only one of them pins
+ *
+ * ⚠️ **This is the thing to understand before changing anything below.** Since U3 there are
+ * two ways the overlay can be up, and they are reached by *mechanisms that are not
+ * interchangeable* — so this object treats them differently on purpose.
+ *
+ * **A. A platform tunnel — a real `VpnService`** (the user's WireGuard app, some future
+ * enrollment). The kernel has a route to `10.77.0.0/24`, so the app's own resolver can be
+ * pointed there: Dns over the pin, then every engine connects by itself. **This path pins.**
+ * Identified by a VPN network whose link address lies on the overlay subnet, because
+ * "a VPN is up" is not enough — NordVPN also satisfies that and routes nothing we want.
+ *
+ * **B. The app's own userspace tunnel** ([OverlayWgTunnel]) — what this app ships. netstack
+ * runs *in process* and **installs no kernel route at all**, so:
+ *   - a plain `java.net.Socket` to `10.77.0.1` reaches nothing, and the probe has to be
+ *     dialled *through* the binding instead ([probeThroughTunnel]);
+ *   - ⚠️ **pinning DNS to the overlay address is not merely useless here, it is harmful.**
+ *     It would rewrite every boomio FQDN to an address the kernel cannot reach, and the
+ *     relay — which is the only route — dials by *name*, so it would never even be consulted.
+ *     The pin would take a working app and blackhole it.
+ * So **this path never pins.** It reports the status and leaves DNS alone; traffic reaches
+ * the server through [OverlayRelay], which resolves names inside the tunnel at
+ * `10.77.0.1` and is itself already wired to prefer the tunnel.
+ *
+ * **The gate is the probe, not the interface.** For path A, the identifying signal is the
+ * VPN link's address on the overlay subnet and the confirming signal is a TCP connect. For
+ * path B there is no interface to identify, so the gate is [TunnelState.Up] — our own device
+ * having been configured against an endpoint the ladder *already* vetted.
+ *
+ * The two are not mutually exclusive in principle and path B wins when both hold, because
+ * the relay is the route this app actually uses.
  */
 internal object OverlayTunnel {
 
@@ -84,6 +110,17 @@ internal object OverlayTunnel {
      */
     private const val PROBE_ATTEMPTS = 3
     private const val PROBE_RETRY_DELAY_MS = 1_000L
+
+    /**
+     * Fewer attempts than [PROBE_ATTEMPTS], because the retry budget is spent differently.
+     *
+     * Path A's probe fails in [PROBE_TIMEOUT_MS], so three attempts cost three seconds. Path
+     * B's dial is bounded by the *Go* side's 20 s timeout ([OverlayWgBinding.dial]), so the
+     * same count could hold this object's probe mutex for a minute. The handshake gap the
+     * retry exists to cover is about a second wide, so a second attempt a second later lands
+     * past it; the rest of the convergence is [observeForeground]'s cadence.
+     */
+    private const val OWN_TUNNEL_PROBE_ATTEMPTS = 2
 
     /** See [OverlayLocalDiscovery.RESULT_TTL_MS]: the same foreground cadence. */
     private const val RESULT_TTL_MS = 5 * 60 * 1000L
@@ -267,6 +304,39 @@ internal object OverlayTunnel {
             return@withLock
         }
 
+        // ---- Path B: the app's own userspace tunnel (see the object doc) ----------------
+        //
+        // Checked BEFORE the platform gate, and with no `ConnectivityManager` involved,
+        // because a userspace tunnel has no interface to enumerate — path A's gate is not
+        // merely unhelpful here, it can never be satisfied, which is what made this tier
+        // report `Idle` forever once U3 started bringing the tunnel up for real.
+        val ownTunnel = OverlayWgTunnelController.instance
+            ?.takeIf { it.state.value is TunnelState.Up }
+        if (ownTunnel != null) {
+            // ⚠️ Cleared unconditionally, before the probe has an answer. A pin left by a
+            // previous path-A session names an address the kernel cannot reach under
+            // netstack, and leaving it in place for even one probe's duration is a window
+            // where every engine is pointed at a black hole.
+            if (probeThroughTunnel(ownTunnel, server)) {
+                publishUnpinned(
+                    LocalServerStatus.Found(
+                        address = server.hostAddress.orEmpty(),
+                        source = LocalServerSource.TUNNEL,
+                    )
+                )
+                Log.d(TAG, "Own overlay tunnel up; ${server.hostAddress} answers through it (no DNS pin)")
+            } else {
+                // A real fault: the device is up and configured, and the server did not
+                // answer. Reported rather than swallowed, per §10.7 — the user has no LAN
+                // fallback to fall back to, so silence would be the wrong answer.
+                publishUnpinned(
+                    LocalServerStatus.Unavailable("The overlay tunnel is up but the server did not answer")
+                )
+            }
+            return@withLock
+        }
+
+        // ---- Path A: a platform VPN carrying the overlay subnet ------------------------
         val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         if (manager == null || !hasOverlayTunnel(manager, server)) {
             // No VPN carrying the overlay subnet. Either the user runs no tunnel at all,
@@ -305,6 +375,57 @@ internal object OverlayTunnel {
         // resolving to an address the probe has just said is dead.
         if (status !is LocalServerStatus.Found) clear()
         LocalServerState.update(LocalServerSource.TUNNEL, status)
+    }
+
+    /**
+     * Publishes a status for path B, which **never pins** — see the object doc.
+     *
+     * Deliberately separate from [publish] rather than a flag on it: [publish]'s contract is
+     * "a `Found` here means the address in it is pinned", and the whole point of path B is
+     * that `Found` and "pinned" come apart. A boolean parameter would let the two be
+     * conflated again at the next call site.
+     */
+    private fun publishUnpinned(status: LocalServerStatus) {
+        clear()
+        LocalServerState.update(LocalServerSource.TUNNEL, status)
+    }
+
+    /**
+     * Probes the overlay address **through the userspace tunnel** rather than over a socket.
+     *
+     * ⚠️ **A plain `Socket` cannot be substituted here, and that is the whole reason this
+     * exists.** netstack installs no kernel route, so `Socket().connect(10.77.0.1:443)` gets
+     * `ENETUNREACH` on a tunnel that is working perfectly — the probe would report every
+     * healthy tunnel as dead, and the fix would look like it belonged in the tunnel.
+     *
+     * A successful `dial` **is** the reachability signal: gVisor's TCP connect does not
+     * return until the handshake completes, so a handle means the server's Caddy answered.
+     * Nothing is written and the connection is closed immediately — this asks whether the
+     * edge is there, not what it says.
+     */
+    private suspend fun probeThroughTunnel(tunnel: OverlayWgTunnel, address: InetAddress): Boolean {
+        val host = address.hostAddress ?: return false
+        repeat(OWN_TUNNEL_PROBE_ATTEMPTS) { attempt ->
+            val startedAt = SystemClock.elapsedRealtime()
+            val reached = runCatching {
+                val handle = tunnel.binding.dial(host, EDGE_PORT)
+                // Closing an unknown handle is not an error, so this is safe even if a
+                // future binding returns a sentinel instead of throwing.
+                tunnel.binding.close(handle)
+                true
+            }.onFailure {
+                Log.w(
+                    TAG,
+                    "Own-tunnel probe to $host:$EDGE_PORT failed after " +
+                        "${SystemClock.elapsedRealtime() - startedAt}ms",
+                    it,
+                )
+            }.getOrDefault(false)
+
+            if (reached) return true
+            if (attempt < OWN_TUNNEL_PROBE_ATTEMPTS - 1) delay(PROBE_RETRY_DELAY_MS)
+        }
+        return false
     }
 
     private suspend fun probeWithRetry(address: InetAddress): Boolean {

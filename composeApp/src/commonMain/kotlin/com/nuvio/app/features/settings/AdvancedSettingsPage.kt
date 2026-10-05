@@ -21,6 +21,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.core.overlay.LocalServerState
 import com.nuvio.app.core.overlay.LocalServerStatus
 import com.nuvio.app.core.overlay.LocalServerStatusRow
+import com.nuvio.app.core.overlay.OverlayEndpointState
+import com.nuvio.app.core.overlay.OverlayEndpointStatus
+import com.nuvio.app.core.overlay.OverlayEndpointStatusRow
 import com.nuvio.app.core.ui.DialogButton
 import com.nuvio.app.core.ui.DialogButtons
 import com.nuvio.app.core.ui.DialogButtonStyle
@@ -71,7 +74,14 @@ internal fun LazyListScope.advancedSettingsContent(
         // which is most devices — so this gate is what keeps the section off the screen
         // for everyone not running one.
         val localServer by LocalServerState.status.collectAsStateWithLifecycle()
-        if (localServer !is LocalServerStatus.Idle) {
+        val endpoint by OverlayEndpointState.status.collectAsStateWithLifecycle()
+        // ⚠️ Gated on **two** statuses, and the second is what makes the section reachable in
+        // the case that matters. `NeedsManual` means the ladder ran out of rungs, which means
+        // there is no *server* to report — so gating on `LocalServerState` alone would hide
+        // the one line that tells the user what to do, in exactly the situation it was
+        // written for. Both rows stay silent for every `Idle` state, so the "no empty titled
+        // card" reasoning above still holds.
+        if (localServer !is LocalServerStatus.Idle || endpoint !is OverlayEndpointStatus.Idle) {
             SettingsSection(
                 title = stringResource(Res.string.server_discovery_label),
                 isTablet = isTablet,
@@ -85,6 +95,16 @@ internal fun LazyListScope.advancedSettingsContent(
                         // The opposite of the connect sheet: here the failure reasons are
                         // the point, because this is where a user comes to ask why the
                         // app is not using a server they know is on their network.
+                        showUnavailable = true,
+                    )
+                    OverlayEndpointStatusRow(
+                        modifier = Modifier.padding(
+                            horizontal = if (isTablet) 20.dp else 16.dp,
+                            vertical = if (isTablet) 16.dp else 14.dp,
+                        ),
+                        // Same reasoning as the row above — and here it also surfaces which
+                        // rung won, which is the fact a support log needs and the one thing
+                        // the user cannot infer from an app that merely does not connect.
                         showUnavailable = true,
                     )
                 }

@@ -38,17 +38,24 @@ internal class OverlayWgDialer(private val binding: OverlayWgBinding) : OverlayD
  *
  * **Why this exists rather than being folded into [OverlayWgDialer].** The relay's
  * allow-set selects *routing, not reachability* — so a boomio host is always dialled, and
- * the only question is by which route. On the LAN the tunnel is not brought up at all (the
- * approved design runs the relay on the LAN and reserves the tunnel for the WAN), so a
- * carried host there *must* go direct or the relay would break the LAN case it currently
- * serves. The same is true whenever the tunnel is up but the server is unreachable through
- * it.
+ * the only question is by which route. A carried host has to be dialled even when the
+ * tunnel cannot take it, or the relay would break the one case it currently serves: it is
+ * only useful once something is pointed at it, and the first thing pointed at it is a debug
+ * build whose tunnel may not be up at all.
  *
- * ⚠️ **This makes a tunnel failure a silent degradation rather than an error**, which is
- * the intended trade: a direct dial still works from off-LAN — that is what the public
- * edge is for — so falling back costs privacy, not function. It is logged for exactly that
- * reason. The alternative, failing the request, would turn a recoverable route problem
- * into a broken app.
+ * ⚠️ **The LAN caveat that used to be here is gone, and the correction matters.** This doc
+ * said the tunnel "is not brought up at all" on the LAN, so a carried host there *must* go
+ * direct. That was true of the tier split and was superseded on 2026-10-05 — *"everything
+ * will be vpn, even on lan"*. The tunnel now carries the LAN too, so a direct fallback on
+ * the LAN reaches **nothing** (hairpin is off, so the public address does not come back in).
+ * The fallback is therefore not a LAN safety net; it is what keeps a host reachable from
+ * off-LAN, where the public edge does answer.
+ *
+ * ⚠️ **Open question, deliberately not decided here:** §10.7 chose "no LAN fallback — a LAN
+ * tunnel failure is a hard failure", and a direct fallback is in tension with that. It is
+ * left as-is because changing it changes *routing policy*, which is the owner's call, not a
+ * thing to slip into a wiring commit. Off-LAN the fallback is a real degradation to the
+ * public path (privacy, not function); on-LAN it fails visibly anyway.
  */
 internal class PreferTunnelDialer(
     private val tunnel: OverlayDialer,
@@ -61,6 +68,32 @@ internal class PreferTunnelDialer(
         Log.d(TAG, "Tunnel could not reach $host:$port; dialling direct", t)
         direct.dial(host, port)
     }
+}
+
+/**
+ * The tunnel, looked up **at dial time** instead of being handed over at start-up.
+ *
+ * **Why the indirection is load-bearing.** [OverlayRelay.start] is once-per-process — it
+ * returns the running handle rather than rebinding its diallers — and it runs from
+ * `MainActivity.onCreate`, which is *before* the discovery ladder has walked anything. So a
+ * dialler that captured the tunnel at start-up would capture [TunnelState.Down], and the
+ * relay would dial direct for the rest of the process's life no matter how well the tunnel
+ * came up afterwards. The supplier defers the question to the moment it has an answer.
+ *
+ * ⚠️ **It throws, rather than falling back.** That looks backwards next to
+ * [PreferTunnelDialer], which does the opposite — but the two answer different questions.
+ * This one says only "there is no tunnel right now"; *what to do about that* is routing, and
+ * routing is [PreferTunnelDialer]'s job, one layer up. If this fell back on its own, the
+ * composed policy would be unreachable and a test could no longer tell "the tunnel is down"
+ * apart from "we chose direct".
+ */
+internal class DeferredTunnelDialer(
+    private val tunnel: () -> OverlayDialer?,
+) : OverlayDialer {
+
+    override fun dial(host: String, port: Int): OverlayConnection =
+        tunnel()?.dial(host, port)
+            ?: throw IOException("The overlay tunnel is not up; $host:$port was not dialled")
 }
 
 /**

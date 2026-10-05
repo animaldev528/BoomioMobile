@@ -63,6 +63,25 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     abstract val overlayAddr: Property<String>
 
     /**
+     * **This client's own** address on the overlay, in CIDR form — `10.77.0.2/32`.
+     *
+     * ⚠️ **Not the same as [overlayAddr], and the pair is the easiest thing here to get
+     * backwards.** That one is the *server's* address (`10.77.0.1`) and is what the app's
+     * traffic is aimed at. This one is the address the *device* holds inside the tunnel, and
+     * it has to match the `allowed-ips` the operator enrolled this client's public key with —
+     * a mismatch produces a tunnel that comes up, handshakes, and then silently drops every
+     * packet the server sends back, because the server has no route to an address it never
+     * agreed to.
+     *
+     * Defaults to `10.77.0.2/32` because that is the address the live peers use, so a build
+     * that sets the other overlay keys and forgets this one still works for the first client.
+     * It is **not** a safe default for a second client on the same overlay, which is what
+     * per-client enrollment (U4) has to replace.
+     */
+    @get:Input
+    abstract val overlayLocalCidr: Property<String>
+
+    /**
      * Absolute URL of the loopback HTTP CONNECT relay the app runs for its own userspace
      * WireGuard tunnel, e.g. `http://127.0.0.1:8100`.
      *
@@ -198,6 +217,7 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object BoomioOverlayConfig {
                 |    const val ADDR = "${overlayAddr.get()}"
+                |    const val LOCAL_CIDR = "${overlayLocalCidr.get()}"
                 |    const val PROXY = "${overlayProxy.get()}"
                 |    const val ENGINE = "${overlayEngine.get()}"
                 |    const val ENDPOINT = "${overlayEndpoint.get()}"
@@ -451,6 +471,9 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     overlayEngine.set(runtimeConfigValue("BOOMIO_OVERLAY_ENGINE"))
     overlayEndpoint.set(runtimeConfigValue("BOOMIO_OVERLAY_ENDPOINT"))
     overlayPubkey.set(runtimeConfigValue("BOOMIO_OVERLAY_PUBKEY"))
+    overlayLocalCidr.set(
+        runtimeConfigValue("BOOMIO_OVERLAY_LOCAL_CIDR").ifBlank { "10.77.0.2/32" }
+    )
 }
 
 tasks.withType<KotlinCompilationTask<*>>().configureEach {

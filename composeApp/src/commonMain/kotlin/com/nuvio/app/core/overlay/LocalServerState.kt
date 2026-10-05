@@ -55,11 +55,19 @@ sealed interface LocalServerStatus {
     data object Searching : LocalServerStatus
 
     /**
-     * A server was found and pinned. The public FQDN now resolves to [address] for
-     * the hosts this app talks to.
+     * A server was found **and is reachable over the overlay**, at [address].
+     *
+     * ⚠️ **"Found" does not always mean "pinned", and the difference is not cosmetic.** The
+     * LAN tier and the platform-VPN half of the tunnel tier reach the server by repointing
+     * DNS, so for those two [address] is literally what every boomio FQDN now resolves to.
+     * The app's **own userspace tunnel** reaches the server through the relay instead and
+     * installs no kernel route, so it reports `Found` while **pinning nothing** — a pin there
+     * would name an address the kernel cannot reach. Read this as "the app is off the public
+     * edge, via [address] somewhere in the path", not as a statement about DNS.
+     * See `OverlayTunnel`'s two-paths doc.
      *
      * [serviceName], [hostName] and [version] come from an mDNS advert and are null on
-     * the tunnel path, which has no advert to read them from.
+     * both tunnel paths, which have no advert to read them from.
      */
     data class Found(
         val address: String,

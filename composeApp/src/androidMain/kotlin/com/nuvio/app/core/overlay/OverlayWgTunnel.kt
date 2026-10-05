@@ -53,7 +53,13 @@ internal sealed interface TunnelState {
  * store, because the real binding is a JNI library that cannot load off-device.
  */
 internal class OverlayWgTunnel(
-    private val binding: OverlayWgBinding,
+    /**
+     * `internal` rather than private so [OverlaySession] can hand the same binding to the
+     * relay's tunnel dialler. One object, two consumers — and letting the session reach for
+     * `GomobileWgBinding` directly instead would mean a host test exercising the session
+     * against a fake device while the relay it wires up dialled through the real one.
+     */
+    internal val binding: OverlayWgBinding,
     private val loadKeypair: () -> OverlayWgKeypair?,
     private val saveKeypair: (OverlayWgKeypair) -> Unit,
 ) {

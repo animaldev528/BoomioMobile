@@ -70,6 +70,23 @@ object BoomioConfig {
     var overlayServerAddress: String = BoomioOverlayConfig.ADDR
 
     /**
+     * **This device's own** address inside the overlay, CIDR form — `10.77.0.2/32`.
+     *
+     * ⚠️ **The third overlay address, and the one most likely to be confused with the other
+     * two.** [overlayServerAddress] is where the app's traffic is *aimed* (`10.77.0.1`);
+     * [overlayEndpoint] is where the tunnel's *UDP* goes, in the clear, over the local
+     * network; this is the address the device *holds* once the tunnel is up. It must equal
+     * the `allowed-ips` the operator enrolled this client's public key with, or the tunnel
+     * comes up, completes a handshake, and then silently drops every return packet — the
+     * server has no route to an address it never agreed to.
+     *
+     * Sourced from `BOOMIO_OVERLAY_LOCAL_CIDR`, defaulting to `10.77.0.2/32`. That default is
+     * right for the first client on an overlay and **wrong for the second**, which is exactly
+     * what per-client enrollment (U4) has to replace.
+     */
+    var overlayLocalCidr: String = BoomioOverlayConfig.LOCAL_CIDR
+
+    /**
      * Absolute URL of the loopback HTTP CONNECT relay this app runs for its own userspace
      * WireGuard tunnel, e.g. `http://127.0.0.1:8100`. Blank (the default) means no relay:
      * every engine dials directly, exactly as it does today.

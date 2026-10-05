@@ -261,9 +261,10 @@ class OverlayWgDialerTest {
 
     @Test
     fun `a carried host falls back to direct when the tunnel refuses`() {
-        // On the LAN the tunnel is not brought up at all, and the allow-set selects routing
-        // rather than reachability — so without this fallback the relay would break the LAN
-        // case it already serves today.
+        // ⚠️ *Not* a LAN safety net — the tunnel carries the LAN too since 2026-10-05, and
+        // hairpin is off, so a direct dial from the LAN reaches nothing. What this covers is
+        // the window before the ladder has converged, and the off-LAN case where the public
+        // edge does answer. Recorded because the comment here used to claim the opposite.
         val direct = FakeRecordingDialer()
         binding.dialFailure = IOException("tunnel is not up")
 
@@ -299,6 +300,52 @@ class OverlayWgDialerTest {
             PreferTunnelDialer(tunnel = OverlayWgDialer(binding), direct = direct)
                 .dial("bss-tor.tracemonkey.org", 443)
         }
+    }
+
+    // ------------------------------------------------------ deferred tunnel lookup
+
+    @Test
+    fun `a deferred dialler with no tunnel throws rather than reaching the network`() {
+        // ⚠️ The throw is the contract, and a silent fallback here would hide the composed
+        // policy one layer up — see the class doc. Reaching the network instead would be
+        // worse still: it would bypass the route the allow-set just chose.
+        assertFailsWith<IOException> {
+            DeferredTunnelDialer { null }.dial("bss-tor.tracemonkey.org", 443)
+        }
+    }
+
+    @Test
+    fun `a deferred dialler dials once the tunnel appears`() {
+        // The production shape: the relay binds at start-up, the tunnel comes up seconds
+        // later, and the same dialler instance has to work in both worlds. A dialler that
+        // captured `null` at start-up would keep falling back for the process's life.
+        var available: OverlayDialer? = null
+        val dialer = DeferredTunnelDialer { available }
+
+        assertFailsWith<IOException> { dialer.dial("bsf.tracemonkey.org", 443) }
+
+        available = OverlayWgDialer(binding)
+        dialer.dial("bsf.tracemonkey.org", 443)
+
+        assertEquals(listOf("bsf.tracemonkey.org" to 443), binding.dialled)
+    }
+
+    @Test
+    fun `the production pair falls back before the tunnel exists and carries after`() {
+        // The wiring the relay actually gets, exercised across the transition it exists for:
+        // `PreferTunnelDialer(DeferredTunnelDialer { … }, DirectDialer)`. Both halves are
+        // tested alone above, and this is the seam between them — the one place where a
+        // deferred throw has to be caught by the fallback rather than reaching the relay.
+        var available: OverlayDialer? = null
+        val direct = FakeRecordingDialer()
+        val dialer = PreferTunnelDialer(tunnel = DeferredTunnelDialer { available }, direct = direct)
+
+        dialer.dial("bss-tor.tracemonkey.org", 443)
+        available = OverlayWgDialer(binding)
+        dialer.dial("bss-tor.tracemonkey.org", 443)
+
+        assertEquals(1, direct.dialled.size, "the pre-tunnel dial must have gone direct")
+        assertEquals(1, binding.dialled.size, "the post-tunnel dial must have been carried")
     }
 }
 

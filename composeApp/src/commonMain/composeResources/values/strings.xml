@@ -388,6 +388,15 @@
     <string name="server_overlay_found">Overlay tunnel — %1$s</string>
     <string name="server_local_searching">Looking for a server on this network…</string>
     <string name="server_local_unavailable">No local server on this network (%1$s)</string>
+    <!-- The endpoint ladder (architecture §4.4). Authored in the default locale only, like the
+         four above: every locale falls back to these, and a partial translation is a worse
+         answer than an English sentence. `needs_manual` is the one that must never be hidden —
+         §10.7 chose no LAN fallback, so this line is how a failed discovery fails visibly, and
+         its %1$s is a whole sentence ending in the action the user can take. -->
+    <string name="overlay_endpoint_searching">Looking for the overlay tunnel…</string>
+    <string name="overlay_endpoint_found">Overlay endpoint %1$s</string>
+    <string name="overlay_endpoint_needs_manual">Overlay tunnel: %1$s</string>
+    <string name="overlay_endpoint_unavailable">Overlay tunnel unavailable (%1$s)</string>
     <string name="server_discovery_label">Server discovery</string>
     <string name="server_review_title">Review custom server</string>
     <string name="server_review_description">The discovery document is valid. Connecting will sign you out of the current server and restart the app. Confirm that this is a server you own or trust.</string>

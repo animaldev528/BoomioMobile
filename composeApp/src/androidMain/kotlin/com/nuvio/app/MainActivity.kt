@@ -14,6 +14,7 @@ import com.nuvio.app.core.network.ServerConfigurationStorage
 import com.nuvio.app.core.overlay.OverlayEndpointDiscovery
 import com.nuvio.app.core.overlay.OverlayLocalDiscovery
 import com.nuvio.app.core.overlay.OverlayRelay
+import com.nuvio.app.core.overlay.OverlaySession
 import com.nuvio.app.core.overlay.OverlayTunnel
 import com.nuvio.app.features.boomio.BoomioSessionRepository
 import com.nuvio.app.features.boomio.BoomioSessionStorage
@@ -106,9 +107,10 @@ open class MainActivity : AppCompatActivity() {
         // Beside the server configuration because the browse reads the host list from
         // it. This only stores the context; the browse itself is foreground-triggered.
         OverlayLocalDiscovery.initialize(applicationContext)
-        // The Tier 2 sibling. It owns no tunnel — it watches for one the platform or the
-        // user's WireGuard app has established — and does nothing at all until
-        // `BOOMIO_OVERLAY_ADDR` is set.
+        // The Tier 2 sibling. It watches for a tunnel two ways — one the platform or the
+        // user's WireGuard app established, and the app's *own* userspace one — and does
+        // nothing at all until `BOOMIO_OVERLAY_ADDR` is set. Only the platform path pins
+        // DNS; see its two-paths doc for why the other one must not.
         OverlayTunnel.initialize(applicationContext)
         // The endpoint ladder (architecture §4.4): mDNS, then `boomio-local`, then a person. It
         // is *after* the two above on purpose — rung 1 borrows `OverlayLocalDiscovery`'s browse
@@ -117,10 +119,16 @@ open class MainActivity : AppCompatActivity() {
         OverlayEndpointDiscovery.initialize(applicationContext)
         // The relay every engine has to be pointed at explicitly, because a userspace
         // tunnel captures nothing on its own. Process-scoped and takes no `Context`; it
-        // opens no socket at all until `BOOMIO_OVERLAY_ADDR` is set. Deliberately inert
-        // until then — nothing is wired to it yet, and every client behaves exactly as it
-        // does today while `OverlayRelay.state` is `Down`.
+        // opens no socket at all until `BOOMIO_OVERLAY_ADDR` is set, and every client
+        // behaves exactly as it does today while `OverlayRelay.state` is `Down`.
         OverlayRelay.initialize()
+        // Binds the tunnel to whatever the ladder found, and hands the relay a dialler that
+        // reads the tunnel's state per dial. ⚠️ Order against the line above does not
+        // matter, and that is by construction rather than luck: `OverlayRelay.start` binds
+        // its diallers once per process, so a tunnel reference captured at start-up would
+        // freeze the state at `Down` forever. `DeferredTunnelDialer` is what makes the
+        // relay safe to start first — and it starts before the ladder has walked anything.
+        OverlaySession.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)

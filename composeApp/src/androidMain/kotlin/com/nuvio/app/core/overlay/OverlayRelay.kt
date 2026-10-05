@@ -59,7 +59,11 @@ internal sealed interface RelayState {
  * the policy.
  */
 internal class OverlayDialers(
-    /** Hosts in the allow-set: through the tunnel once U2 lands. */
+    /**
+     * Hosts in the allow-set. In production this is a [PreferTunnelDialer], so "carried"
+     * names the *intent* — the route the allow-set selected — rather than a guarantee about
+     * which socket the bytes took. It falls back to direct while the tunnel is down.
+     */
     val carried: OverlayDialer,
     /** Everything else, and every loopback address. */
     val direct: OverlayDialer,
@@ -124,15 +128,28 @@ internal object OverlayRelay {
     private var lifecycleStarted = false
 
     /**
-     * U1's diallers: **both routes direct**.
+     * U3's diallers: **an allow-set host prefers the tunnel, everything else goes direct**.
      *
-     * This is not a placeholder that does nothing — it is the correct U1 behaviour, and it
-     * is genuinely fail-open. A boomio host CONNECTed through the relay goes to the same
-     * public address the app would have used anyway, so with no tunnel the relay is
-     * transparent. U2 replaces [OverlayDialers.carried] with the netstack dialler and the
-     * allow-set starts meaning something.
+     * ⚠️ **The tunnel is looked up per dial, not captured here.** [start] runs once per
+     * process from `MainActivity.onCreate`, which is before the discovery ladder has
+     * walked anything, so a dialler holding a tunnel reference would hold `Down` forever.
+     * [DeferredTunnelDialer] reads the state when a connection actually arrives — see its
+     * doc for the full reasoning.
+     *
+     * ⚠️ **This is still fail-open, and deliberately so.** A boomio host CONNECTed before
+     * the tunnel is up falls back to the same public address the app would have used
+     * anyway, so the relay is transparent rather than broken while the ladder converges.
+     * Once it converges, the same host goes through the tunnel with no change to any
+     * engine's configuration — which is the property that makes pointing clients at a
+     * loopback port worth doing at all.
      */
-    private val directOnlyDialers = OverlayDialers(carried = DirectDialer, direct = DirectDialer)
+    private val dialers = OverlayDialers(
+        carried = PreferTunnelDialer(
+            tunnel = DeferredTunnelDialer { OverlaySession.dialerOrNull() },
+            direct = DirectDialer,
+        ),
+        direct = DirectDialer,
+    )
 
     /**
      * Starts the relay for this process, once.
@@ -148,7 +165,7 @@ internal object OverlayRelay {
         if (lifecycleStarted) return
         lifecycleStarted = true
         if (BoomioConfig.overlayServerAddress.isBlank()) return
-        start(scope, directOnlyDialers, ::localServerHosts)
+        start(scope, dialers, ::localServerHosts)
     }
 
     /**
