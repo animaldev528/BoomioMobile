@@ -2,6 +2,7 @@ package com.nuvio.app.core.overlay
 
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.network.isPublicServerHost
+import com.nuvio.app.features.addons.AddonRepository
 import com.nuvio.app.features.boomio.BoomioConfig
 
 /**
@@ -52,5 +53,64 @@ internal fun localServerHostCandidates(): List<String> = listOf(
     BoomioConfig.bsmBaseUrl,
 )
 
-/** The hosts the overlay may repoint at a LAN address. Derived at runtime, never hardcoded. */
-internal fun localServerHosts(): Set<String> = derivePinnableHosts(localServerHostCandidates())
+/**
+ * The registrable-domain suffixes of [serverHosts] — the last two labels of each.
+ *
+ * A heuristic, and a deliberately conservative one: it is anchored on hosts the user's
+ * own configuration already named, so it can only widen the pin to hosts on the **same
+ * domain as the server**. A multi-label public suffix (`co.uk`) would over-match; the
+ * pin is pin-first, so the cost of an over-match is one failed connect, not a break.
+ */
+private fun serverDomainSuffixes(serverHosts: Set<String>): Set<String> = serverHosts
+    .mapNotNull { host ->
+        val labels = host.split('.').filter { it.isNotBlank() }
+        if (labels.size < 2) null else labels.takeLast(2).joinToString(".")
+    }
+    .toSet()
+
+/**
+ * The addon manifest hosts served by the *same server* as [serverHosts].
+ *
+ * ⚠️ **This is where most of the app's server hosts actually live, and leaving them out
+ * breaks the home screen.** The catalogue is assembled from addons, and on the reference
+ * deployment 19 of 21 sit on the server's own domain — 17 row addons on
+ * `tmdb.tracemonkey.org`, plus `bsf.` and `usn.`. A pin set derived only from the server
+ * configuration therefore covers auth and the companion plane and leaves the entire
+ * catalogue plane resolving to the public edge.
+ *
+ * Observed on device 2026-10-05, with the phone's DNS set to a public resolver: the
+ * pinned Supabase call answered (`PGRST202` from PostgREST) while every addon request
+ * went to `153.68.210.49` — the WAN address, unreachable from the LAN because hairpin
+ * NAT is off — and timed out. To the user that is "no posters and no playback".
+ *
+ * Filtered to the server's own domain so a third-party addon (a public Stremio addon,
+ * `catalog.nuvio.tv`) keeps resolving publicly. Those are not the user's server, and
+ * repointing them at a LAN address would be simply wrong.
+ */
+internal fun derivePinnableAddonHosts(
+    serverHosts: Set<String>,
+    addonUrls: Iterable<String>,
+): Set<String> {
+    if (serverHosts.isEmpty()) return emptySet()
+    val suffixes = serverDomainSuffixes(serverHosts)
+    return derivePinnableHosts(addonUrls)
+        .filter { host -> host in serverHosts || suffixes.any { host.endsWith(".$it") } }
+        .toSet()
+}
+
+/** The manifest URLs of the addons installed for the active profile. */
+private fun addonManifestUrls(): List<String> =
+    AddonRepository.uiState.value.addons.map { it.manifestUrl }
+
+/**
+ * The hosts the overlay may repoint at a LAN address. Derived at runtime, never hardcoded.
+ *
+ * ⚠️ **Read live, never cached.** The addon catalogue arrives asynchronously, seconds
+ * after the first browse, so this same call returns a *larger* set later in the session.
+ * Callers must ask again when the addon set changes rather than pinning once at browse
+ * time — see `OverlayLocalDiscovery.observeAddonChanges`.
+ */
+internal fun localServerHosts(): Set<String> {
+    val serverHosts = derivePinnableHosts(localServerHostCandidates())
+    return serverHosts + derivePinnableAddonHosts(serverHosts, addonManifestUrls())
+}

@@ -103,4 +103,69 @@ class LocalServerHostsTest {
             "the Supabase fallback host must not be pinnable",
         )
     }
+
+    @Test
+    fun `pins addon hosts on the server's own domain`() {
+        // The shape the reference deployment actually has: the catalogue is 19 addons on
+        // the server's domain and 2 that are somebody else's. Only the first group may be
+        // repointed, and missing that group is what made the home screen empty on device.
+        val serverHosts = setOf("nuvioserver.tracemonkey.org", "bsc.tracemonkey.org")
+        val addonUrls = listOf(
+            "https://tmdb.tracemonkey.org/74c28b54/qZaWf26/row/genremovie/manifest.json",
+            "https://bsf.tracemonkey.org/manifest.json",
+            "https://usn.tracemonkey.org/b3a0f61d/manifest.json",
+            "https://opensubtitles-v3.strem.io/manifest.json",
+            "https://catalog.nuvio.tv/manifest.json",
+        )
+
+        assertEquals(
+            setOf("tmdb.tracemonkey.org", "bsf.tracemonkey.org", "usn.tracemonkey.org"),
+            derivePinnableAddonHosts(serverHosts, addonUrls),
+        )
+    }
+
+    @Test
+    fun `a two-label server host still matches its own subdomains`() {
+        // `example.com` has no label to spare, so the suffix is the host itself rather
+        // than the empty string -- otherwise every addon would match everything.
+        assertEquals(
+            setOf("tmdb.example.com"),
+            derivePinnableAddonHosts(
+                setOf("example.com"),
+                listOf("https://tmdb.example.com/manifest.json", "https://cdn.other.net/manifest.json"),
+            ),
+        )
+    }
+
+    @Test
+    fun `never pins an addon host without a server host to anchor it`() {
+        // With nothing discovered there is no domain to be "the same as", so a
+        // third-party addon must not become pinnable by accident.
+        assertTrue(
+            derivePinnableAddonHosts(emptySet(), listOf("https://tmdb.tracemonkey.org/manifest.json"))
+                .isEmpty(),
+        )
+    }
+
+    @Test
+    fun `an addon host equal to a server host is kept`() {
+        assertEquals(
+            setOf("bsc.tracemonkey.org"),
+            derivePinnableAddonHosts(
+                setOf("bsc.tracemonkey.org"),
+                listOf("https://bsc.tracemonkey.org/manifest.json"),
+            ),
+        )
+    }
+
+    @Test
+    fun `addon hosts are still filtered by the public-host rule`() {
+        // A LAN-local addon URL must not enter the set through the addon door.
+        assertTrue(
+            derivePinnableAddonHosts(
+                setOf("nuvioserver.tracemonkey.org"),
+                listOf("https://tmdb.local/manifest.json", "https://192.168.68.65/manifest.json"),
+            ).isEmpty(),
+        )
+    }
 }

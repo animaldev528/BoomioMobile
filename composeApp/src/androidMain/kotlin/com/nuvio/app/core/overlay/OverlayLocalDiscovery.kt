@@ -15,6 +15,7 @@ import android.util.Log
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
+import com.nuvio.app.features.addons.AddonRepository
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -92,6 +93,17 @@ internal object OverlayLocalDiscovery {
 
     private var lifecycleStarted = false
 
+    /**
+     * The address the last successful browse pinned, or null when nothing is pinned.
+     *
+     * Held so the pin can be **re-applied** to a widened host set without re-browsing.
+     * The host set is not fixed at browse time: the addon catalogue, which is where most
+     * of the app's server hosts come from, loads asynchronously — see
+     * [observeAddonChanges].
+     */
+    @Volatile
+    private var pinnedAddress: InetAddress? = null
+
     fun initialize(context: Context) {
         appContext = context.applicationContext
         // Idempotent: onCreate can run again after a configuration-forced restart, and
@@ -101,6 +113,7 @@ internal object OverlayLocalDiscovery {
         observeForeground()
         observeNetworkChanges()
         observeServerChanges()
+        observeAddonChanges()
     }
 
     /** Browses on foreground, at most once per [RESULT_TTL_MS]. */
@@ -172,6 +185,32 @@ internal object OverlayLocalDiscovery {
     }
 
     /**
+     * Re-applies the pin when the *host set* widens under a pin that is already in place.
+     *
+     * ⚠️ **This is the difference between "auth works" and "the app works".** The addon
+     * catalogue is where most of the app's server hosts live (`derivePinnableAddonHosts`),
+     * and it is loaded asynchronously — on 2026-10-05 it arrived about 5 s *after* the
+     * first browse had already pinned, so deriving the host set only inside [refresh]
+     * pinned the server hosts and left the whole catalogue plane pointing at the public
+     * edge for the rest of the session.
+     *
+     * Deliberately does **not** re-browse: the discovered address has not changed, only
+     * the list of hosts that should use it. Re-browsing here would cost a 6 s NSD window
+     * on every profile switch for no new information.
+     */
+    private fun observeAddonChanges() {
+        scope.launch {
+            AddonRepository.uiState
+                .map { localServerHosts() }
+                .distinctUntilChanged()
+                .collect { hosts ->
+                    val address = pinnedAddress ?: return@collect
+                    if (hosts.isNotEmpty()) OverlayPinRegistry.pin(hosts, address)
+                }
+        }
+    }
+
+    /**
      * Fire-and-forget [refresh] for callers that are not themselves coroutines —
      * lifecycle hooks and configuration changes. Never cancelled, so a browse that is
      * in flight when the app backgrounds still publishes its result.
@@ -182,6 +221,7 @@ internal object OverlayLocalDiscovery {
 
     /** Drops the pin without browsing. Used on network change and on server switch. */
     fun clear() {
+        pinnedAddress = null
         OverlayPinRegistry.clear()
         LocalServerState.update(LocalServerStatus.Idle)
     }
@@ -270,6 +310,7 @@ internal object OverlayLocalDiscovery {
                 val target = addresses.single()
                 val candidate = live.firstOrNull { it.address == target }
                     ?: candidates.first { it.address == target }
+                pinnedAddress = candidate.address
                 OverlayPinRegistry.pin(hosts, candidate.address)
                 LocalServerState.update(
                     LocalServerStatus.Found(
@@ -286,7 +327,12 @@ internal object OverlayLocalDiscovery {
     private fun publish(status: LocalServerStatus) {
         // Any status that is not Found means there is nothing to pin. Clearing here is
         // the main stale-pin defence: an address from another network is worse than none.
-        if (status !is LocalServerStatus.Found) OverlayPinRegistry.clear()
+        if (status !is LocalServerStatus.Found) {
+            // Dropped together with the registry, or `observeAddonChanges` would re-pin
+            // an address the user has just invalidated.
+            pinnedAddress = null
+            OverlayPinRegistry.clear()
+        }
         LocalServerState.update(status)
     }
 
