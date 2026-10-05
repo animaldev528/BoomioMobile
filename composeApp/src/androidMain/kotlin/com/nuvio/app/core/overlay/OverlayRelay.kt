@@ -124,6 +124,19 @@ internal object OverlayRelay {
     @Volatile
     private var handle: OverlayRelayHandle? = null
 
+    /**
+     * The running relay's dialable endpoint, or null when it is not up.
+     *
+     * ⚠️ **Read this per use; never capture it into a `val` at construction time.**
+     * [start] is once-per-process and is called from `onCreate`, while the HTTP clients
+     * that consume this are built lazily all over the app and some of them are built
+     * *before* the discovery ladder has walked anything. A captured copy is a client
+     * stuck at `null` for the life of the process — the relay comes up and nothing
+     * notices. Same rule as [DeferredTunnelDialer]'s per-dial state lookup.
+     */
+    val proxy: OverlayProxyEndpoint?
+        get() = handle?.let { OverlayProxyEndpoint(it.port, it.secret, it.proxyUrl) }
+
     @Volatile
     private var lifecycleStarted = false
 
@@ -417,6 +430,31 @@ internal object OverlayRelay {
         }
     }
 }
+
+/**
+ * The relay as its clients see it: where to dial, and what to authenticate with.
+ *
+ * ⚠️ **Deliberately not [OverlayRelayHandle].** Handing the handle out would put `stop()`
+ * in reach of every client that only wanted a proxy URL, and calling it there would close
+ * the socket while [OverlayRelay]'s own `handle` stayed non-null — a relay that reports
+ * `Up`, answers nothing, and can never be started again. This type is the whole of what a
+ * client is entitled to.
+ */
+internal data class OverlayProxyEndpoint(
+    /** The kernel-assigned loopback port. */
+    val port: Int,
+
+    /** The per-process secret, hex. */
+    val secret: String,
+
+    /**
+     * `http://user:secret@127.0.0.1:port` — the shape libmpv's `http-proxy` needs.
+     *
+     * libmpv has no separate credential option, so the credentials must ride in the URL.
+     * That is why [newRelaySecret] emits hex: nothing to percent-escape and no padding.
+     */
+    val url: String,
+)
 
 /**
  * A running relay.

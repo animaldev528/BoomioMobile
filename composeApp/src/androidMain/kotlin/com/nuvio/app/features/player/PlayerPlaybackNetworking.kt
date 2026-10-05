@@ -7,6 +7,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
 import com.nuvio.app.core.network.IPv4FirstDns
 import com.nuvio.app.core.overlay.OverlayPinRegistry
+import com.nuvio.app.core.overlay.withOverlayProxy
 import okhttp3.OkHttpClient
 import java.net.HttpURLConnection
 import java.net.URL
@@ -57,6 +58,7 @@ internal object PlayerPlaybackNetworking {
     private val playbackHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .dns(IPv4FirstDns(usePins = false))
+            .withOverlayProxy()
             .sslSocketFactory(sslContext.socketFactory, trustAllManager)
             .hostnameVerifier(playbackHostnameVerifier)
             .connectTimeout(15, TimeUnit.SECONDS)
@@ -81,6 +83,7 @@ internal object PlayerPlaybackNetworking {
     private val pinnedPlaybackHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .dns(IPv4FirstDns())
+            .withOverlayProxy()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
