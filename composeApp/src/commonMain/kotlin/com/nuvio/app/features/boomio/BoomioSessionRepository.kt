@@ -48,11 +48,28 @@ data class BoomioSession(
     val displayName: String?,
 )
 
-/** Transient state for the device-code self-approve link flow. */
+/** Transient state for the device-code link flow. */
 sealed interface BoomioLinkState {
     data object Idle : BoomioLinkState
     data object Starting : BoomioLinkState
+
+    /** Self-approve took; the poll is expected to complete on its own. */
     data object Linking : BoomioLinkState
+
+    /**
+     * A device code is live and waiting for a **human** to approve it.
+     *
+     * Set when the best-effort self-approve is declined. The edge gates
+     * `POST /api/v1/auth/pair` behind `requireInternalKeyStrict` (approval mints
+     * a 90-day session, so it is deliberately not reachable unauthenticated);
+     * the intended approver is the bsm `/tv` page, server-to-server. The code is
+     * already in Redis, so the poll keeps running and completes as soon as
+     * someone approves it at [verificationUri].
+     */
+    data class AwaitingApproval(
+        val userCode: String,
+        val verificationUri: String?,
+    ) : BoomioLinkState
 
     /** [BoomioLinkFailure.Start] is generic network/server failure. */
     data class Failed(val reason: BoomioLinkFailure) : BoomioLinkState
@@ -158,7 +175,8 @@ object BoomioSessionRepository {
             return
         }
         if (_linkState.value is BoomioLinkState.Starting ||
-            _linkState.value is BoomioLinkState.Linking
+            _linkState.value is BoomioLinkState.Linking ||
+            _linkState.value is BoomioLinkState.AwaitingApproval
         ) {
             return
         }
@@ -174,8 +192,32 @@ object BoomioSessionRepository {
                     return@launch
                 }
                 val request = requestDeviceCode()
-                selfApprove(request.user_code, authUser)
-                _linkState.value = BoomioLinkState.Linking
+
+                // Best-effort self-approve. On an edge that gates /v1/auth/pair
+                // (requireInternalKeyStrict — approval mints a 90-day session),
+                // this answers 401. That is NOT a failure of the link flow: the
+                // code is already live in Redis, so fall through to the human
+                // approval path and let whoever opens `verification_uri` (bsm
+                // /tv) complete the pair. The poll below picks up the token
+                // either way, so this stays a one-tap flow wherever the edge
+                // still permits self-approve.
+                val selfApproved = try {
+                    selfApprove(request.user_code, authUser)
+                    true
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    log.i { "self-approve declined (${error.message}); awaiting approval" }
+                    false
+                }
+                _linkState.value = if (selfApproved) {
+                    BoomioLinkState.Linking
+                } else {
+                    BoomioLinkState.AwaitingApproval(
+                        userCode = request.user_code,
+                        verificationUri = request.verification_uri,
+                    )
+                }
                 pollAndComplete(request, authUser)
             } catch (error: CancellationException) {
                 throw error
@@ -335,6 +377,7 @@ private data class PairPayload(
 private data class DeviceRequestResponse(
     @SerialName("device_code") val device_code: String = "",
     @SerialName("user_code") val user_code: String = "",
+    @SerialName("verification_uri") val verification_uri: String? = null,
     @SerialName("expires_in") val expires_in: Int = 300,
     @SerialName("interval") val interval: Int = 5,
 )
