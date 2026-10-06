@@ -93,7 +93,27 @@ object BoomioSessionRepository {
     private val log = Logger.withTag("BoomioSessionRepository")
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val http = createBoomioHttpClient()
+    /**
+     * ⚠️ **Deliberately NOT [createBoomioHttpClient].** This object owns the *pairing* calls —
+     * the device-code request that mints the `bs_ses_*` token — and pairing has to happen
+     * **before** anything is enrolled, so it cannot ride a seam that only exists once
+     * enrollment has happened. `createBoomioHttpClient()` carries `withOverlayProxy()` and the
+     * overlay DNS hook: the relay dials through a tunnel that is not up yet, and the hook
+     * resolves boomio names to an overlay address that has not been assigned. Either one turns
+     * this call into a connect timeout, which is exactly the "Couldn't start connecting" the
+     * link button reports.
+     *
+     * Enrollment depends on this token, so the dependency has to run one way only. This dials
+     * the public edge directly on the platform resolver — the same plane, and for the same
+     * reason, as `OverlayEnrollment.enrollmentHttpClient()`.
+     */
+    private val http = HttpClient {
+        install(HttpTimeout) {
+            requestTimeoutMillis = 15_000
+            connectTimeoutMillis = 10_000
+        }
+        expectSuccess = false
+    }
 
     private val _session = MutableStateFlow<BoomioSession?>(null)
     /** Non-null once linked. Cleared by [unlink] or storage reset. */
