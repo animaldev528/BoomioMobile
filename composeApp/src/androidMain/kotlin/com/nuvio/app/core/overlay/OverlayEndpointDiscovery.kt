@@ -449,18 +449,53 @@ internal object OverlayEndpointDiscovery {
      * no key to dial with, so there is nothing to try — and a first-ever launch away from home has
      * no name to climb *from* either, since names are only ever learned from a publication. That
      * launch belongs to rung 3, and [OverlayEndpointStatus.NeedsManual] is the right answer to it.
+     *
+     * ⚠️ **Which name is preferred depends on where the client is standing, and the gate is a
+     * preference rather than a veto — both are changes.** [OverlayDiscoveryNames.inOrder] is
+     * LAN-first because at home `lan=` is the reachable one, and the reverse holds away from home;
+     * with every rung just failed there is nothing left to correct a wrong guess. So the walk is
+     * reordered for the network in force before it starts — LAN-first on Wi-Fi or Ethernet,
+     * WAN-first otherwise.
+     *
+     * The gate still decides whenever it can: a name that answers on [EDGE_PORT] wins outright,
+     * whatever its position. What it cannot decide is the case this tier now exists to survive —
+     * with the WAN forward closed, which is the in-app tunnel's whole point since it needs nothing
+     * but UDP 51820, *no* name answers, and a tier that insisted would come back empty at exactly
+     * the moment it is the only thing left to try. So when no name proves itself the **first name
+     * that resolved** is taken, which after reordering is the one that suits the network in force.
+     *
+     * The handshake remains the only real verdict, as the class doc says; a name that turns out to
+     * be wrong fails visibly and is corrected by the next walk, which is the trade §10.7 chose
+     * over a silent fallback (see `onNetworkChanged`). The cost is the one ordering can never
+     * remove: the gate proves the *name* is plausible, never that the forward is open.
      */
     private suspend fun namedFallback(): OverlayEndpoint? {
         val names = discoveryNames ?: return null
         val known = current ?: return null
         val key = validServerKeyOrNull(known.serverPublicKeyBase64) ?: return null
-        val attempt = names.inOrder()
+        // ⚠️ **Ordered for the network in force, because the rungs that would have corrected a
+        // wrong guess are exactly the ones that just failed.**
+        val onLan = isOnLocalNetwork()
+        val attempt = names.inOrder(preferLan = onLan)
         if (attempt.isEmpty()) return null
 
-        Log.i(TAG, "Every rung missed the gate; climbing published names: ${attempt.joinToString()}")
+        Log.i(
+            TAG,
+            "Every rung missed the gate; climbing published names " +
+                "(${if (onLan) "LAN first" else "WAN first"}): ${attempt.joinToString()}",
+        )
 
         val startedAt = SystemClock.elapsedRealtime()
-        val found = withContext(Dispatchers.IO) {
+
+        // ⚠️ **The fallback is the *first* name that resolved, not the last.** Off-LAN the walk is
+        // WAN-first, so the first name to resolve is the public one; letting a later name overwrite
+        // it would swap the right answer for `lan=`'s private address — the exact failure this tier
+        // is being taught to avoid. First-wins is also what makes it race-free: it is set on the
+        // earliest iteration that reaches the gate, so a walk cut short by [NAME_TIER_BUDGET_MS]
+        // still leaves the preferred name behind rather than an empty tier.
+        var unproven: OverlayEndpoint? = null
+
+        val proven = withContext(Dispatchers.IO) {
             withTimeoutOrNull(NAME_TIER_BUDGET_MS) {
                 for (name in attempt) {
                     val address = resolveHost(name, NAME_RESOLVE_BUDGET_MS) ?: continue
@@ -471,19 +506,51 @@ internal object OverlayEndpointDiscovery {
                         source = OverlayEndpointSource.DISCOVERY_NAME,
                     ) ?: continue
                     if (isReachable(candidate.host, EDGE_PORT)) return@withTimeoutOrNull candidate
+                    if (unproven == null) unproven = candidate
                 }
                 null
             }
         }
-        if (found == null) {
-            Log.w(
-                TAG,
-                "No published name answered (${attempt.joinToString()}) after " +
-                    "${SystemClock.elapsedRealtime() - startedAt}ms",
-            )
+
+        // Kept loud, and split by which thing failed: "the names did not resolve" and "the names
+        // resolved but nothing answered" are different faults, and the tier is quiet enough that
+        // this line is the only place either one shows up.
+        if (proven == null) {
+            val elapsedMs = SystemClock.elapsedRealtime() - startedAt
+            val tried = attempt.joinToString()
+            if (unproven == null) {
+                Log.w(TAG, "No published name resolved ($tried) after ${elapsedMs}ms")
+            } else {
+                Log.w(
+                    TAG,
+                    "No published name answered the gate on $EDGE_PORT ($tried) after " +
+                        "${elapsedMs}ms; taking ${unproven!!.authority} anyway",
+                )
+            }
         }
-        return found
+        return proven ?: unproven
     }
+
+    /**
+     * True when the default network is a LAN transport, which is the one bit of ordering this
+     * tier needs and the gate cannot supply.
+     *
+     * ⚠️ **Trustworthy here specifically because this overlay is userspace.** A `VpnService`
+     * tunnel — the design D2 that all of this exists to avoid — makes the active network the VPN,
+     * so a transport test would answer "not LAN" while the phone sits on the sofa. The in-app
+     * tunnel registers no such network, so the answer stays the physical one.
+     *
+     * ⚠️ **A third-party VPN holding the slot still reads as non-LAN**, because that network *is*
+     * a VPN transport. The result is WAN-first, which is the same answer a roaming phone gets and
+     * is corrected by the next walk if it is wrong; NordVPN on the home Wi-Fi is therefore the one
+     * arrangement where this ordering is deliberately allowed to guess. It only bites when every
+     * rung has already failed, which on the LAN means mDNS *and* [LOCAL_RECORD] both missed.
+     *
+     * An unknown context defaults to LAN-first, matching [OverlayDiscoveryNames.inOrder]: before
+     * `initialize` there is no network to read, and the published order is the safe assumption.
+     */
+    private fun isOnLocalNetwork(): Boolean =
+        appContext?.let { OverlayLocalDiscovery.isOnLocalNetwork(it) } ?: true
 
     // ---------------------------------------------------------------------------------------
     // The gate, and what happens to a winner

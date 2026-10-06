@@ -625,7 +625,16 @@ internal object OverlayLocalDiscovery {
         }.getOrDefault(false)
     }
 
-    private fun isOnLocalNetwork(context: Context): Boolean {
+    /**
+     * Whether the default network is a LAN transport (Wi-Fi or Ethernet).
+     *
+     * ⚠️ **`internal` rather than private because [OverlayEndpointDiscovery] reads it too** — to
+     * decide which published discovery name to prefer. The caveat that makes the answer meaningful
+     * for that caller: the overlay's own tunnel is userspace and registers no VPN network, so
+     * sitting on Wi-Fi still reads as LAN even with the tunnel up. A third-party `VpnService`
+     * (NordVPN) does hold the slot and therefore reads as non-LAN.
+     */
+    internal fun isOnLocalNetwork(context: Context): Boolean {
         val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             ?: return false
         val capabilities = manager.activeNetwork?.let { manager.getNetworkCapabilities(it) }

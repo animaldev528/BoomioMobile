@@ -56,7 +56,7 @@ internal data class OverlayDiscoveryNames(
     val isEmpty: Boolean get() = lan == null && wan == null
 
     /**
-     * The names to climb, in the order to climb them — **LAN first**.
+     * The names to climb, in the order to climb them — **LAN first unless [preferLan]**.
      *
      * At home `lan=` is the reachable one and `wan=` is not (the public address does not hairpin —
      * architecture §7); off-LAN the reverse holds. Trying `lan=` first therefore costs one failed
@@ -64,11 +64,24 @@ internal data class OverlayDiscoveryNames(
      * fails immediately rather than after a timeout. The reverse order would put the working name
      * behind a guaranteed-dead one on every cold start at home, which is the common case.
      *
+     * ⚠️ **`preferLan` exists because that reasoning assumes the gate can still tell the names
+     * apart.** A private address fails fast on a foreign network only while there is something to
+     * fail *against*; with the WAN forward closed — the in-app tunnel's whole point, since it
+     * needs nothing but UDP 51820 — nothing answers for either name, and the order becomes the
+     * only thing doing the choosing. [OverlayEndpointDiscovery] therefore passes the network it is
+     * really on, so the name that suits it is tried first *and* is the one kept when no name
+     * proves itself. The default is the published order, which is what a caller with no network to
+     * read should get.
+     *
      * Deduplicated, because a publisher that set both fields to the same name would otherwise
      * cost a second resolve and a second failed probe — on the failure path, for an answer the
-     * ladder already has. Trying one name twice is never a different question.
+     * ladder already has. Trying one name twice is never a different question. Deduplication runs
+     * before the reversal, so the result is deduplicated either way round.
      */
-    fun inOrder(): List<String> = listOfNotNull(lan, wan).distinct()
+    fun inOrder(preferLan: Boolean = true): List<String> {
+        val byPreference = listOfNotNull(lan, wan).distinct()
+        return if (preferLan) byPreference else byPreference.asReversed()
+    }
 }
 
 /**

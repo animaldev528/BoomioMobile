@@ -323,6 +323,30 @@ class OverlayEndpointDiscoveryTest {
         assertFalse(OverlayDiscoveryNames(LAN_NAME, null).isEmpty)
     }
 
+    @Test
+    fun `away from the LAN the ladder climbs wan first`() {
+        // ⚠️ The reversal is what keeps the names tier useful once the WAN forward is closed. The
+        // gate can no longer tell the two apart there -- a private address and a public one both
+        // fail when nothing answers on 443 -- so the order is the only thing choosing, and the
+        // tier keeps the *first* name that resolved. If `lan=` stayed in front it would be the
+        // private address that got kept, off-LAN, which is the one answer that cannot work.
+        assertEquals(
+            listOf(WAN_NAME, LAN_NAME),
+            OverlayDiscoveryNames(LAN_NAME, WAN_NAME).inOrder(preferLan = false),
+        )
+        // Deduplication still applies, and still runs before the reversal.
+        assertEquals(
+            listOf(LAN_NAME),
+            OverlayDiscoveryNames(LAN_NAME, LAN_NAME).inOrder(preferLan = false),
+        )
+        // A one-name publication is unaffected by the preference.
+        assertEquals(
+            listOf(WAN_NAME),
+            OverlayDiscoveryNames(null, WAN_NAME).inOrder(preferLan = false),
+        )
+        assertTrue(OverlayDiscoveryNames(null, null).inOrder(preferLan = false).isEmpty())
+    }
+
     // -----------------------------------------------------------------------------------------
     // The DNS wire parser — rung 2
     // -----------------------------------------------------------------------------------------
