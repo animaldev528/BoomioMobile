@@ -4,6 +4,7 @@ import android.app.Application
 import java.io.ByteArrayOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -218,6 +219,111 @@ class OverlayEndpointDiscoveryTest {
     }
 
     // -----------------------------------------------------------------------------------------
+    // The two discovery names — the client half of #66
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    fun `the mDNS advert publishes both discovery names`() {
+        val tuple = parseMdnsAdvertTxt(
+            mapOf(
+                "pubkey" to PUBLISHED_SERVER_KEY_B64.toByteArray(),
+                "port" to "51820".toByteArray(),
+                "lan" to LAN_NAME.toByteArray(),
+                "wan" to WAN_NAME.toByteArray(),
+            ),
+        )
+        assertEquals(LAN_NAME, tuple.lanName)
+        assertEquals(WAN_NAME, tuple.wanName)
+    }
+
+    @Test
+    fun `the DuckDNS TXT record publishes both discovery names`() {
+        val tuple = parseDnsTxtRecord(
+            listOf("v1;pk=$PUBLISHED_SERVER_KEY_B64;port=51820;prov=0;lan=$LAN_NAME;wan=$WAN_NAME"),
+        )
+        assertEquals(LAN_NAME, tuple.lanName)
+        assertEquals(WAN_NAME, tuple.wanName)
+    }
+
+    @Test
+    fun `the names survive a publication that splits them across two TXT records`() {
+        // The publisher is free to put the tuple and the names in separate records, and the
+        // join-on-`;` is what makes that readable as one publication rather than two halves.
+        val tuple = parseDnsTxtRecord(
+            listOf("v1;pk=$PUBLISHED_SERVER_KEY_B64;port=51820", "lan=$LAN_NAME;wan=$WAN_NAME"),
+        )
+        assertEquals(PUBLISHED_SERVER_KEY_B64, tuple.serverPublicKeyBase64)
+        assertEquals(LAN_NAME, tuple.lanName)
+        assertEquals(WAN_NAME, tuple.wanName)
+    }
+
+    @Test
+    fun `a publication older than the names reads as no names, not as a crash`() {
+        // Every deployed server is this shape until #66 ships, so it is the common case rather
+        // than an edge one -- and it must be "unknown", never a name that is the empty string.
+        val mdns = parseMdnsAdvertTxt(mapOf("pubkey" to PUBLISHED_SERVER_KEY_B64.toByteArray()))
+        assertNull(mdns.lanName)
+        assertNull(mdns.wanName)
+
+        val txt = parseDnsTxtRecord(listOf("v1;pk=$PUBLISHED_SERVER_KEY_B64;port=51820;prov=0"))
+        assertNull(txt.lanName)
+        assertNull(txt.wanName)
+    }
+
+    @Test
+    fun `a blank or malformed name reads as absent`() {
+        // A publisher bug must not become a resolver call on the ladder's *failure* path, which
+        // is the one place a stray timeout is least affordable.
+        val tuple = parseMdnsAdvertTxt(
+            mapOf(
+                "lan" to "   ".toByteArray(),
+                "wan" to "https://boomio.duckdns.org/".toByteArray(),
+            ),
+        )
+        assertNull(tuple.lanName)
+        assertNull(tuple.wanName)
+    }
+
+    @Test
+    fun `a discovery name is normalised to the one form a resolver and a log both expect`() {
+        // Case and a trailing root dot are two spellings of one name, and only one of them
+        // compares equal to what the wire, a log line, or this test expects.
+        assertEquals(WAN_NAME, validDiscoveryNameOrNull("  BOOMIO.DuckDNS.org.  "))
+        assertEquals(LAN_NAME, validDiscoveryNameOrNull(LAN_NAME))
+        assertNull(validDiscoveryNameOrNull(null))
+        assertNull(validDiscoveryNameOrNull(""))
+        assertNull(validDiscoveryNameOrNull("   "))
+        assertNull(validDiscoveryNameOrNull("."))
+        // A name is not an authority: each of these is a publisher bug, not a name to salvage.
+        assertNull(validDiscoveryNameOrNull("boomio.duckdns.org:51820"))
+        assertNull(validDiscoveryNameOrNull("boomio/duckdns.org"))
+        assertNull(validDiscoveryNameOrNull("boomio duckdns.org"))
+        assertNull(validDiscoveryNameOrNull("lan=boomio.duckdns.org"))
+    }
+
+    @Test
+    fun `the ladder climbs lan before wan`() {
+        // ⚠️ The order is the design. At home `lan=` is the reachable one and `wan=` is not (the
+        // public address does not hairpin); off-LAN the reverse holds. Trying `lan=` first costs
+        // one failed probe at home and nothing away from it, because a private address on a
+        // foreign network fails immediately rather than after a timeout. The reverse order would
+        // hide the working name behind a guaranteed-dead one on every cold start at home.
+        assertEquals(
+            listOf(LAN_NAME, WAN_NAME),
+            OverlayDiscoveryNames(LAN_NAME, WAN_NAME).inOrder(),
+        )
+        // A publication that carries only one name still yields a climbable list.
+        assertEquals(listOf(WAN_NAME), OverlayDiscoveryNames(null, WAN_NAME).inOrder())
+        assertEquals(listOf(LAN_NAME), OverlayDiscoveryNames(LAN_NAME, null).inOrder())
+        // A publisher that set both names to the same value must not cost two probes for one
+        // answer -- this runs on the failure path, where latency is least affordable.
+        assertEquals(listOf(LAN_NAME), OverlayDiscoveryNames(LAN_NAME, LAN_NAME).inOrder())
+        assertTrue(OverlayDiscoveryNames(null, null).inOrder().isEmpty())
+        assertTrue(OverlayDiscoveryNames(null, null).isEmpty)
+        assertFalse(OverlayDiscoveryNames(LAN_NAME, null).isEmpty)
+    }
+
+    // -----------------------------------------------------------------------------------------
     // The DNS wire parser — rung 2
     // -----------------------------------------------------------------------------------------
 
@@ -407,6 +513,13 @@ class OverlayEndpointDiscoveryTest {
     /** The key published by both channels for this deployment — see `OverlayWgTunnelTest`. */
     private companion object {
         const val PUBLISHED_SERVER_KEY_B64 = "kqZZdZcb8cGF9AhUTJw7RWuM/98WZs9NJOGlBKWtiU0="
+
+        /**
+         * The two names the publisher writes into both channels -- see
+         * `overlay/overlay-duckdns.py`, where `DUCKDNS_NAME_LAN` names the first.
+         */
+        const val LAN_NAME = "boomio-lan.duckdns.org"
+        const val WAN_NAME = "boomio.duckdns.org"
         const val TYPE_A = 1
         const val TYPE_CNAME = 5
         const val TYPE_TXT = 16

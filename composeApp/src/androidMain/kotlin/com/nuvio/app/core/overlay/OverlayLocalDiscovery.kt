@@ -398,6 +398,8 @@ internal object OverlayLocalDiscovery {
             serverPublicKeyBase64 = candidate.serverPublicKey,
             port = candidate.wgPort,
             serviceName = candidate.serviceName,
+            lanName = candidate.lanName,
+            wanName = candidate.wanName,
         )
         OverlayPinRegistry.pin(LocalServerSource.LAN, hosts, candidate.address)
         LocalServerState.update(
@@ -438,6 +440,18 @@ internal object OverlayLocalDiscovery {
          */
         val serverPublicKey: String? = null,
         val wgPort: Int? = null,
+        /**
+         * The advert's `lan=`/`wan=` — the two names that outlive the network this advert came
+         * from. Null when the advert did not carry them, which is the case for a server older
+         * than `#66`.
+         *
+         * ⚠️ **These are not part of the tuple.** The tuple is what a *tunnel* needs — a key
+         * and a port, both true wherever the client stands. These are what the *ladder* needs
+         * once the address it pinned has stopped routing, in which case nothing about the tuple
+         * is wrong and the endpoint is still useless. See [OverlayDiscoveryNames].
+         */
+        val lanName: String? = null,
+        val wanName: String? = null,
     )
 
     /**
@@ -562,6 +576,8 @@ internal object OverlayLocalDiscovery {
             version = attributeVersion(info),
             serverPublicKey = validServerKeyOrNull(tuple.serverPublicKeyBase64),
             wgPort = tuple.port,
+            lanName = tuple.lanName,
+            wanName = tuple.wanName,
         )
     }
 
