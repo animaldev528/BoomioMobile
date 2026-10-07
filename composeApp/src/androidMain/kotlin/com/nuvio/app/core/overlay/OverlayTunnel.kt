@@ -329,6 +329,7 @@ internal object OverlayTunnel {
                 // A real fault: the device is up and configured, and the server did not
                 // answer. Reported rather than swallowed, per §10.7 — the user has no LAN
                 // fallback to fall back to, so silence would be the wrong answer.
+                logUnansweredTunnel()
                 publishUnpinned(
                     LocalServerStatus.Unavailable("The overlay tunnel is up but the server did not answer")
                 )
@@ -426,6 +427,47 @@ internal object OverlayTunnel {
             if (attempt < OWN_TUNNEL_PROBE_ATTEMPTS - 1) delay(PROBE_RETRY_DELAY_MS)
         }
         return false
+    }
+
+    /**
+     * Says **which identity the app just presented**, when its own tunnel came up and nothing
+     * answered through it.
+     *
+     * ⚠️ **This exists because the failure it describes is otherwise completely silent, and
+     * that silence is what made it expensive.** A userspace WireGuard whose public key the
+     * server does not hold comes up *perfectly* — `Up()` returns, the device exists, the
+     * status tier says `Found` — and then the server drops every handshake initiation
+     * without a word, because a responder that does not recognise a peer deliberately says
+     * nothing at all. From inside the app that is indistinguishable from a server that is
+     * down, and on 2026-10-07 it took a packet capture to tell the two apart: the phone's
+     * initiations were on the wire every five seconds and the server answered none of them,
+     * while handshaking happily with a different peer at the same moment.
+     *
+     * The identity is not a secret — it is exactly the value the operator pastes into
+     * `wg set` — and the remedy is one line, so the app can simply say both rather than
+     * leaving the next person to reach for tcpdump. [OverlayWgTunnel.status] is redacted at
+     * its source, and nothing here touches the private half of the keypair.
+     */
+    private fun logUnansweredTunnel() {
+        val device = OverlayWgTunnelController.instance ?: return
+        // `storedPublicKeyBase64`, never `publicKeyBase64`: the latter *mints and persists* a
+        // keypair when storage is incomplete, so a diagnostic could rotate the very identity
+        // it is reporting on. That is precisely the shape of the incident this explains.
+        val key = runCatching { device.storedPublicKeyBase64() }.getOrNull()
+        val cidr = BoomioConfig.overlayLocalCidr
+        val identity = if (key != null) "$key holding $cidr" else "(no keypair stored)"
+        val remedy = if (key != null) {
+            " Register it with: overlay-server-setup.sh add-peer-pubkey <name> $key"
+        } else {
+            ""
+        }
+        Log.w(
+            TAG,
+            "Own tunnel is up but nothing answered through it. If the server's handshake " +
+                "time for this peer is zero, the server does not hold this key and is " +
+                "dropping the initiations silently. Identity presented: $identity.$remedy",
+        )
+        Log.w(TAG, "Tunnel status: ${device.status()}")
     }
 
     private suspend fun probeWithRetry(address: InetAddress): Boolean {

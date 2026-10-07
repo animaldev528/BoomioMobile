@@ -86,6 +86,20 @@ internal class OverlayWgTunnel(
     fun publicKeyBase64(): String = keypair().publicKeyBase64
 
     /**
+     * The public key **as stored**, or null when nothing is stored yet.
+     *
+     * ⚠️ The difference from [publicKeyBase64] is the entire point, and it is not a
+     * micro-optimisation. [keypair] *generates and persists* a fresh keypair whenever the
+     * stored one is incomplete, so a caller that only means to **report** which identity it
+     * presented would, in the one case where storage is missing, silently rotate that
+     * identity instead — converting a diagnostic read into the cause of the next incident.
+     * That is not hypothetical here: the failure this is used to explain was a key that
+     * rotated out from under a server peer record.
+     */
+    fun storedPublicKeyBase64(): String? =
+        pair?.publicKeyBase64 ?: loadKeypair()?.publicKeyBase64
+
+    /**
      * Brings the device up against [endpoint] (`host:port`) and the server's [serverPublicKeyBase64].
      *
      * ⚠️ **[serverPublicKeyBase64] arrives base64 and is converted to hex here**, because the
