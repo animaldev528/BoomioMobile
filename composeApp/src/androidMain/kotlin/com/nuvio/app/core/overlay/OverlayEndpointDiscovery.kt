@@ -17,6 +17,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -141,22 +142,30 @@ internal object OverlayEndpointDiscovery {
     private const val DEFAULT_WG_PORT = OverlayAdvertTuple.DEFAULT_PORT
 
     /**
-     * Rung 1's budget, in and out — a **shorter** browse window than the pin's own.
+     * Rung 1's budget, in and out — how long the ladder waits on the mDNS advert.
      *
      * ⚠️ **This is §3's cap, and it is here rather than around the race because a race is
-     * bounded by its slowest member.** `OverlayLocalDiscovery` browses for six seconds when its
-     * foreground trigger asks, which is the right number for a *pin*: it has a five-minute TTL,
-     * nothing is waiting on the answer, and a longer window is one more chance to notice a
-     * second server on the LAN. The ladder is the opposite case — it runs on the first-run
-     * screen, and on a Wi-Fi network with no boomio advert it would spend those six seconds
-     * before it could say anything at all.
+     * bounded by its slowest member.** With rung 2 running beside it ([raceRungs]) the walk costs
+     * the longer of the two rungs rather than their sum.
      *
-     * Two seconds, because mDNS on the reference LAN answers in ~180 ms and the window is only
-     * ever paid in full by a network that is not going to answer. With rung 2 running beside it
-     * ([raceRungs]) the whole walk is therefore ≤ 2 s rather than the sum of the rungs, and
-     * §3's "~2–3 s" holds including the reachability gate.
+     * ⚠️ **Two seconds was measured to be too short, and the "~180 ms" this comment used to
+     * claim was never true of a roaming client.** On 2026-10-07, on the reference LAN, with the
+     * screen held awake and the advert demonstrably in the platform's own NSD cache (it appeared
+     * in full, `ip: [192.168.68.65] port: 51820`, in `dumpsys servicediscovery`), two consecutive
+     * cold launches both ended in `Browse: 0 candidate(s), 0 reachable on 443` — while the phone
+     * was roaming between mesh BSSIDs, which invalidates the mDNS cache and makes the app's own
+     * query the one that has to be answered. `MdnsDiscoveryManager` sends that query once and then
+     * schedules the next **20 s** later, so a lost answer inside the window is not merely delayed,
+     * it is the whole browse.
+     *
+     * Six seconds — the same window `OverlayLocalDiscovery` uses for the pin. That number is not a
+     * measured latency either; it is the one window this LAN has actually been observed to
+     * succeed with. §3's "~2–3 s" no longer holds on a cold path: the cost is now paid in full
+     * only when nothing answers, and a cold path that finds nothing gets no tunnel at all, so the
+     * wait is buying the feature rather than delaying it. A walk that *does* answer still returns
+     * on the first advert.
      */
-    private const val RUNG1_BUDGET_MS = 2_000L
+    internal const val RUNG1_BUDGET_MS = 6_000L
 
     /**
      * Rung 2's whole budget, in and out.
@@ -186,8 +195,33 @@ internal object OverlayEndpointDiscovery {
      */
     private const val EDGE_PORT = 443
 
-    /** The same foreground cadence the two pin sources use. */
+    /**
+     * The same foreground cadence the two pin sources use.
+     *
+     * ⚠️ **Never armed by entry into [`resolve`].** Stamping it on the way in meant a walk that
+     * found *nothing* — the one outcome that actually needs a retry — bought itself five minutes
+     * of silence: `observeForeground` would not re-walk, and the only escape left was a network
+     * change. The field note this file already carried ("discovery goes silently dead on the LAN")
+     * is that bug; on 2026-10-07 it was reproduced as `Browse: 0 candidate(s)` followed by no
+     * further browse for the life of the process.
+     *
+     * It is now armed in two places, both deliberate: [accept], on an answer worth keeping, and
+     * [scheduleMissRetry]'s `finally`, once a miss has spent its prompt retries — so a network
+     * with no server on it settles back to this cadence instead of browsing on every foreground.
+     */
     private const val RESULT_TTL_MS = 5 * 60 * 1000L
+
+    /** How long to wait after a walk that found nothing before walking again. */
+    private const val MISS_RETRY_MS = 2_000L
+
+    /**
+     * How many miss retries one miss may chain, total.
+     *
+     * Bounded on purpose: a network with no boomio server on it must not browse forever. Three
+     * tries plus the original walk covers the roam case — the mesh here reassociates on the order
+     * of a minute, and each retry is a fresh browse against a freshly populated cache.
+     */
+    private const val MISS_RETRY_ATTEMPTS = 3
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val ladderMutex = Mutex()
@@ -195,8 +229,25 @@ internal object OverlayEndpointDiscovery {
     private var appContext: Context? = null
     private var lifecycleStarted = false
 
+    /**
+     * When the last **successful** walk finished, for [observeForeground]'s cadence.
+     *
+     * `internal` rather than private so the host test can pin the thing that actually broke: that
+     * a walk which produced no answer leaves this at zero. Same reason `wireManualEntry` is
+     * `internal` — a field with a load-bearing invariant and no pure way to observe it otherwise.
+     */
     @Volatile
-    private var lastResolvedAtMs = 0L
+    internal var lastResolvedAtMs = 0L
+
+    /**
+     * A miss retry is already scheduled, so further misses must not chain another.
+     *
+     * ⚠️ Without this, every `onNetworkChanged` during a roam would start its own retry chain and
+     * a wandering phone would browse continuously. One chain at a time, and the chain is what
+     * gets the bounded attempt count.
+     */
+    @Volatile
+    private var missRetryPending = false
 
     /** The endpoint last accepted, so a re-run that finds nothing does not erase a good answer. */
     @Volatile
@@ -293,8 +344,10 @@ internal object OverlayEndpointDiscovery {
      * three simultaneous mDNS browses.
      */
     suspend fun resolve(): OverlayEndpointStatus = ladderMutex.withLock {
-        lastResolvedAtMs = SystemClock.elapsedRealtime()
-
+        // ⚠️ **`lastResolvedAtMs` is deliberately NOT stamped here.** It used to be, on entry,
+        // before the outcome was known — so the one result that needs a retry (nothing found)
+        // was the one result that bought five minutes of silence. It is stamped in [accept],
+        // where there is an answer to protect. A miss now schedules its own bounded retry.
         val context = appContext
         if (context == null) {
             return@withLock publish(
@@ -323,8 +376,10 @@ internal object OverlayEndpointDiscovery {
         // A cancelled `OverlayLocalDiscovery.refresh` leaves `LocalServerStatus` on `Searching`,
         // no pin at all, and a five-minute TTL stamped over the top so nothing retries: discovery
         // goes silently dead on the LAN, which is the failure recorded twice in
-        // `OverlayLocalDiscovery` and once in [resolve]'s own fallback below. Awaiting both keeps
-        // every one of those side effects intact.
+        // `OverlayLocalDiscovery`. ⚠️ **This ladder used to reproduce it from the other end**, by
+        // stamping that same TTL on entry rather than on success — so a walk that found nothing
+        // was silenced for five minutes. The stamp now lives in [accept] and a miss retries; the
+        // TTL is only ever armed over an answer worth keeping.
         val candidates = raceRungs(
             { rung1Mdns() },
             { rung2LocalRecord(context) },
@@ -332,6 +387,11 @@ internal object OverlayEndpointDiscovery {
         rung3Manual()?.let(candidates::add)
 
         if (candidates.isEmpty()) {
+            // A walk that found nothing is the one that must not be sticky. Two seconds ago the
+            // phone may have been mid-roam with its mDNS cache invalidated; two seconds from now
+            // the cache is repopulated and the same browse answers immediately. Retry before
+            // telling anyone to type an address by hand.
+            scheduleMissRetry()
             return@withLock publish(
                 OverlayEndpointStatus.NeedsManual(
                     "No boomio server was found — tried mDNS, $LOCAL_RECORD and any saved " +
@@ -379,9 +439,11 @@ internal object OverlayEndpointDiscovery {
      * where rung 2 is the one that matters.
      */
     private suspend fun rung1Mdns(): OverlayEndpoint? {
-        // [RUNG1_BUDGET_MS], not the browse's own six seconds — see that constant. The window
-        // is passed *in* rather than the wait being timed out around it: a timeout here would
-        // cancel the browse, and the browse is the only thing that will ever place the LAN pin.
+        // [RUNG1_BUDGET_MS], passed *in* rather than the wait being timed out around it: a
+        // timeout here would cancel the browse, and the browse is the only thing that will ever
+        // place the LAN pin. The constant happens to equal the browse's own default window, but
+        // it is still passed explicitly — the two answer to different owners, and the ladder's
+        // bound should not silently follow the pin's if the pin's ever moves.
         OverlayLocalDiscovery.refresh(windowMs = RUNG1_BUDGET_MS)
         val advert = OverlayLocalDiscovery.lastVerifiedAdvert() ?: return null
         val key = validServerKeyOrNull(advert.serverPublicKeyBase64)
@@ -491,7 +553,66 @@ internal object OverlayEndpointDiscovery {
         endpoint.serverPublicKeyBase64?.let { BoomioConfig.overlayServerPubKey = it }
 
         Log.i(TAG, "Endpoint accepted from ${endpoint.source}: ${endpoint.authority}")
+
+        // ⚠️ **The TTL is armed here, on success only.** This is the stamp that used to sit at the
+        // top of [resolve]: moving it here is what makes a miss retryable while a *hit* still
+        // costs nothing until the TTL expires or the network changes.
+        //
+        // ⚠️ This deliberately does **not** clear `missRetryPending`. A retry chain notices the
+        // success for itself (`current != null`) and exits through its own `finally`; clearing the
+        // latch from here as well would open a window in which a concurrent miss starts a second
+        // chain beside the first.
+        lastResolvedAtMs = SystemClock.elapsedRealtime()
         return publish(OverlayEndpointStatus.Found(endpoint))
+    }
+
+    /**
+     * Walks the ladder again after a bounded delay, because a walk that found nothing is the one
+     * outcome that must not be sticky.
+     *
+     * ⚠️ **Guarded by [missRetryPending], and the guard is not tidiness.** `onNetworkChanged`
+     * fires on every reassociation, so a phone wandering a mesh would otherwise start a fresh
+     * three-attempt chain per roam and browse continuously — turning a discovery fix into a
+     * battery bug. One chain at a time; the chain is what carries the attempt count.
+     *
+     * This is the other end of the failure [resolve] already names — "discovery goes silently dead
+     * on the LAN" — reached from the opposite direction: not a cancelled browse, but a browse that
+     * ran to completion, found nothing, and was then never allowed to run again.
+     */
+    private fun scheduleMissRetry() {
+        if (missRetryPending) return
+        missRetryPending = true
+        scope.launch {
+            try {
+                var left = MISS_RETRY_ATTEMPTS
+                while (left > 0) {
+                    delay(MISS_RETRY_MS)
+                    // A later walk may have succeeded while this one waited, in which case there
+                    // is nothing left to chase. `current` is the right test rather than the TTL:
+                    // `onNetworkChanged` zeroes the clock, so the clock says nothing about
+                    // whether an endpoint is held.
+                    if (current != null) return@launch
+                    val status = resolve()
+                    // ⚠️ `resolve()` calls this function again on a miss. The latch is what makes
+                    // that call a no-op, so the *loop* owns the attempt count and the recursion
+                    // cannot fork into three chains. Without it a phone on a mesh would browse
+                    // continuously, one chain per roam.
+                    if (status is OverlayEndpointStatus.Found) return@launch
+                    left--
+                }
+            } finally {
+                missRetryPending = false
+                // ⚠️ **The prompt retries are spent, so put the foreground gate back to sleep.**
+                // Without this, leaving the clock at zero means *every* foreground event pays a
+                // full browse — and on a Wi-Fi network with no boomio server on it, that is a
+                // six-second multicast browse each time the app is raised, forever. The chain
+                // above is what a miss gets instead of silence; the ordinary TTL is what a
+                // serverless network gets instead of a hot loop. `onNetworkChanged` still zeroes
+                // the clock, so the roam case — the one this whole function exists for — retries
+                // immediately, which is the difference that matters.
+                if (current == null) lastResolvedAtMs = SystemClock.elapsedRealtime()
+            }
+        }
     }
 
     private fun publish(status: OverlayEndpointStatus): OverlayEndpointStatus {

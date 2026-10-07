@@ -2,6 +2,7 @@ package com.nuvio.app.core.overlay
 
 import android.app.Application
 import java.io.ByteArrayOutputStream
+import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
@@ -15,6 +16,7 @@ import kotlin.test.assertTrue
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowSystemClock
 
 /**
  * The discovery ladder's pure half: the two advert formats, the `host:port` parser, and the DNS
@@ -555,6 +557,49 @@ class OverlayEndpointDiscoveryTest {
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
         assertEquals(listOf("slow", "also slow"), results)
         assertTrue(elapsedMs < 550, "the race took ${elapsedMs}ms; walked in sequence it is ~600ms")
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // A miss is not sticky — the defect measured on the reference LAN, 2026-10-07
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * ⚠️ **This is the regression test for why boomio was unreachable at home.**
+     *
+     * `resolve()` used to stamp `lastResolvedAtMs` on **entry**, before it knew the outcome. The
+     * foreground trigger re-walks only once the five-minute TTL has expired, so the one result
+     * that actually needs a retry — a walk that found *nothing* — was the one result that bought
+     * five minutes of silence. Measured on the reference LAN: `Browse: 0 candidate(s), 0
+     * reachable on 443`, then no further browse for the life of the process, then no endpoint, no
+     * tunnel, and zero bytes moved on every server peer.
+     *
+     * A ladder that was never given a `Context` is the cheapest way to reach that shape offline:
+     * it is a walk that cannot produce an answer, which is exactly the case under test. The clock
+     * is now stamped in the private `accept()` and in the miss-retry chain's `finally`, never on
+     * the way in.
+     *
+     * Falsified by: stamping the clock anywhere that runs without an `accept`.
+     */
+    @Test
+    fun `a walk that produces no answer does not arm the ttl`() = runBlocking {
+        // ⚠️ **The clock is advanced off zero first, and that is what gives this test teeth.**
+        // Robolectric's `elapsedRealtime()` starts at 0, so on the old code — which stamped the
+        // clock and *then* discovered it had no Context — the field would have been written to 0
+        // and the assertion below would have passed anyway, testing nothing. Thirty seconds is
+        // simply "a value the stamp could not have produced by accident".
+        ShadowSystemClock.advanceBy(Duration.ofSeconds(30))
+
+        val status = OverlayEndpointDiscovery.resolve()
+
+        assertTrue(
+            status is OverlayEndpointStatus.Unavailable,
+            "expected an uninitialized ladder to report Unavailable, got $status",
+        )
+        assertEquals(
+            0L,
+            OverlayEndpointDiscovery.lastResolvedAtMs,
+            "a walk with no answer must leave the foreground cadence unarmed, or nothing retries",
+        )
     }
 
     // -----------------------------------------------------------------------------------------
