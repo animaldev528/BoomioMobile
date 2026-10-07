@@ -141,26 +141,29 @@ internal object OverlayProvisioning {
     internal suspend fun target(): ProvisionTarget? {
         val context = appContext ?: return null
 
-        // ⚠️ **On the home L2 the channel is the wrong transport, and saying so is not a
-        // micro-optimisation.** The record's address is the server's WAN address; hairpin is
-        // off, so from inside the LAN it cannot be dialled at all — while
-        // `companionRestBaseUrl` resolves to the box's LAN address and works. A verified mDNS
-        // advert is this app's existing answer to "am I on the home segment" (the browse clears
-        // it the moment the device leaves), and the fallback here is the HTTPS path that always
-        // worked, so the worst case of being wrong is the behaviour that existed before any of
-        // this code.
-        if (OverlayLocalDiscovery.lastVerifiedAdvert() != null) {
-            Log.i(TAG, "A verified LAN advert is present; leaving the link to the HTTPS transport")
-            return null
-        }
-
+        // ⚠️ **The walk runs at home too, and home is the case it was built for.** It used to be
+        // skipped whenever a verified mDNS advert was present, on the premise that at home "the
+        // HTTPS path that always worked" would carry the link. Measured 10-07, it does not.
+        // `BoomioSessionRepository` deliberately builds its **own plain client** — pairing mints
+        // the token that enrollment presents, so it cannot ride a seam enrollment creates — and a
+        // plain client resolves `bsc.tracemonkey.org` through **system DNS**. This Wi-Fi hands out
+        // `1.1.1.1` and `8.8.8.8` over DHCP, so the name resolved to the **public**
+        // `153.68.210.49`, hairpin is off, and pairing died on a 10 s connect timeout:
+        // `BoomioLinkFailure.Start`, the "Couldn't start connecting" the owner saw — with the box
+        // answering fine on `192.168.68.65:443` *and* `:51820` two hops away. The pin covers every
+        // other client on the LAN; that one call cannot use it by design, which is exactly the
+        // hole this channel exists to fill.
+        //
+        // So being at home is not a reason to skip the walk. `LAN_RECORD` is a *public* record
+        // holding a **private** address, so it resolves from anywhere — including through
+        // `1.1.1.1` — and the gate below accepts it exactly when the box really is on this
+        // segment. Nothing on this path needs system DNS at all.
+        //
         // ⚠️ **Both published names are tried, and off-LAN the second is the one that routes.**
-        // `LAN_RECORD` is a *public* record holding a **private** address, so it resolves from
-        // anywhere — a single-name lookup that "succeeded" here would hand the dialler an address
-        // nothing off-LAN can reach, which is precisely the failure this whole channel exists to
-        // remove. That is why a rejection below means "try the other name" and never "give up",
-        // and why only a pair that both fail ends the search. On the home L2 the pair costs
-        // nothing: the advert check above has already sent this case down the HTTPS path.
+        // The LAN record's universal resolution is also why a single-name lookup would be wrong: it
+        // would hand the dialler an address nothing off-LAN can reach, which is precisely the
+        // failure this whole channel exists to remove. That is why a rejection below means "try the
+        // other name" and never "give up", and why only a pair that both fail ends the search.
         //
         // ⚠️ **"Resolves" is not the test — "answers" is.** Resolution alone would stop this walk
         // on the first name from *any* network, because both records are public. The gate inside
