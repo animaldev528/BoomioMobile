@@ -199,6 +199,15 @@ internal class OverlayProvisionConnection private constructor(
          * like an impostor.
          *
          * [socketFactory] is a seam for tests only; production connects with a plain socket.
+         *
+         * ⚠️ **[connectTimeoutMs] exists because the right deadline for a connect depends on who
+         * is dialling, and this client has two callers with opposite answers.** The enrollment
+         * calls dial an address the device has already proven reachable, so [CONNECT_TIMEOUT_MS]
+         * is a backstop. The *pairing* call dials the address the discovery record publishes —
+         * which is the server's WAN address, and which on the home LAN does not answer at all
+         * (hairpin is off) — so it wants a deadline short enough that the fallback to the
+         * transport that *does* work at home is not a visible stall. Baking one number in would
+         * force one of the two to be wrong.
          */
         suspend fun open(
             host: String,
@@ -208,13 +217,14 @@ internal class OverlayProvisionConnection private constructor(
             serverPublicKeyBase64: String,
             crypto: OverlayProvisionCrypto = GomobileProvisionCrypto,
             socketFactory: (String, Int) -> Socket = { h, p -> Socket() },
+            connectTimeoutMs: Int = CONNECT_TIMEOUT_MS,
         ): OverlayProvisionConnection = withContext(Dispatchers.IO) {
             val socket = try {
                 socketFactory(host, port).apply {
                     // The server's own handshake timer is 10s, so matching it means a dead
                     // peer surfaces as our timeout with our message rather than as its
                     // abrupt close.
-                    connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                    connect(InetSocketAddress(host, port), connectTimeoutMs)
                     soTimeout = READ_TIMEOUT_MS
                     // ⚠️ Frames here are tiny and strictly alternating. Without this, Nagle
                     // holds a request behind the previous segment's ACK and every round trip

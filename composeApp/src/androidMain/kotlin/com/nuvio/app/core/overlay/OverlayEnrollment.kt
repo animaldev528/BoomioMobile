@@ -506,6 +506,16 @@ internal object OverlayEnrollment {
 
     private fun apiOrNull(): OverlayEnrollmentApi? {
         val token = BoomioSessionRepository.bearerToken()?.takeIf { it.isNotBlank() } ?: return null
+
+        // ⚠️ **The transport that linked the device is the transport that enrolls it.** The
+        // default below dials `companionRestBaseUrl`, which off-LAN resolves to the box's *LAN*
+        // address — so a device that reached its session over the provisioning channel because
+        // that address is unreachable would, on the very next call, reach for it again and come
+        // away with a session and no tunnel. `OverlayProvisioning` answers null wherever the
+        // channel is not the right transport (the ingress is off, or the device is on the home
+        // L2 where the base URL works), and that null *is* the fallback.
+        OverlayProvisioning.enrollmentApi(token)?.let { return it }
+
         val base = BoomioConfig.companionRestBaseUrl.takeIf { it.isNotBlank() } ?: return null
         return BscOverlayEnrollmentApi(baseUrl = base, token = token)
     }

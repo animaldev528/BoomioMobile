@@ -14,6 +14,7 @@ import com.nuvio.app.core.network.ServerConfigurationStorage
 import com.nuvio.app.core.overlay.OverlayEnrollment
 import com.nuvio.app.core.overlay.OverlayEndpointDiscovery
 import com.nuvio.app.core.overlay.OverlayLocalDiscovery
+import com.nuvio.app.core.overlay.OverlayProvisioning
 import com.nuvio.app.core.overlay.OverlayRelay
 import com.nuvio.app.core.overlay.OverlaySession
 import com.nuvio.app.core.overlay.OverlayTunnel
@@ -137,6 +138,13 @@ open class MainActivity : AppCompatActivity() {
         // address (`BOOMIO_OVERLAY_LOCAL_CIDR`) was fixed at compile time and the second
         // client on an overlay could never be right.
         OverlayEnrollment.initialize(applicationContext)
+        // And last of all, the way *in* for a device that has nothing: the provisioning channel.
+        // It registers itself as `BoomioSessionRepository`'s second pairing transport, so it has
+        // to exist before any UI can call `startLink()` — which is what this position guarantees,
+        // since composition happens after `onCreate` returns. Neither order against the line
+        // above matters: the two only meet through `OverlayEnrollment`'s *api factory*, which is
+        // read per enrollment rather than captured here.
+        OverlayProvisioning.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)

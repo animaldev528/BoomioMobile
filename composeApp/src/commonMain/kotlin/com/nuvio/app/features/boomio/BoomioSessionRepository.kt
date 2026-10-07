@@ -91,6 +91,65 @@ enum class BoomioLinkFailure {
 }
 
 /**
+ * A second transport for the device-code exchange, for the device that has **no address to
+ * dial it on**.
+ *
+ * ⚠️ **This exists because the exchange and the address are the same problem, and the HTTP flow
+ * can only solve it for a device that already has one.** The pairing calls in this object go to
+ * `BoomioConfig.companionRestBaseUrl`, which off-LAN resolves to the *LAN* address of the box
+ * and cannot be reached at all — so the one device the flow exists for, a cleared install away
+ * from home, is the one device that can never run it. The overlay's provisioning channel is the
+ * way out: it is reachable on a forwarded port with no prior credential, and it carries these
+ * same four operations (`docs/vpn-overlay-provisioning-ingress.md`).
+ *
+ * ⚠️ **A transport is not a replacement** — it is tried first and stepped over. See
+ * [BoomioPairingResult.Unavailable] for the rule.
+ */
+internal interface BoomioPairingTransport {
+    /**
+     * Runs the exchange and returns once a session token exists.
+     *
+     * [onCode] is called as soon as a user code exists and a human has to approve it, so the
+     * screen can render the code *while* the transport keeps polling. A transport that links
+     * without ever needing a human simply never calls it.
+     */
+    suspend fun pair(
+        deviceId: String,
+        platform: String?,
+        name: String?,
+        onCode: (userCode: String, verificationUri: String?) -> Unit,
+    ): BoomioPairingResult
+}
+
+internal sealed interface BoomioPairingResult {
+    /** The token is live. The caller owns persisting it and publishing the session. */
+    data class Linked(
+        val token: String,
+        val userId: String?,
+        val displayName: String?,
+    ) : BoomioPairingResult
+
+    /**
+     * This transport cannot be used **right now** — no endpoint resolved, no provisioning key
+     * published, the port refused, or the server's `prov` switch is off.
+     *
+     * ⚠️ **The caller must fall through to its own transport rather than report this**, and
+     * that is the whole reason it is a separate case from [Failed]. "Unavailable" is the
+     * *expected* answer for every deployment that has not turned the ingress on, including the
+     * LAN case that works today; failing on it would turn an optional new path into a
+     * regression for every existing install.
+     */
+    data object Unavailable : BoomioPairingResult
+
+    /**
+     * The transport worked and the exchange failed. **Not** retried on another transport: a code
+     * was issued, a human may already be looking at it, and starting a second exchange would
+     * mint a second code that the first approver never sees.
+     */
+    data class Failed(val message: String) : BoomioPairingResult
+}
+
+/**
  * Owns the bsc companion session for the phone: device-code self-approve
  * (the phone both requests and approves its own code, using the signed-in
  * Nuvio identity), the poll loop that converts the approved code into a
@@ -150,6 +209,20 @@ object BoomioSessionRepository {
 
     private var linkJob: Job? = null
 
+    /**
+     * The overlay's provisioning channel, registered once during start-up by platform code.
+     *
+     * ⚠️ **A registered handler, not an `expect`/`actual` pair**, for the reason
+     * `OverlayEndpointState.manualSubmit` gives one direction over: the transport is Android code
+     * and an `expect` would demand a stub in each of `AppFeaturePolicy`'s five actuals to serve
+     * one platform. Null means "this platform has no such channel", which is a real state and
+     * not an error — the flow below simply uses its own HTTP transport, as it always did.
+     *
+     * Written once, before any UI can compose (`MainActivity.onCreate`), so a plain `var` and no
+     * synchronisation: there is exactly one channel per process and it exists for the whole of it.
+     */
+    internal var pairingTransport: BoomioPairingTransport? = null
+
     val companionEnabled: Boolean
         get() = BoomioConfig.companionEnabled()
 
@@ -203,6 +276,15 @@ object BoomioSessionRepository {
             _error.value = null
             _linkState.value = BoomioLinkState.Starting
             try {
+                // ⚠️ **The provisioning channel is tried first, and it is the only transport that
+                // works on the device this flow exists for.** Everything below dials
+                // `companionRestBaseUrl`, which off-LAN resolves to the box's LAN address; the
+                // channel is reachable on a forwarded port with no prior credential. It returns
+                // `Unavailable` — never a failure — wherever the ingress is switched off, which
+                // is every deployment that has not turned it on, so the LAN path below is
+                // untouched and still the one that runs there.
+                if (linkOverProvisioningChannel()) return@launch
+
                 val authUser = AuthRepository.state.value as? AuthState.Authenticated
                 val request = requestDeviceCode()
 
@@ -248,6 +330,77 @@ object BoomioSessionRepository {
                 _linkState.value = BoomioLinkState.Failed(BoomioLinkFailure.Start)
             }
         }
+    }
+
+    /**
+     * Runs the exchange over the provisioning channel, if one is registered.
+     *
+     * **Returns whether the caller should stop.** True means the channel owned this attempt —
+     * either it linked, or it got far enough that the user needs to see the outcome. False means
+     * the channel could not be used at all, and the HTTP flow that follows should run exactly as
+     * it did before this method existed.
+     *
+     * ⚠️ **That distinction is the whole design.** [BoomioPairingResult.Unavailable] is the
+     * expected answer on every deployment that has not switched the ingress on — including the
+     * LAN case that works today — so treating it as a failure would turn an optional new path
+     * into a regression for every existing install. A [BoomioPairingResult.Failed], by contrast,
+     * is reported rather than retried: a code was issued and a human may already be reading it,
+     * so quietly starting the HTTP exchange behind their back would mint a second code that the
+     * first approver never sees.
+     */
+    private suspend fun linkOverProvisioningChannel(): Boolean {
+        val transport = pairingTransport ?: return false
+        val metadata = currentDeviceClientMetadata()
+        val result = try {
+            transport.pair(
+                deviceId = SyncClientIdentity.currentClientId(),
+                platform = metadata.platform,
+                name = metadata.deviceName,
+            ) { userCode, verificationUri ->
+                // The code is live and a human has to approve it. The transport keeps polling
+                // underneath, so this is published while the exchange is still running — the
+                // screen shows the code instead of a spinner.
+                _linkState.value = BoomioLinkState.AwaitingApproval(userCode, verificationUri)
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            log.w(error) { "Provisioning link failed" }
+            _linkState.value = BoomioLinkState.Failed(BoomioLinkFailure.Start)
+            return true
+        }
+
+        return when (result) {
+            is BoomioPairingResult.Unavailable -> false
+            is BoomioPairingResult.Failed -> {
+                log.w { "Provisioning link refused: ${result.message}" }
+                _linkState.value = BoomioLinkState.Failed(BoomioLinkFailure.Start)
+                true
+            }
+            is BoomioPairingResult.Linked -> {
+                adoptSession(result.token, result.userId, result.displayName)
+                true
+            }
+        }
+    }
+
+    /**
+     * The one place a link becomes a session, whichever transport produced it.
+     *
+     * The two flows diverge completely — different transport, different wire format, different
+     * approval model — and converge on exactly these four statements: persist the token, publish
+     * the session, and go idle. Keeping them in one function is what makes a second transport
+     * safe to add; a second copy would be four more places for the two to drift apart.
+     */
+    private fun adoptSession(token: String, userId: String?, displayName: String?) {
+        BoomioSessionStorage.saveSessionToken(token)
+        _session.value = BoomioSession(
+            token = token,
+            deviceId = SyncClientIdentity.currentClientId(),
+            userId = userId,
+            displayName = displayName,
+        )
+        _linkState.value = BoomioLinkState.Idle
     }
 
     /** Cancels an in-flight link flow. */
@@ -363,14 +516,11 @@ object BoomioSessionRepository {
                     if (token.isNullOrBlank()) {
                         throw BoomioSessionException("poll approved but no token")
                     }
-                    BoomioSessionStorage.saveSessionToken(token)
-                    _session.value = BoomioSession(
+                    adoptSession(
                         token = token,
-                        deviceId = SyncClientIdentity.currentClientId(),
                         userId = parsed.id ?: authUser?.userId,
                         displayName = parsed.display_name ?: parsed.username,
                     )
-                    _linkState.value = BoomioLinkState.Idle
                     return
                 }
                 "pending" -> Unit
