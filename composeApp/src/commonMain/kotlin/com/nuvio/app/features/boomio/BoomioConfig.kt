@@ -46,6 +46,105 @@ object BoomioConfig {
      */
     var iptvBaseUrl: String = BoomioIptvConfig.BASE_URL
 
+    /**
+     * The server's address on the WireGuard overlay, e.g. `10.77.0.1`. Blank disables
+     * the overlay resolver entirely.
+     *
+     * ⚠️ **This is an address, not a URL and not a hostname.** The app never *dials* it:
+     * every request keeps naming `bsc.tracemonkey.org` and Caddy picks the site block
+     * from that name, so a bare address has nothing to match and fails TLS. All this
+     * value does is tell the DNS seam what those names should resolve to while the
+     * tunnel is up — see `OverlayTunnel`. A hostname here is refused rather than
+     * resolved, because resolving it is the exact behaviour the seam replaces.
+     *
+     * **Learned, not configured.** Enrollment writes it: the assignment carries the overlay
+     * CIDR, and the server holds that network's first host, so a build aimed at no deployment
+     * in particular still gets this right — and a device that enrolled once keeps it across a
+     * cold start from the cached assignment. `BOOMIO_OVERLAY_ADDR` from `local.properties`
+     * (via the generated [BoomioOverlayConfig]) stands in only until a device has enrolled;
+     * it is a fallback now, not the source.
+     *
+     * Blank-inert, like the seams above: [iptvBaseUrl] and [companionBaseUrl] are the
+     * hosts, this is the address they take on the overlay.
+     */
+    var overlayServerAddress: String = BoomioOverlayConfig.ADDR
+
+    /**
+     * **This device's own** address inside the overlay, CIDR form — `10.77.0.2/32`.
+     *
+     * ⚠️ **The third overlay address, and the one most likely to be confused with the other
+     * two.** [overlayServerAddress] is where the app's traffic is *aimed* (`10.77.0.1`);
+     * [overlayEndpoint] is where the tunnel's *UDP* goes, in the clear, over the local
+     * network; this is the address the device *holds* once the tunnel is up. It must equal
+     * the `allowed-ips` the operator enrolled this client's public key with, or the tunnel
+     * comes up, completes a handshake, and then silently drops every return packet — the
+     * server has no route to an address it never agreed to.
+     *
+     * Sourced from `BOOMIO_OVERLAY_LOCAL_CIDR`, defaulting to `10.77.0.2/32`. That default is
+     * right for the first client on an overlay and **wrong for the second**, which is exactly
+     * what per-client enrollment (U4) has to replace.
+     */
+    var overlayLocalCidr: String = BoomioOverlayConfig.LOCAL_CIDR
+
+    /**
+     * Absolute URL of the loopback HTTP CONNECT relay this app runs for its own userspace
+     * WireGuard tunnel, e.g. `http://127.0.0.1:8100`. Blank (the default) means no relay:
+     * every engine dials directly, exactly as it does today.
+     *
+     * Only libmpv actually needs this. The OkHttp and Ktor clients can be pointed at the
+     * tunnel through the DNS seam, but libmpv resolves inside libcurl's `getaddrinfo`, which
+     * is not hookable from the application — a proxy is the only way in.
+     *
+     * Sourced from `BOOMIO_OVERLAY_PROXY` in `local.properties` (via the generated
+     * [BoomioOverlayConfig]).
+     */
+    var overlayProxyUrl: String = BoomioOverlayConfig.PROXY
+
+    /**
+     * Playback engine a fresh install should resolve to, or `null` for "leave it alone".
+     *
+     * `AndroidPlaybackEngine.Auto` resolves to ExoPlayer, so an ordinary play never touches
+     * libmpv — which matters because the S-U2 spike's oracle is a proxy log that only
+     * libmpv can write to. Without this, a *correct* build looks like a failed spike.
+     *
+     * It supplies the **default only**: the caller consults it where the stored setting is
+     * absent, so an engine chosen in Settings still wins. Blank (the default) returns null
+     * and every normal build behaves exactly as before.
+     *
+     * Sourced from `BOOMIO_OVERLAY_ENGINE` (via the generated [BoomioOverlayConfig]).
+     */
+    fun overlayEngineDefault(): String? =
+        BoomioOverlayConfig.ENGINE.trim().takeIf { it.isNotEmpty() }
+
+    /**
+     * The WireGuard endpoint the userspace tunnel dials, `host:port` — e.g.
+     * `192.168.68.65:51820` on the LAN, `153.68.210.49:51820` off it. Blank disables the
+     * tunnel, which is the default.
+     *
+     * ⚠️ **Not the same thing as [overlayServerAddress], and the two are easy to confuse.**
+     * That one is `10.77.0.1` — the address the app's *traffic* takes on the overlay, which
+     * is what names resolve to. This one is where the *tunnel's UDP* goes, in the clear, over
+     * whatever network the device is on. Different planes, different addresses.
+     *
+     * In the end state this is **discovered**, not configured — the ladder in architecture
+     * §4.4 tries mDNS, then `boomio-local`, then asks the user. This field is what a debug
+     * build bakes in so the transport can be exercised before that ladder exists.
+     *
+     * Sourced from `BOOMIO_OVERLAY_ENDPOINT` in `local.properties`.
+     */
+    var overlayEndpoint: String = BoomioOverlayConfig.ENDPOINT
+
+    /**
+     * The **server's** WireGuard public key, base64. Public, not secret: the mDNS advert and
+     * the DuckDNS TXT record publish the identical value as `pk=…`.
+     *
+     * Base64 rather than hex because that is what both publication channels use; the
+     * controller converts to the hex `IpcSet` takes, so nothing here has to know.
+     *
+     * Sourced from `BOOMIO_OVERLAY_PUBKEY` in `local.properties`.
+     */
+    var overlayServerPubKey: String = BoomioOverlayConfig.PUBKEY
+
     /** True when the companion seam is configured ([companionBaseUrl] is set). */
     fun companionEnabled(): Boolean = companionBaseUrl.isNotBlank()
 

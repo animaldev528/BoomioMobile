@@ -25,6 +25,8 @@ import com.nuvio.app.core.storage.ProfileScopedKey
 import com.nuvio.app.features.settings.AppIconPlatform
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
+import com.nuvio.app.core.network.IPv4FirstDns
+import com.nuvio.app.core.overlay.withOverlayProxy
 import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.runBlocking
 import nuvio.composeapp.generated.resources.*
@@ -61,6 +63,7 @@ internal actual object EpisodeReleaseNotificationPlatform {
                 connectTimeoutMillis = 15_000
                 socketTimeoutMillis = 15_000
             }
+            engine { config { dns(IPv4FirstDns()).withOverlayProxy() } }
         }
     }
 

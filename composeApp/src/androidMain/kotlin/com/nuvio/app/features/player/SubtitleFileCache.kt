@@ -5,6 +5,8 @@ import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
+import com.nuvio.app.core.network.IPv4FirstDns
+import com.nuvio.app.core.overlay.withOverlayProxy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -23,6 +25,8 @@ object SubtitleFileCache {
     private var appContext: Context? = null
     private val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .dns(IPv4FirstDns())
+            .withOverlayProxy()
             .addInterceptor(SentryNetworkBreadcrumbInterceptor())
             .build()
     }

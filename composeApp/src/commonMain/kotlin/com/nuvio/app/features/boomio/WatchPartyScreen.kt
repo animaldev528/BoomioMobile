@@ -50,9 +50,10 @@ import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.companion_cancel
 import nuvio.composeapp.generated.resources.companion_connected_hub
 import nuvio.composeapp.generated.resources.companion_connecting_hub
+import nuvio.composeapp.generated.resources.companion_link_approval_hint
+import nuvio.composeapp.generated.resources.companion_link_awaiting_approval
 import nuvio.composeapp.generated.resources.companion_link_failed_expired
 import nuvio.composeapp.generated.resources.companion_link_failed_start
-import nuvio.composeapp.generated.resources.companion_link_failed_unauthenticated
 import nuvio.composeapp.generated.resources.watch_party_connect
 import nuvio.composeapp.generated.resources.watch_party_end
 import nuvio.composeapp.generated.resources.watch_party_end_confirm
@@ -145,8 +146,10 @@ private fun UnlinkedCard() {
     val connectLabel = stringResource(Res.string.watch_party_connect)
     val linkingLabel = stringResource(Res.string.watch_party_linking)
     val failStart = stringResource(Res.string.companion_link_failed_start)
-    val failUnauthenticated = stringResource(Res.string.companion_link_failed_unauthenticated)
     val failExpired = stringResource(Res.string.companion_link_failed_expired)
+    val awaitingApprovalLabel = stringResource(Res.string.companion_link_awaiting_approval)
+    val approvalHint = stringResource(Res.string.companion_link_approval_hint)
+    val cancelLabel = stringResource(Res.string.companion_cancel)
     val linkState by BoomioSessionRepository.linkState.collectAsStateWithLifecycle()
     val state = linkState
 
@@ -176,9 +179,38 @@ private fun UnlinkedCard() {
                         Text(linkingLabel, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
+                is BoomioLinkState.AwaitingApproval -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Text(awaitingApprovalLabel, style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Text(state.userCode, style = MaterialTheme.typography.headlineSmall)
+                        state.verificationUri?.let { uri ->
+                            Text(
+                                uri,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            approvalHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = { BoomioSessionRepository.cancelLink() }) {
+                            Text(cancelLabel)
+                        }
+                    }
+                }
                 is BoomioLinkState.Failed -> {
                     val message = when (state.reason) {
-                        BoomioLinkFailure.Unauthenticated -> failUnauthenticated
                         BoomioLinkFailure.Expired -> failExpired
                         BoomioLinkFailure.Start -> failStart
                     }

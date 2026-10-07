@@ -13,6 +13,10 @@ internal object PlatformPlaybackDataSourceFactory {
         useYoutubeChunkedPlayback: Boolean,
         useLongReadTimeout: Boolean = false,
         externalSubtitles: List<com.nuvio.app.features.streams.StreamSubtitle> = emptyList(),
+        // Only used to decide whether this playback may follow an overlay pin; null
+        // means "not a pinned host", which is the safe default for callers that do not
+        // have a source URL at hand (trailers).
+        sourceUrl: String? = null,
     ): DataSource.Factory {
         val networkFactory: DataSource.Factory = if (useYoutubeChunkedPlayback) {
             YoutubeChunkedDataSourceFactory(defaultRequestHeaders = defaultRequestHeaders)
@@ -20,6 +24,7 @@ internal object PlatformPlaybackDataSourceFactory {
             PlayerPlaybackNetworking.createHttpDataSourceFactory(
                 defaultRequestHeaders,
                 useLongReadTimeout,
+                sourceUrl = sourceUrl,
             )
         }
         val subtitleHeaderFactory = SubtitleRequestHeaderDataSourceFactory(

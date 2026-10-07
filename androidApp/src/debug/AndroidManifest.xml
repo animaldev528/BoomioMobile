@@ -5,5 +5,12 @@
             android:name="com.nuvio.android.BackgroundDownloadTestActivity"
             android:exported="true"
             android:theme="@style/Theme.Nuvio" />
+        <!-- The userland-tunnel probe. Debug-only on purpose: it brings a WireGuard device
+             up against an endpoint baked in at build time, which is a test instrument and
+             not something a shipped build should be able to do. -->
+        <activity
+            android:name="com.nuvio.android.OverlayProbeActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Nuvio" />
     </application>
 </manifest>

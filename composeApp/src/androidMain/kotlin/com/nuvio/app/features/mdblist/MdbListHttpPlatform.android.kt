@@ -1,6 +1,8 @@
 package com.nuvio.app.features.mdblist
 
 import io.ktor.client.HttpClient
+import com.nuvio.app.core.network.IPv4FirstDns
+import com.nuvio.app.core.overlay.withOverlayProxy
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
 
@@ -17,6 +19,8 @@ internal actual fun createMdbListHttpClient(): HttpClient = HttpClient(OkHttp) {
             followRedirects(false)
             followSslRedirects(false)
             retryOnConnectionFailure(false)
+            dns(IPv4FirstDns())
+            withOverlayProxy()
         }
     }
 }

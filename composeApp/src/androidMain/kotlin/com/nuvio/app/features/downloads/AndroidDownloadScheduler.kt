@@ -17,6 +17,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import com.nuvio.app.core.network.IPv4FirstDns
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
@@ -33,6 +34,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
+import okhttp3.Dns
 
 internal class AndroidDownloadScheduler(val context: Context) {
     val store = AndroidDownloadStore(File(context.filesDir, "download-transfers"))
@@ -146,7 +148,11 @@ internal class AndroidDownloadScheduler(val context: Context) {
         val client = if (network != null) {
             downloadHttpClient.newBuilder()
                 .socketFactory(network.socketFactory)
-                .dns { network.getAllByName(it).toList() }
+                // Compose, don't replace: the network-bound resolver stays the
+                // delegate, and `IPv4FirstDns` layers the overlay pin in front of it
+                // (and the IPv4-first ordering on top). Replacing it outright would
+                // silently drop the pins.
+                .dns(IPv4FirstDns(delegate = Dns { network.getAllByName(it).toList() }))
                 .connectionPool(ConnectionPool())
                 .build()
         } else downloadHttpClient

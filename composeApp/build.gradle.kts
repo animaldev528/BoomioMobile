@@ -51,6 +51,92 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val iptvBaseUrl: Property<String>
 
+    /**
+     * The server's address on the WireGuard overlay, e.g. `10.77.0.1`. Blank means the
+     * overlay resolver is off, which is the default and the correct one for anyone not
+     * running the overlay.
+     *
+     * An address, not a URL: the app keeps naming the public FQDNs and only changes what
+     * they resolve to, because Caddy selects a site block by name.
+     */
+    @get:Input
+    abstract val overlayAddr: Property<String>
+
+    /**
+     * **This client's own** address on the overlay, in CIDR form — `10.77.0.2/32`.
+     *
+     * ⚠️ **Not the same as [overlayAddr], and the pair is the easiest thing here to get
+     * backwards.** That one is the *server's* address (`10.77.0.1`) and is what the app's
+     * traffic is aimed at. This one is the address the *device* holds inside the tunnel, and
+     * it has to match the `allowed-ips` the operator enrolled this client's public key with —
+     * a mismatch produces a tunnel that comes up, handshakes, and then silently drops every
+     * packet the server sends back, because the server has no route to an address it never
+     * agreed to.
+     *
+     * Defaults to `10.77.0.2/32` because that is the address the live peers use, so a build
+     * that sets the other overlay keys and forgets this one still works for the first client.
+     * It is **not** a safe default for a second client on the same overlay, which is what
+     * per-client enrollment (U4) has to replace.
+     */
+    @get:Input
+    abstract val overlayLocalCidr: Property<String>
+
+    /**
+     * Absolute URL of the loopback HTTP CONNECT relay the app runs for its own userspace
+     * WireGuard tunnel, e.g. `http://127.0.0.1:8100`.
+     *
+     * This is the one lever that reaches **libmpv**. Every other engine resolves through the
+     * app's DNS seam, but libmpv resolves inside libcurl's `getaddrinfo`, which no application
+     * can hook — so a proxy is the only way it participates in the overlay.
+     *
+     * Blank by default, and blank means *no option is set at all*, so a build without
+     * `BOOMIO_OVERLAY_PROXY` behaves exactly as one built before this seam existed.
+     */
+    @get:Input
+    abstract val overlayProxy: Property<String>
+
+    /**
+     * Playback engine a fresh install resolves to, e.g. `Libmpv`.
+     *
+     * Exists because `AndroidPlaybackEngine.Auto` resolves to ExoPlayer, so an ordinary
+     * play exercises the wrong engine — and the S-U2 spike reads an *empty* proxy log as a
+     * negative when it is really the wrong engine running. Blank (the default) leaves the
+     * existing fallback alone, so this is inert in every normal build.
+     *
+     * It only supplies the *default*: it is consulted where the stored setting is absent,
+     * so a user who picks an engine in Settings still wins.
+     */
+    @get:Input
+    abstract val overlayEngine: Property<String>
+
+    /**
+     * The WireGuard **endpoint** the userspace tunnel dials, `host:port` — e.g.
+     * `192.168.68.65:51820` on the LAN or `153.68.210.49:51820` off it.
+     *
+     * ⚠️ Distinct from [overlayAddr], and the distinction is the whole reason this exists.
+     * [overlayAddr] is the address the app's *traffic* takes on the overlay (`10.77.0.1`) and
+     * is what the DNS seam resolves names to; this is where the *tunnel* sends its UDP. They
+     * are different addresses in different planes and conflating them is an easy mistake.
+     *
+     * Blank by default. Blank means the tunnel is never brought up, which is what every
+     * build that is not deliberately testing the overlay wants.
+     */
+    @get:Input
+    abstract val overlayEndpoint: Property<String>
+
+    /**
+     * The **server's** WireGuard public key, base64 — the peer this client handshakes with.
+     *
+     * It is a public key, so it is not a secret; the mDNS advert and the DuckDNS TXT record
+     * both publish the same value (`pk=…`). Baking it here is what lets a debug probe bring a
+     * tunnel up before the discovery ladder (arch. §4.4) exists to fetch it at runtime.
+     *
+     * ⚠️ Base64, not hex — that is the encoding both publication channels use, and the
+     * controller converts to the hex `IpcSet` wants rather than asking the operator to.
+     */
+    @get:Input
+    abstract val overlayPubkey: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -119,6 +205,29 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object BoomioIptvConfig {
                 |    const val BASE_URL = "${iptvBaseUrl.get()}"
+                |}
+                """.trimMargin()
+            )
+            // The server's address on the WireGuard overlay. Not a URL: it is what the
+            // public FQDNs above resolve to while the tunnel is up, never what the app
+            // dials. Blank by default, which leaves the overlay resolver inert.
+            //
+            // ⚠️ A FALLBACK, not the source. Enrollment derives the same value from the
+            // overlay CIDR it is assigned (OverlayAssignment.serverAddress) and writes it
+            // into BoomioConfig at runtime, so a build that bakes nothing here still works
+            // against any deployment. Set this only to cover the window before a device has
+            // ever enrolled.
+            resolve("BoomioOverlayConfig.kt").writeText(
+                """
+                |package com.nuvio.app.features.boomio
+                |
+                |object BoomioOverlayConfig {
+                |    const val ADDR = "${overlayAddr.get()}"
+                |    const val LOCAL_CIDR = "${overlayLocalCidr.get()}"
+                |    const val PROXY = "${overlayProxy.get()}"
+                |    const val ENGINE = "${overlayEngine.get()}"
+                |    const val ENDPOINT = "${overlayEndpoint.get()}"
+                |    const val PUBKEY = "${overlayPubkey.get()}"
                 |}
                 """.trimMargin()
             )
@@ -363,6 +472,14 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     )
     companionBaseUrl.set(runtimeConfigValue("BOOMIO_COMPANION_URL"))
     iptvBaseUrl.set(runtimeConfigValue("BOOMIO_IPTV_URL"))
+    overlayAddr.set(runtimeConfigValue("BOOMIO_OVERLAY_ADDR"))
+    overlayProxy.set(runtimeConfigValue("BOOMIO_OVERLAY_PROXY"))
+    overlayEngine.set(runtimeConfigValue("BOOMIO_OVERLAY_ENGINE"))
+    overlayEndpoint.set(runtimeConfigValue("BOOMIO_OVERLAY_ENDPOINT"))
+    overlayPubkey.set(runtimeConfigValue("BOOMIO_OVERLAY_PUBKEY"))
+    overlayLocalCidr.set(
+        runtimeConfigValue("BOOMIO_OVERLAY_LOCAL_CIDR").ifBlank { "10.77.0.2/32" }
+    )
 }
 
 tasks.withType<KotlinCompilationTask<*>>().configureEach {

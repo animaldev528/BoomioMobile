@@ -141,22 +141,13 @@ object CompanionBridge {
     private val log = Logger.withTag("CompanionBridge")
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val http = HttpClient {
-        install(HttpTimeout) {
-            requestTimeoutMillis = 15_000
-            connectTimeoutMillis = 10_000
-        }
-        expectSuccess = false
-    }
+    private val http = createBoomioHttpClient()
 
     // Long-lived socket: only a connect timeout — a request/socket timeout would
     // kill an idle connection (inbound can be quiet while the 10s heartbeat runs).
     // The WebSockets plugin is required for webSocket() — without it every
     // connect throws and the companion link never opens.
-    private val wsClient = HttpClient {
-        install(HttpTimeout) { connectTimeoutMillis = 10_000 }
-        install(WebSockets)
-    }
+    private val wsClient = createBoomioWebSocketClient()
 
     private val _connected = MutableStateFlow(false)
     /** True while the `/ws/phone` socket is open. */

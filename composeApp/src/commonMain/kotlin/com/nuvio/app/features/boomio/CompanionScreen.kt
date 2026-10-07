@@ -78,9 +78,10 @@ import nuvio.composeapp.generated.resources.companion_key_left
 import nuvio.composeapp.generated.resources.companion_key_ok
 import nuvio.composeapp.generated.resources.companion_key_right
 import nuvio.composeapp.generated.resources.companion_key_up
+import nuvio.composeapp.generated.resources.companion_link_approval_hint
+import nuvio.composeapp.generated.resources.companion_link_awaiting_approval
 import nuvio.composeapp.generated.resources.companion_link_failed_expired
 import nuvio.composeapp.generated.resources.companion_link_failed_start
-import nuvio.composeapp.generated.resources.companion_link_failed_unauthenticated
 import nuvio.composeapp.generated.resources.companion_linking
 import nuvio.composeapp.generated.resources.companion_no_tvs
 import nuvio.composeapp.generated.resources.companion_nothing_playing
@@ -240,15 +241,29 @@ private fun LiveTvRow(onOpen: () -> Unit) {
     }
 }
 
+/**
+ * The link machine, rendered. Shared by the companion screen in Settings and by the first-run
+ * setup gate, which is why it is [internal] and why the two headline strings are parameters.
+ *
+ * ⚠️ **The defaults are the companion's copy and are wrong for the gate.**
+ * `companion_unlinked_description` describes controlling a *TV* from this phone — a real job, but
+ * not the one the setup gate is doing, which is getting this phone onto the server at all. The
+ * machine underneath is identical, so passing different words is better than copying the `when`
+ * below into a second file, where the two would drift the first time a state is added.
+ */
 @Composable
-private fun UnlinkedCard(linkState: BoomioLinkState) {
-    val title = stringResource(Res.string.companion_unlinked_title)
-    val description = stringResource(Res.string.companion_unlinked_description)
+internal fun UnlinkedCard(
+    linkState: BoomioLinkState,
+    title: String = stringResource(Res.string.companion_unlinked_title),
+    description: String = stringResource(Res.string.companion_unlinked_description),
+) {
     val connectLabel = stringResource(Res.string.companion_connect)
     val linkingLabel = stringResource(Res.string.companion_linking)
     val failStart = stringResource(Res.string.companion_link_failed_start)
-    val failUnauthenticated = stringResource(Res.string.companion_link_failed_unauthenticated)
     val failExpired = stringResource(Res.string.companion_link_failed_expired)
+    val awaitingApprovalLabel = stringResource(Res.string.companion_link_awaiting_approval)
+    val approvalHint = stringResource(Res.string.companion_link_approval_hint)
+    val cancelLabel = stringResource(Res.string.companion_cancel)
 
     NuvioSurfaceCard {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -276,9 +291,38 @@ private fun UnlinkedCard(linkState: BoomioLinkState) {
                         Text(linkingLabel, style = MaterialTheme.typography.bodyMedium)
                     }
                 }
+                is BoomioLinkState.AwaitingApproval -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp,
+                            )
+                            Text(awaitingApprovalLabel, style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Text(linkState.userCode, style = MaterialTheme.typography.headlineSmall)
+                        linkState.verificationUri?.let { uri ->
+                            Text(
+                                uri,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Text(
+                            approvalHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = { BoomioSessionRepository.cancelLink() }) {
+                            Text(cancelLabel)
+                        }
+                    }
+                }
                 is BoomioLinkState.Failed -> {
                     val message = when (linkState.reason) {
-                        BoomioLinkFailure.Unauthenticated -> failUnauthenticated
                         BoomioLinkFailure.Expired -> failExpired
                         BoomioLinkFailure.Start -> failStart
                     }

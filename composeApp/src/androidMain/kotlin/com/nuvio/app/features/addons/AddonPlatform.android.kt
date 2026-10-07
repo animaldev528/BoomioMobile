@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
 import com.nuvio.app.core.network.IPv4FirstDns
+import com.nuvio.app.core.overlay.withOverlayProxy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,7 +21,6 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.net.Proxy
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
@@ -109,7 +109,11 @@ private fun buildAddonHttpClient(cache: Cache? = null): OkHttpClient =
         .followRedirects(true)
         .followSslRedirects(true)
         .addInterceptor(SentryNetworkBreadcrumbInterceptor())
-        .proxy(Proxy.NO_PROXY)
+        // ⚠️ This line used to read `.proxy(Proxy.NO_PROXY)`, which is not merely the
+        // default — a non-null `proxy` makes OkHttp ignore `proxySelector` outright, so
+        // leaving it would have kept the addon plane permanently off the overlay while
+        // every other engine moved. Removed, not appended to.
+        .withOverlayProxy()
         .apply {
             if (cache != null) {
                 cache(cache)

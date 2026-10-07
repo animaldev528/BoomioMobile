@@ -11,6 +11,13 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.network.ServerConfigurationStorage
+import com.nuvio.app.core.overlay.OverlayEnrollment
+import com.nuvio.app.core.overlay.OverlayEndpointDiscovery
+import com.nuvio.app.core.overlay.OverlayLocalDiscovery
+import com.nuvio.app.core.overlay.OverlayProvisioning
+import com.nuvio.app.core.overlay.OverlayRelay
+import com.nuvio.app.core.overlay.OverlaySession
+import com.nuvio.app.core.overlay.OverlayTunnel
 import com.nuvio.app.features.boomio.BoomioSessionRepository
 import com.nuvio.app.features.boomio.BoomioSessionStorage
 import com.nuvio.app.features.boomio.PrivateListeningSession
@@ -99,6 +106,45 @@ open class MainActivity : AppCompatActivity() {
         BoomioSessionRepository.initialize()
         PrivateListeningSession.initialize(applicationContext)
         ServerConfigurationStorage.initialize(applicationContext)
+        // Beside the server configuration because the browse reads the host list from
+        // it. This only stores the context; the browse itself is foreground-triggered.
+        OverlayLocalDiscovery.initialize(applicationContext)
+        // The Tier 2 sibling. It watches for a tunnel two ways — one the platform or the
+        // user's WireGuard app established, and the app's *own* userspace one — and does
+        // nothing at all until `BOOMIO_OVERLAY_ADDR` is set. Only the platform path pins
+        // DNS; see its two-paths doc for why the other one must not.
+        OverlayTunnel.initialize(applicationContext)
+        // The endpoint ladder (architecture §4.4): mDNS, then `boomio-local`, then a person. It
+        // is *after* the two above on purpose — rung 1 borrows `OverlayLocalDiscovery`'s browse
+        // rather than opening its own, so the browse has to exist first. Like them it only
+        // stores the context here; the walk is foreground- and network-triggered.
+        OverlayEndpointDiscovery.initialize(applicationContext)
+        // The relay every engine has to be pointed at explicitly, because a userspace
+        // tunnel captures nothing on its own. Process-scoped and takes no `Context`; it
+        // opens no socket at all until `BOOMIO_OVERLAY_ADDR` is set, and every client
+        // behaves exactly as it does today while `OverlayRelay.state` is `Down`.
+        OverlayRelay.initialize()
+        // Binds the tunnel to whatever the ladder found, and hands the relay a dialler that
+        // reads the tunnel's state per dial. ⚠️ Order against the line above does not
+        // matter, and that is by construction rather than luck: `OverlayRelay.start` binds
+        // its diallers once per process, so a tunnel reference captured at start-up would
+        // freeze the state at `Down` forever. `DeferredTunnelDialer` is what makes the
+        // relay safe to start first — and it starts before the ladder has walked anything.
+        OverlaySession.initialize(applicationContext)
+        // Last of the overlay group, and it has to be: it needs the keypair the tunnel
+        // created (it enrols *as* that public key), the ladder it nudges via `offerManual`
+        // once an address arrives, and the companion session it authenticates with. This is
+        // the piece that ends the build-time constants — before it, a device's own overlay
+        // address (`BOOMIO_OVERLAY_LOCAL_CIDR`) was fixed at compile time and the second
+        // client on an overlay could never be right.
+        OverlayEnrollment.initialize(applicationContext)
+        // And last of all, the way *in* for a device that has nothing: the provisioning channel.
+        // It registers itself as `BoomioSessionRepository`'s second pairing transport, so it has
+        // to exist before any UI can call `startLink()` — which is what this position guarantees,
+        // since composition happens after `onCreate` returns. Neither order against the line
+        // above matters: the two only meet through `OverlayEnrollment`'s *api factory*, which is
+        // read per enrollment rather than captured here.
+        OverlayProvisioning.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)

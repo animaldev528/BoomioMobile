@@ -6,6 +6,8 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
 import com.nuvio.app.core.network.IPv4FirstDns
+import com.nuvio.app.core.overlay.OverlayPinRegistry
+import com.nuvio.app.core.overlay.withOverlayProxy
 import okhttp3.OkHttpClient
 import java.net.HttpURLConnection
 import java.net.URL
@@ -43,11 +45,45 @@ internal object PlayerPlaybackNetworking {
         }
     }
 
+    /**
+     * The trust-all client, for third-party sources whose certificates are not ours to
+     * demand (IPTV panels, addon CDNs).
+     *
+     * ⚠️ `usePins = false` is a **security control, not a preference.** This client
+     * accepts any certificate and any hostname, so on this path TLS authenticates
+     * nothing. Following a pin here would let an unauthenticated mDNS advert redirect
+     * the media stream — and the `Authorization` header riding on it — to whatever LAN
+     * host the advert named. Pinned hosts use [pinnedPlaybackHttpClient] instead.
+     */
     private val playbackHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .dns(IPv4FirstDns())
+            .dns(IPv4FirstDns(usePins = false))
+            .withOverlayProxy()
             .sslSocketFactory(sslContext.socketFactory, trustAllManager)
             .hostnameVerifier(playbackHostnameVerifier)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .addInterceptor(SentryNetworkBreadcrumbInterceptor())
+            .build()
+    }
+
+    /**
+     * The validating twin, selected only when the source host is one we pinned
+     * ourselves.
+     *
+     * Identical timeouts, redirects and interceptor to [playbackHttpClient]; the single
+     * difference is that TLS is left at the platform default, so following the pin is
+     * safe. This costs nothing on the path it serves: the user's own hosts present real
+     * certificates (verified live in A1), and third-party hosts never reach it.
+     */
+    private val pinnedPlaybackHttpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .dns(IPv4FirstDns())
+            .withOverlayProxy()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
@@ -75,9 +111,16 @@ internal object PlayerPlaybackNetworking {
     fun createHttpDataSourceFactory(
         defaultHeaders: Map<String, String> = emptyMap(),
         useLongReadTimeout: Boolean = false,
+        sourceUrl: String? = null,
     ): DataSource.Factory {
         val requestHeaders = sanitizeHeaders(defaultHeaders)
-        val baseClient = if (useLongReadTimeout) loopbackPlaybackHttpClient else playbackHttpClient
+        // A loopback source is 127.0.0.1 and can never be a pinned host, so the
+        // long-read-timeout client needs no pinned twin.
+        val baseClient = when {
+            useLongReadTimeout -> loopbackPlaybackHttpClient
+            sourceUrl != null && OverlayPinRegistry.isPinnedHost(sourceUrl) -> pinnedPlaybackHttpClient
+            else -> playbackHttpClient
+        }
         val client = requestHeaders.headerValue("Authorization")?.let { authorization ->
             baseClient.newBuilder()
                 .addNetworkInterceptor { chain ->

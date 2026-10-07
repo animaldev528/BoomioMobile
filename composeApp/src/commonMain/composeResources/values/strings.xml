@@ -380,6 +380,30 @@
     <string name="server_connect_url_placeholder">https://backend.example.com</string>
     <string name="server_connect_action">Check server</string>
     <string name="server_connect_checking">Checking…</string>
+    <!-- Overlay discovery, both tiers. Found is shown wherever the app talks about
+         servers; the other two only in Settings, where the user asked for the detail.
+         The two Found strings are kept apart because "local" is a claim about where the
+         server is, and the overlay one is reached through a tunnel from anywhere. -->
+    <string name="server_local_found">Local server detected — %1$s</string>
+    <string name="server_overlay_found">Overlay tunnel — %1$s</string>
+    <string name="server_local_searching">Looking for a server on this network…</string>
+    <string name="server_local_unavailable">No local server on this network (%1$s)</string>
+    <!-- The endpoint ladder (architecture §4.4). Authored in the default locale only, like the
+         four above: every locale falls back to these, and a partial translation is a worse
+         answer than an English sentence. `needs_manual` is the one that must never be hidden —
+         §10.7 chose no LAN fallback, so this line is how a failed discovery fails visibly, and
+         its %1$s is a whole sentence ending in the action the user can take. -->
+    <string name="overlay_endpoint_searching">Looking for the overlay tunnel…</string>
+    <string name="overlay_endpoint_found">Overlay endpoint %1$s</string>
+    <string name="overlay_endpoint_needs_manual">Overlay tunnel: %1$s</string>
+    <string name="overlay_endpoint_unavailable">Overlay tunnel unavailable (%1$s)</string>
+    <!-- The one control §10.7's failure state needs: `needs_manual` names an action, and
+         without this field there was nothing to perform it with. The hint is the shape the
+         field accepts, not an example server — this app is deployed on exactly one. -->
+    <string name="overlay_manual_label">Server address</string>
+    <string name="overlay_manual_hint">host or host:port</string>
+    <string name="overlay_manual_submit">Use this address</string>
+    <string name="server_discovery_label">Server discovery</string>
     <string name="server_review_title">Review custom server</string>
     <string name="server_review_description">The discovery document is valid. Connecting will sign you out of the current server and restart the app. Confirm that this is a server you own or trust.</string>
     <string name="server_review_verified_label">Discovered backend</string>
@@ -542,10 +566,19 @@
     <string name="companion_unlinked_title">Not connected</string>
     <string name="companion_unlinked_description">Connect to a TV running the Nuvio companion hub to control playback from this phone.</string>
     <string name="companion_connect">Connect</string>
+    <!--
+      The first-run device setup step, shown before the sign-in screen on a device that has never
+      been paired. Deliberately NOT the companion copy above: that one describes controlling a TV
+      from this phone, which is a different job from getting this phone onto the server at all.
+    -->
+    <string name="device_setup_title">Set up this device</string>
+    <string name="device_setup_description">This device has to be paired with your server before you can sign in. Press Connect to get a code, then give that code to your server’s admin.</string>
+    <string name="device_setup_skip">Skip for now</string>
     <string name="companion_linking">Connecting…</string>
     <string name="companion_link_failed_start">Couldn’t start connecting. Try again.</string>
-    <string name="companion_link_failed_unauthenticated">Sign in to Nuvio before connecting a TV.</string>
     <string name="companion_link_failed_expired">The link expired. Try again.</string>
+    <string name="companion_link_awaiting_approval">Approve this code to finish connecting:</string>
+    <string name="companion_link_approval_hint">Open the Boomio admin page on any device, sign in, and approve it. This screen finishes on its own.</string>
     <string name="companion_connected_hub">Connected to hub</string>
     <string name="companion_connecting_hub">Connecting to hub…</string>
     <string name="companion_no_tvs">No TVs available</string>

@@ -29,6 +29,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import kotlinx.coroutines.runBlocking
+import com.nuvio.app.core.overlay.OverlayProxy
+import com.nuvio.app.features.boomio.BoomioConfig
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.getString
 import androidx.lifecycle.LifecycleEventObserver
@@ -308,6 +310,7 @@ private fun ExoPlayerSurface(
             useYoutubeChunkedPlayback = useYoutubeChunkedPlayback,
             useLongReadTimeout = isLoopbackPlaybackSource(sourceUrl),
             externalSubtitles = externalSubtitles,
+            sourceUrl = sourceUrl,
         )
     }
 
@@ -1295,6 +1298,9 @@ private class NuvioLibmpvView(
         mpv.setOptionString("demuxer-max-bytes", "${libmpvCacheBytes()}").logIfMpvError("demuxer-max-bytes")
         mpv.setOptionString("demuxer-max-back-bytes", "${libmpvCacheBytes()}").logIfMpvError("demuxer-max-back-bytes")
         mpv.setOptionString("vd-lavc-film-grain", "cpu")
+        // ⚠️ `http-proxy` is deliberately NOT set here — see [applyOverlayProxyNow], which
+        // runs before every `loadfile`. The relay can come up after this player is
+        // constructed, and an option set once here would pin it to "direct" for good.
         mpv.setPropertyBoolean("keep-open", true)
         mpv.setPropertyBoolean("input-default-bindings", true)
         mpv.setPropertyBoolean("audio-fallback-to-null", true)
@@ -1638,7 +1644,38 @@ private class NuvioLibmpvView(
         }
     }
 
+    /** The `http-proxy` value currently applied to mpv, so a re-apply is a no-op. */
+    private var appliedOverlayProxy: String? = null
+
+    /**
+     * Points libmpv at the overlay relay — or back at nothing — immediately before a load.
+     *
+     * libmpv is the one engine the app's own DNS seam cannot reach: it resolves inside
+     * libcurl's `getaddrinfo`, which no application can hook, and the shipped AAR has no
+     * libcurl of its own to swap. A proxy is the only way it joins the overlay.
+     *
+     * ⚠️ **Called per load, never once at construction.** The relay only exists after the
+     * discovery ladder publishes an endpoint, so a player built before that would hold
+     * "direct" for the life of the process. Same per-use rule as the OkHttp seam.
+     *
+     * [BoomioConfig.overlayProxyUrl] stays as the fallback *below* the live relay: it is
+     * how Spike A aimed libmpv at a throwaway logging proxy, and it still does exactly
+     * that on a build where no relay runs.
+     */
+    private fun applyOverlayProxyNow() {
+        val proxy = OverlayProxy.mpvProxyUrl()
+            ?: BoomioConfig.overlayProxyUrl.trim().takeIf { it.isNotEmpty() }
+            ?: ""
+        if (proxy == appliedOverlayProxy) return
+        mpv.setOptionString("http-proxy", proxy).logIfMpvError("http-proxy")
+        appliedOverlayProxy = proxy
+        // ⚠️ Never the whole URL for the live relay: it carries the per-process secret as
+        // `user:secret@`. Everything after the `@` is the part worth having in a log.
+        if (proxy.isNotEmpty()) Log.i(TAG, "libmpv http-proxy -> ${proxy.substringAfter('@', proxy)}")
+    }
+
     private fun applyRequestHeadersNow(headers: Map<String, String>) {
+        applyOverlayProxyNow()
         val userAgent = headers.entries.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
         if (!userAgent.isNullOrBlank()) {
             mpv.setPropertyString("user-agent", userAgent)
