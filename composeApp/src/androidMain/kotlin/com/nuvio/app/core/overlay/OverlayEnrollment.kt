@@ -25,6 +25,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -453,7 +455,28 @@ internal object OverlayEnrollment {
             },
         )
 
-        scope.launch { refresh() }
+        // ⚠️ **Bound to the session rather than run once, and that is the whole point.** An
+        // enrollment call needs a `bs_ses_` token, and the install this path exists for has
+        // none yet — the device is being onboarded *because* it has nothing. A single
+        // `refresh()` here would run before pairing completes and then never again, leaving a
+        // device that had just linked holding no assignment until it was restarted. It only
+        // ever worked when a token had survived from a previous run into
+        // `BoomioSessionRepository.initialize`, which is precisely the case that does not exist
+        // on a fresh install. Collecting instead makes the same call happen whenever a token
+        // arrives: from the store at start-up, or minutes later when the device-code poll lands.
+        //
+        // Keyed on the *token* so a session object changing for some unrelated reason does not
+        // re-enroll, while a genuine re-link does — `unlink()` clears the token and the next
+        // poll sets a different one, which is a change like any other.
+        scope.launch {
+            BoomioSessionRepository.session
+                .map { session -> session?.token?.takeIf { it.isNotBlank() } }
+                .distinctUntilChanged()
+                .collect { token ->
+                    if (token == null) return@collect
+                    refresh()
+                }
+        }
     }
 
     /** Asks the server for this device's address, using the cache only if [useCache]. */
