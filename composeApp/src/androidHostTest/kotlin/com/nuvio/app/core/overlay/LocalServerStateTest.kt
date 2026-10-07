@@ -30,12 +30,15 @@ class LocalServerStateTest {
     }
 
     @Test
-    fun `the LAN source wins when both found something`() {
-        // Both tiers work here, so the ranking is what decides. LAN is the more local
-        // path and its pin outranks the tunnel's in the registry; the display has to
-        // agree with the registry, or the row would name an address the app is not using.
+    fun `the tunnel source wins when both found something`() {
+        // Both tiers work here, so the ranking is what decides. ⚠️ This is the reversal of
+        // 2026-10-07: the tunnel used to lose this, on "LAN is the more local path". The
+        // owner's call is one path everywhere — the app brings its own tunnel up at home
+        // too, and preferring the LAN pin meant the shipped transport carried nothing there.
+        // The display has to agree with the registry, or the row would name an address the
+        // app is not using.
         assertEquals(
-            foundLan,
+            foundTunnel,
             statuses(LocalServerSource.LAN to foundLan, LocalServerSource.TUNNEL to foundTunnel),
         )
     }

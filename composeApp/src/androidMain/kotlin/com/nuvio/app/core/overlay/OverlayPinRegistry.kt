@@ -46,6 +46,9 @@ import java.net.InetAddress
  * tunnel probe landing a second after a browse would silently replace a working LAN
  * pin. Sources are held separately and consulted in [LocalServerSource] order instead.
  *
+ * ⚠️ **Ranking decides the order; [ownTunnelCarriesTraffic] decides whether the LAN arm of
+ * it is consulted at all.** Both are load-bearing and neither replaces the other.
+ *
  * Held as one immutable map behind `@Volatile` and replaced copy-on-write rather than
  * guarded by a lock: a `lookup` runs on a network thread for *every* connect and must
  * never block, and a reader needs one consistent snapshot rather than several fields
@@ -65,13 +68,56 @@ internal object OverlayPinRegistry {
     @Volatile
     private var pins: Map<LocalServerSource, Pin> = emptyMap()
 
+    /**
+     * Whether the app's **own** userspace tunnel is currently carrying boomio traffic.
+     *
+     * ⚠️ **This exists because the LAN pin has to be *kept* but not *followed* at home, and
+     * those are two different things.** Path B (see `OverlayTunnel`'s two-paths doc) installs
+     * no kernel route and therefore pins nothing — which left the LAN pin, placed a moment
+     * earlier by the mDNS browse, as the only pin in the registry and so the route every
+     * client took. The tunnel was up and carrying nothing; the relay was idle. Measured on
+     * device 2026-10-07: the home screen read "Local server detected — 192.168.68.65" with a
+     * healthy overlay in place.
+     *
+     * Skipping `LAN` at lookup time rather than declining to place the pin is deliberate:
+     * holding it costs nothing, the browse's work is not thrown away when the tunnel drops,
+     * and no window opens in which a *removed* pin would have to be rebuilt. A lookup runs on
+     * a network thread per connect, so this reads the tunnel's own `StateFlow` live and
+     * follows the transition in both directions with no bookkeeping and no ordering hazard.
+     *
+     * ⚠️ **Both halves are required, and the relay half is the one that is easy to omit.** The
+     * tunnel and the relay come up on independent lifecycles, so `TunnelState.Up` alone is
+     * reachable while `OverlayRelay` never bound — a failed bind, or a `start` that has not run
+     * yet. In that state no client has a proxy URL (`RelayProxySelector` answers `DIRECT`), so
+     * suppressing the LAN pin would send every request to the public WAN address with no
+     * tunnel behind it, and hairpin is off: the app would be *less* able to reach the server
+     * than before this change. Requiring the relay means the pin is dropped only once something
+     * is actually carrying the traffic. `RelayState.Up` is published in the same synchronized
+     * block that assigns the handle, so it is exact rather than approximate, and reading it
+     * costs no allocation on a path that runs once per connect.
+     *
+     * A function rather than a direct reference so the ranking is testable without a running
+     * Go device. Production never reassigns it, which is also why the composition above carries
+     * no test of its own: the two halves have no shared seam to stub.
+     */
+    @Volatile
+    internal var ownTunnelCarriesTraffic: () -> Boolean = {
+        OverlayRelay.state.value is RelayState.Up &&
+            OverlayWgTunnelController.instance?.state?.value is TunnelState.Up
+    }
+
     /** The pinned address for [host], or null when no source covers [host]. */
     fun lookup(host: String?): InetAddress? {
         if (host.isNullOrBlank()) return null
         val current = pins
         if (current.isEmpty()) return null
-        // Walks the sources in rank order, so the most local pin answers first.
+        // Walks the sources in rank order, so the highest-ranked pin answers first.
         for (source in LocalServerSource.entries) {
+            // ⚠️ Retained, not followed — see [ownTunnelCarriesTraffic]. Answering with the
+            // LAN address here while our own tunnel carries the traffic would steer every
+            // client back off the relay and onto a direct route, which is the one thing the
+            // ranking above was reversed to stop.
+            if (source == LocalServerSource.LAN && ownTunnelCarriesTraffic()) continue
             val pin = current[source] ?: continue
             if (host in pin.hosts) return pin.address
             // The domain match is what covers the hosts the app only ever learns at runtime.

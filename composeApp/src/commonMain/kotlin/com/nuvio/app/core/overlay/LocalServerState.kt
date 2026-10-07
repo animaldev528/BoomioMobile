@@ -18,18 +18,29 @@ import kotlinx.coroutines.flow.update
  * [effectiveStatus] walks them in this order at *display* time. Declaring a new source
  * therefore places it: put it where it belongs in the ranking, not at the end.
  *
- * `LAN` outranks `TUNNEL` because a LAN pin can only exist on the server's own network,
- * with the liveness gate having passed on the *current* network — the most local path
- * available. The tunnel is the one that works from anywhere, which is what makes it the
- * fallback rather than the default. Both are pin-*first*, so ranking them wrongly costs
- * one failed connect, never a broken app.
+ * ⚠️ **`TUNNEL` outranks `LAN`, and that order was reversed on 2026-10-07 — do not
+ * "restore" it.** The tunnel was once the fallback, on the reasoning that a LAN pin can only
+ * exist on the server's own network and is therefore the most local path available. That is
+ * sound about *distance* and wrong about *intent*: the app already has a tunnel up on the
+ * home network too, so preferring the LAN pin means the shipped transport goes unexercised
+ * exactly where it is cheapest to exercise, and every tunnel defect waits until the owner
+ * leaves the house to show itself. The owner's call was that one path everywhere is worth
+ * more than a local hop. Both tiers are pin-*first*, so ranking them wrongly costs one
+ * failed connect, never a broken app.
+ *
+ * ⚠️ **The LAN tier still runs at home, and that is not vestigial.** Its remaining job is to
+ * supply the tunnel's **endpoint** — [OverlayLocalDiscovery.pinCandidate] still publishes
+ * `pinnedAddress` and the verified advert, which is what `OverlaySession` dials. What changes
+ * is only that its *pin* stops being followed while our own tunnel carries traffic; see
+ * [OverlayPinRegistry.ownTunnelCarriesTraffic], which is where that is enforced and the only
+ * reason a live LAN pin existing alongside a live tunnel is not a bug.
  */
 enum class LocalServerSource {
-    /** The server's own address, found by mDNS on the network the phone is on. */
-    LAN,
-
     /** The server's overlay address, reached through the WireGuard tunnel. */
     TUNNEL,
+
+    /** The server's own address, found by mDNS on the network the phone is on. */
+    LAN,
 }
 
 /**

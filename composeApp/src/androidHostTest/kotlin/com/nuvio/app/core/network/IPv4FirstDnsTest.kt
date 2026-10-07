@@ -184,11 +184,16 @@ class IPv4FirstDnsTest {
     }
 
     @Test
-    fun `the LAN pin outranks the tunnel pin when both are present`() {
+    fun `the tunnel pin outranks the LAN pin when both are present`() {
+        // ⚠️ Reversed 2026-10-07 with the ranking itself. Home used to take the LAN pin and
+        // leave the tunnel carrying nothing; the owner's call is one path everywhere. This
+        // test is written against a registry holding both, so it exercises the *rank* alone —
+        // `ownTunnelCarriesTraffic` decides whether the LAN arm is consulted at all, and on a
+        // host test no Go tunnel is up, so the LAN pin is still eligible here.
         OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf(publicHost), overlay)
         OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(publicHost), pinned)
 
-        assertEquals(pinned, dnsOf(publicV4).lookup(publicHost).first())
+        assertEquals(overlay, dnsOf(publicV4).lookup(publicHost).first())
     }
 
     @Test

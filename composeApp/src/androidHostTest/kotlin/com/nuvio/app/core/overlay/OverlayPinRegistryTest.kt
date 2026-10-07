@@ -101,15 +101,63 @@ class OverlayPinRegistryTest {
     }
 
     @Test
-    fun `the two sources hold their own pins and are ranked`() {
+    fun `the two sources hold their own pins and the tunnel is ranked first`() {
         // The tiers are driven by independent triggers that know nothing about each
         // other. With one slot, a tunnel probe landing a second after a browse would
         // replace a working LAN pin with the overlay address — silently, and for the
         // rest of the session.
+        //
+        // ⚠️ The tunnel wins the rank. It used to lose it, on "the most local path
+        // available"; the owner reversed that on 2026-10-07 so the shipped transport is
+        // the one used everywhere, home included.
         OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf("bsc.tracemonkey.org"), overlay)
         OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
 
-        assertEquals(pinned, OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+        assertEquals(overlay, OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+    }
+
+    @Test
+    fun `the LAN pin is kept but not followed while our own tunnel carries traffic`() {
+        // ⚠️ The regression this guards is silent and looks like success: path B pins
+        // nothing, so without this the LAN pin is the only route in the registry, every
+        // client goes direct to 192.168.68.65, and a healthy tunnel carries nothing at all.
+        val was = OverlayPinRegistry.ownTunnelCarriesTraffic
+        try {
+            OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
+
+            // Tunnel down: the LAN pin is the route, as it always was.
+            OverlayPinRegistry.ownTunnelCarriesTraffic = { false }
+            assertEquals(pinned, OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+
+            // Tunnel up: the pin is still there, and deliberately not followed — the relay
+            // resolves the name inside the tunnel instead.
+            OverlayPinRegistry.ownTunnelCarriesTraffic = { true }
+            assertNull(OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+            assertNull(OverlayPinRegistry.lookup("bss-dav.tracemonkey.org"))
+            assertFalse(OverlayPinRegistry.isPinnedHost("https://bss-dav.tracemonkey.org/x.mkv"))
+
+            // And the transition back is instant, with no re-browse: the pin never left.
+            OverlayPinRegistry.ownTunnelCarriesTraffic = { false }
+            assertEquals(pinned, OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+        } finally {
+            OverlayPinRegistry.ownTunnelCarriesTraffic = was
+        }
+    }
+
+    @Test
+    fun `a tunnel pin still answers while our own tunnel carries traffic`() {
+        // Only the LAN arm is suppressed. A platform-VPN pin names the overlay address the
+        // kernel can reach, so it is exactly the right answer in this state and must survive.
+        val was = OverlayPinRegistry.ownTunnelCarriesTraffic
+        try {
+            OverlayPinRegistry.pin(LocalServerSource.TUNNEL, listOf("bsc.tracemonkey.org"), overlay)
+            OverlayPinRegistry.pin(LocalServerSource.LAN, listOf("bsc.tracemonkey.org"), pinned)
+            OverlayPinRegistry.ownTunnelCarriesTraffic = { true }
+
+            assertEquals(overlay, OverlayPinRegistry.lookup("bsc.tracemonkey.org"))
+        } finally {
+            OverlayPinRegistry.ownTunnelCarriesTraffic = was
+        }
     }
 
     @Test
