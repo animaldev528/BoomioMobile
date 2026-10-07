@@ -200,6 +200,95 @@ class OverlayEndpointDiscoveryTest {
     }
 
     // -----------------------------------------------------------------------------------------
+    // The provisioning fields — what a device with no tunnel dials, and where
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    fun `the provisioning fields come off the DuckDNS record`() {
+        // The shape §5.1 of the ingress doc specifies. `ppk` is a *second* key — the provisioning
+        // handshake has a keypair of its own, because bsc is deliberately not trusted with the
+        // tunnel's identity.
+        val tuple = parseDnsTxtRecord(
+            listOf("v1;pk=$PUBLISHED_SERVER_KEY_B64;port=51820;prov=1;ppk=$PROVISIONING_KEY_B64"),
+        )
+        assertEquals(PUBLISHED_SERVER_KEY_B64, tuple.serverPublicKeyBase64)
+        assertEquals(PROVISIONING_KEY_B64, tuple.provisioningPublicKeyBase64)
+        assertTrue(tuple.offersProvisioning)
+        assertEquals(51820, tuple.provisioningPort)
+    }
+
+    @Test
+    fun `an absent prov is not the same as prov zero`() {
+        // ⚠️ The distinction is the point, and it is why the field is `Boolean?` rather than a
+        // boolean with a default. `prov=0` is the server saying "not now"; an absent `prov` is a
+        // record that never mentioned it. Both are closed — but only one of them is an answer, and
+        // a field that could not tell the difference could not later report "this server does not
+        // offer provisioning" separately from "this server has it switched off".
+        val off = parseDnsTxtRecord(listOf("v1;pk=$PUBLISHED_SERVER_KEY_B64;port=51820;prov=0"))
+        assertEquals(false, off.provisioningEnabled)
+        assertTrue(!off.offersProvisioning)
+
+        val unstated = parseDnsTxtRecord(listOf("v1;pk=$PUBLISHED_SERVER_KEY_B64;port=51820"))
+        assertNull(unstated.provisioningEnabled)
+        assertTrue(!unstated.offersProvisioning, "an unstated switch is closed, not permissive")
+    }
+
+    @Test
+    fun `an unrecognised prov value fails closed`() {
+        // `prov` gates an unauthenticated, internet-facing listener. A value the client cannot
+        // read must not be rounded to "on" — the same position the server takes on its own flag,
+        // where a missing or unreadable file means provisioning is OFF.
+        val tuple = parseDnsTxtRecord(listOf("v1;port=51820;prov=maybe"))
+        assertNull(tuple.provisioningEnabled)
+        assertTrue(!tuple.offersProvisioning)
+    }
+
+    @Test
+    fun `a ppk that is not a real key is dropped rather than used`() {
+        // ⚠️ A wrong-length `ppk` is the worst kind of failure here: the handshake against it
+        // would never open, and an unopenable handshake is indistinguishable from an impostor —
+        // so a typo would read as an attack. Validating at the edge keeps "this record is
+        // malformed" from arriving as "this server is not the server it claims to be".
+        val tuple = parseDnsTxtRecord(listOf("v1;port=51820;ppk=not-a-key"))
+        assertNull(tuple.provisioningPublicKeyBase64)
+    }
+
+    @Test
+    fun `a pport names a different port from the tunnel's`() {
+        // The §4.3 escape hatch: if provisioning ever needs its own number, a deployed client
+        // already follows the split. Unused today, which is exactly why it is worth pinning —
+        // the day it is used is not the day to discover the client ignored it.
+        val tuple = parseDnsTxtRecord(listOf("v1;port=51820;pport=4430"))
+        assertEquals(4430, tuple.provisioningPort)
+        assertEquals(51820, tuple.port, "the tunnel's own port is unaffected")
+    }
+
+    @Test
+    fun `a malformed pport falls back to the tunnel port`() {
+        val tuple = parseDnsTxtRecord(listOf("v1;port=51820;pport=99999999999"))
+        assertNull(tuple.provisioningPortOverride)
+        assertEquals(51820, tuple.provisioningPort)
+    }
+
+    @Test
+    fun `the mDNS advert carries the provisioning fields too`() {
+        // mDNS is not the bootstrap channel — it cannot cross the WAN — but the LAN-with-no-WAN
+        // case is its one unique square, and it costs nothing for both rungs to read the same
+        // field list. A rung that silently dropped `ppk` would fail the handshake for a reason
+        // that has nothing to do with discovery.
+        val tuple = parseMdnsAdvertTxt(
+            mapOf(
+                "pubkey" to PUBLISHED_SERVER_KEY_B64.toByteArray(),
+                "port" to "51820".toByteArray(),
+                "prov" to "1".toByteArray(),
+                "ppk" to PROVISIONING_KEY_B64.toByteArray(),
+            ),
+        )
+        assertEquals(PROVISIONING_KEY_B64, tuple.provisioningPublicKeyBase64)
+        assertTrue(tuple.offersProvisioning)
+    }
+
+    // -----------------------------------------------------------------------------------------
     // Key validation — the silent-failure guard
     // -----------------------------------------------------------------------------------------
 
@@ -407,6 +496,9 @@ class OverlayEndpointDiscoveryTest {
     /** The key published by both channels for this deployment — see `OverlayWgTunnelTest`. */
     private companion object {
         const val PUBLISHED_SERVER_KEY_B64 = "kqZZdZcb8cGF9AhUTJw7RWuM/98WZs9NJOGlBKWtiU0="
+
+        /** The provisioning key — a second, distinct keypair, never the tunnel's own. */
+        const val PROVISIONING_KEY_B64 = "ERERERERERERERERERERERERERERERERERERERERERE="
         const val TYPE_A = 1
         const val TYPE_CNAME = 5
         const val TYPE_TXT = 16

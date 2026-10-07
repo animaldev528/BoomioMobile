@@ -38,7 +38,47 @@ internal data class OverlayMdnsAdvert(
 internal data class OverlayAdvertTuple(
     val serverPublicKeyBase64: String?,
     val port: Int?,
+    /**
+     * `ppk` — the **provisioning** public key, which is deliberately not [serverPublicKeyBase64].
+     *
+     * The tunnel's key lives on the host under `/etc/boomio-overlay`, and bsc is not given it: that
+     * store also holds client private keys, so handing bsc the tunnel's identity would make a
+     * container compromise a tunnel compromise. The provisioning handshake therefore has a keypair
+     * of its own, and this is its public half. Null when the record predates the field — a client
+     * can still dial, but it cannot verify who answered, and must say so rather than proceed
+     * silently.
+     */
+    val provisioningPublicKeyBase64: String? = null,
+    /**
+     * `prov` — the server's own kill switch, as the record states it. **Null means the record does
+     * not say**, which is not the same as `false`.
+     */
+    val provisioningEnabled: Boolean? = null,
+    /**
+     * A `pport` override, for the escape hatch where provisioning moves to its own number. Unused
+     * today: [provisioningPort] resolves to [port] when this is null.
+     */
+    val provisioningPortOverride: Int? = null,
 ) {
+    /**
+     * Whether the record says a client may provision.
+     *
+     * ⚠️ **Only an explicit `prov=1` opens the door; absent is closed.** That mirrors the server,
+     * whose own flag (`<OVERLAY_DATA_DIR>/prov`) fails closed on a missing or unreadable file, and
+     * it is the right default for a switch whose whole job is to be off until an operator turns it
+     * on. A record that simply never mentioned `prov` is unstated, not permissive.
+     */
+    val offersProvisioning: Boolean get() = provisioningEnabled == true
+
+    /**
+     * Where to dial provisioning: `pport` when the record names one, else the tunnel's own port.
+     *
+     * ⚠️ **One number, two protocols** — UDP carries the tunnel, TCP carries provisioning — which
+     * is why the default is not a second constant. A malformed `pport` reads as absent and falls
+     * back to [port], the same way a malformed `port` reads as absent.
+     */
+    val provisioningPort: Int? get() = provisioningPortOverride ?: port
+
     companion object {
         /** The WG listen port when the advert does not name one. The POC's port, and the default. */
         const val DEFAULT_PORT = 51820
@@ -67,11 +107,7 @@ internal fun parseMdnsAdvertTxt(attributes: Map<String, ByteArray>?): OverlayAdv
     val fields = attributes.mapValues { (_, raw) ->
         runCatching { raw.toString(Charsets.UTF_8) }.getOrDefault("").trim()
     }
-    val key = fields["pubkey"].orEmpty()
-        .ifEmpty { fields["pk"].orEmpty() }
-        .takeIf { it.isNotEmpty() }
-    val port = fields["port"].orEmpty().toPortOrNull()
-    return OverlayAdvertTuple(key, port)
+    return advertTupleFrom { fields[it] }
 }
 
 /**
@@ -90,9 +126,9 @@ internal fun parseMdnsAdvertTxt(attributes: Map<String, ByteArray>?): OverlayAdv
  * lands mid-field would otherwise fuse two fields into one nonsense token, while a separator
  * that is already the field delimiter turns that case into two ordinary fields.
  *
- * Unknown fields (`v`, `prov`) are ignored rather than rejected: the format is versioned
- * precisely so a server can add fields without a client update, and a client that failed on an
- * unrecognised token would make that impossible.
+ * Unknown fields (`v`) are ignored rather than rejected: the format is versioned precisely so a
+ * server can add fields without a client update, and a client that failed on an unrecognised token
+ * would make that impossible.
  */
 internal fun parseDnsTxtRecord(strings: List<String>): OverlayAdvertTuple {
     if (strings.isEmpty()) return OverlayAdvertTuple(null, null)
@@ -104,9 +140,35 @@ internal fun parseDnsTxtRecord(strings: List<String>): OverlayAdvertTuple {
             token.substring(0, separator).trim().lowercase() to token.substring(separator + 1).trim()
         }
         .toMap()
-    val key = (fields["pk"] ?: fields["pubkey"])?.takeIf { it.isNotEmpty() }
-    val port = fields["port"].orEmpty().toPortOrNull()
-    return OverlayAdvertTuple(key, port)
+    return advertTupleFrom { fields[it] }
+}
+
+/**
+ * The one place a discovery advert becomes an [OverlayAdvertTuple].
+ *
+ * Both rungs land here so they cannot disagree about a field, which is the same argument that keeps
+ * `pk` and `pubkey` interchangeable below: the mDNS advert and the DuckDNS record are published by
+ * different programs on the same box, and a ladder whose rungs read different names would fail
+ * rung 2 for a reason that has nothing to do with DNS — the "works on the LAN and not off it"
+ * class of bug.
+ *
+ * Every value is a trimmed string or null. Blank is treated as absent throughout, because these
+ * fields are written by shell scripts and `ppk=` with nothing after it must read as "no key"
+ * rather than as a key that is the empty string.
+ */
+private fun advertTupleFrom(field: (String) -> String?): OverlayAdvertTuple {
+    fun value(name: String): String? = field(name)?.takeIf { it.isNotEmpty() }
+
+    return OverlayAdvertTuple(
+        serverPublicKeyBase64 = value("pk") ?: value("pubkey"),
+        port = value("port").orEmpty().toPortOrNull(),
+        // ⚠️ Validated, not taken on trust — `validServerKeyOrNull` owns the 32-byte rule for this
+        // package, and a `ppk` that is the wrong length would fail the handshake in a way that
+        // reads as an impostor rather than as the typo it is.
+        provisioningPublicKeyBase64 = validServerKeyOrNull(value("ppk")),
+        provisioningEnabled = value("prov").toProvisioningFlagOrNull(),
+        provisioningPortOverride = value("pport").orEmpty().toPortOrNull(),
+    )
 }
 
 /**
@@ -119,6 +181,23 @@ internal fun parseDnsTxtRecord(strings: List<String>): OverlayAdvertTuple {
  */
 internal fun String.toPortOrNull(): Int? =
     toLongOrNull()?.takeIf { it in 1..65535 }?.toInt()
+
+/**
+ * The `prov` kill switch as a client reads it, or null when the record does not say.
+ *
+ * ⚠️ **Anything unrecognised is null, and null is closed.** `prov` is a switch whose entire job is
+ * to be off until an operator turns it on, so the honest reading of `prov=maybe` is "I do not know
+ * what this means", not "probably fine". The server takes the same position on its own flag — a
+ * missing or unreadable `<OVERLAY_DATA_DIR>/prov` means provisioning is OFF.
+ *
+ * Nullable receiver so an absent field and an empty one are the same answer, which keeps the call
+ * site from having to spell out the difference.
+ */
+internal fun String?.toProvisioningFlagOrNull(): Boolean? = when (this?.trim()?.lowercase()) {
+    "1", "true" -> true
+    "0", "false" -> false
+    else -> null
+}
 
 /**
  * A WireGuard public key the tunnel could actually use, or null.
