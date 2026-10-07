@@ -14,6 +14,9 @@ import java.net.Socket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -96,6 +99,24 @@ internal object OverlayEndpointDiscovery {
 
     /** The WireGuard port, when nothing published one. */
     private const val DEFAULT_WG_PORT = OverlayAdvertTuple.DEFAULT_PORT
+
+    /**
+     * Rung 1's budget, in and out — a **shorter** browse window than the pin's own.
+     *
+     * ⚠️ **This is §3's cap, and it is here rather than around the race because a race is
+     * bounded by its slowest member.** `OverlayLocalDiscovery` browses for six seconds when its
+     * foreground trigger asks, which is the right number for a *pin*: it has a five-minute TTL,
+     * nothing is waiting on the answer, and a longer window is one more chance to notice a
+     * second server on the LAN. The ladder is the opposite case — it runs on the first-run
+     * screen, and on a Wi-Fi network with no boomio advert it would spend those six seconds
+     * before it could say anything at all.
+     *
+     * Two seconds, because mDNS on the reference LAN answers in ~180 ms and the window is only
+     * ever paid in full by a network that is not going to answer. With rung 2 running beside it
+     * ([raceRungs]) the whole walk is therefore ≤ 2 s rather than the sum of the rungs, and
+     * §3's "~2–3 s" holds including the reachability gate.
+     */
+    private const val RUNG1_BUDGET_MS = 2_000L
 
     /**
      * Rung 2's whole budget, in and out.
@@ -243,16 +264,31 @@ internal object OverlayEndpointDiscovery {
 
         OverlayEndpointState.update(OverlayEndpointStatus.Searching)
 
-        // ⚠️ **Every rung is asked, and the gate then picks — the rungs do not short-circuit each
-        // other.** §4.4 is explicit that the ladder stops at the first rung yielding an endpoint
-        // that *works*, and "works" cannot be known until the candidate is in hand. A ladder that
-        // stopped at the first rung that merely *answered* would stop on rung 1's advert and
-        // never learn that the address it names is unreachable — which on the LAN is the normal
-        // way for things to go wrong, since the boomio FQDNs resolve publicly to a WAN address
-        // hairpin cannot reach (§7).
-        val candidates = mutableListOf<OverlayEndpoint>()
-        rung1Mdns()?.let(candidates::add)
-        rung2LocalRecord(context)?.let(candidates::add)
+        // ⚠️ **The two automatic rungs run *concurrently*, and that is §3's race.** Walked in
+        // sequence the ladder pays the sum of the rungs before it can say anything — and the
+        // first of them is a six-second mDNS window on any Wi-Fi network without an advert on
+        // it, which is the "pure dead latency on every first run" §3 names. Raced, the walk
+        // costs its slowest rung instead: ≤ [RUNG1_BUDGET_MS], whatever rung 2 is doing.
+        //
+        // ⚠️ **Raced to *collect*, not raced to the first answer, and there are two reasons.**
+        // The first is the one §4.4 already gave: a ladder that stopped at the first rung that
+        // merely *answered* would stop on rung 1's advert without ever learning that the address
+        // it names is unreachable — the normal way for things to go wrong on the LAN, since the
+        // boomio FQDNs resolve publicly to a WAN address hairpin cannot reach (§7). The gate
+        // decides what *works*, so it has to see everything that answered.
+        //
+        // The second is a bug this file has already been bitten by. The other tempting shape —
+        // take whichever rung answers first and abandon the loser — would cancel a browse
+        // mid-flight, and that browse owns a multicast lock, the LAN pin and `LocalServerState`.
+        // A cancelled `OverlayLocalDiscovery.refresh` leaves `LocalServerStatus` on `Searching`,
+        // no pin at all, and a five-minute TTL stamped over the top so nothing retries: discovery
+        // goes silently dead on the LAN, which is the failure recorded twice in
+        // `OverlayLocalDiscovery` and once in [resolve]'s own fallback below. Awaiting both keeps
+        // every one of those side effects intact.
+        val candidates = raceRungs(
+            { rung1Mdns() },
+            { rung2LocalRecord(context) },
+        ).toMutableList()
         rung3Manual()?.let(candidates::add)
 
         if (candidates.isEmpty()) {
@@ -303,7 +339,10 @@ internal object OverlayEndpointDiscovery {
      * where rung 2 is the one that matters.
      */
     private suspend fun rung1Mdns(): OverlayEndpoint? {
-        OverlayLocalDiscovery.refresh()
+        // [RUNG1_BUDGET_MS], not the browse's own six seconds — see that constant. The window
+        // is passed *in* rather than the wait being timed out around it: a timeout here would
+        // cancel the browse, and the browse is the only thing that will ever place the LAN pin.
+        OverlayLocalDiscovery.refresh(windowMs = RUNG1_BUDGET_MS)
         val advert = OverlayLocalDiscovery.lastVerifiedAdvert() ?: return null
         val key = validServerKeyOrNull(advert.serverPublicKeyBase64)
         if (key == null) {
@@ -459,6 +498,34 @@ internal object OverlayEndpointDiscovery {
         BoomioConfig.overlayServerPubKey = key
         return resolve()
     }
+}
+
+/**
+ * Runs every rung at once and returns the answers **in rung order**, nulls dropped.
+ *
+ * §3 asks the ladder to "race mDNS against name resolution and take the first answer". This is
+ * the race; the *taking* is [OverlayEndpointDiscovery.resolve]'s gate, and it is deliberately not
+ * done here — see the comment at the call site for why taking the first answer as it arrives
+ * would be wrong.
+ *
+ * **Concurrency here is worth its weight in exactly one place, and it is not throughput.** Each
+ * rung carries its own budget ([OverlayEndpointDiscovery]'s `RUNG1_BUDGET_MS` and
+ * `RUNG2_BUDGET_MS`), so walked in sequence the ladder costs the *sum* of them — on a Wi-Fi
+ * network with no boomio advert on it, six‑plus seconds of the first-run screen saying nothing.
+ * Raced, it costs the *maximum*.
+ *
+ * ⚠️ **Awaiting in rung order, not in completion order**, so the list the gate sees is the same
+ * list a sequential walk produced and the gate's preference between rungs is unchanged. A rung
+ * that is slower therefore delays the list, never the ordering — which is the whole of the
+ * difference between this and the loop it replaces.
+ *
+ * ⚠️ **Nothing is cancelled when a rung returns null.** A rung returning null is an answer
+ * ("nothing here"), not a failure, and the other rung is still the one that matters off-LAN.
+ */
+internal suspend fun <T : Any> raceRungs(
+    vararg rungs: suspend () -> T?,
+): List<T> = coroutineScope {
+    rungs.map { rung -> async { rung() } }.awaitAll().filterNotNull()
 }
 
 /**

@@ -59,11 +59,21 @@ import org.jetbrains.compose.resources.stringResource
  * that read as a diagnosis. Tying the two together means a state cannot arrive saying "type
  * an address" with no address to type into. [OverlayEndpointStatus.Found] shows no field
  * because there is nothing to ask for; a typed address that worked has already been adopted.
+ *
+ * ⚠️ **[alwaysOfferManual] is the one caller that breaks that pairing on purpose, and only the
+ * first-run gate uses it.** §3's third requirement is that the field be "visible the entire
+ * time — never behind a full browse timeout": on the gate the user is watching a walk they did
+ * not ask for, and the state they will most likely be in while they read it is `Searching`,
+ * where tying the field to `NeedsManual` would hide it for the whole of the walk and reveal it
+ * only after the walk had already failed. The gate therefore shows the field from the first
+ * frame and the status line beside it, so the field is an offer rather than an answer to an
+ * error. Everywhere else the pairing still holds.
  */
 @Composable
 internal fun OverlayEndpointStatusRow(
     modifier: Modifier = Modifier,
     showUnavailable: Boolean = false,
+    alwaysOfferManual: Boolean = false,
 ) {
     val current by OverlayEndpointState.status.collectAsState()
     val tokens = MaterialTheme.nuvio
@@ -90,19 +100,22 @@ internal fun OverlayEndpointStatusRow(
             if (showUnavailable) stringResource(Res.string.overlay_endpoint_unavailable, status.reason) else null
     }
 
-    if (text == null) return
+    val showField = alwaysOfferManual || current is OverlayEndpointStatus.NeedsManual
+    if (text == null && !showField) return
 
     Column(modifier = modifier) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodySmall,
-            // Amber for the actionable failure, muted for everything else — so the one line the
-            // user can *do* something about does not look like the three they cannot.
-            color = if (current is OverlayEndpointStatus.NeedsManual) tokens.colors.warning else tokens.colors.textMuted,
-        )
+        if (text != null) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                // Amber for the actionable failure, muted for everything else — so the one line the
+                // user can *do* something about does not look like the three they cannot.
+                color = if (current is OverlayEndpointStatus.NeedsManual) tokens.colors.warning else tokens.colors.textMuted,
+            )
+        }
 
-        if (current is OverlayEndpointStatus.NeedsManual) {
-            Spacer(Modifier.height(8.dp))
+        if (showField) {
+            if (text != null) Spacer(Modifier.height(8.dp))
             ManualEndpointField()
         }
     }

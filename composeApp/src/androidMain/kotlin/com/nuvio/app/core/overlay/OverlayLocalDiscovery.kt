@@ -82,6 +82,10 @@ internal object OverlayLocalDiscovery {
      * The **maximum** a browse may take — not the time it always takes. The browse is cut
      * short as soon as a candidate answers the liveness gate (see [collectCandidates]), so
      * this bounds a *silent* network rather than taxing a responsive one.
+     *
+     * ⚠️ **A bound on the `pin`, not on the browse.** It is the default for [refresh]'s
+     * `windowMs`, and the endpoint ladder passes a shorter one — see that parameter for why
+     * the two callers want different numbers from the same browse.
      */
     private const val BROWSE_WINDOW_MS = 6_000L
     private const val RESOLVE_TIMEOUT_MS = 3_000L
@@ -280,8 +284,20 @@ internal object OverlayLocalDiscovery {
     /**
      * Browses and republishes [LocalServerState]. Safe to call repeatedly; concurrent
      * calls serialise rather than racing the NSD listener.
+     *
+     * ⚠️ **[windowMs] is a parameter because the two callers want different numbers from the
+     * same browse, and the difference is latency on the cold path.** This object's own
+     * foreground trigger is the *pin*: it has five minutes of TTL behind it and no user
+     * waiting on the answer, so it takes the full [BROWSE_WINDOW_MS] and would rather see a
+     * second server on the LAN than finish early. The endpoint ladder is the opposite — it is
+     * walked in front of a first-run screen, and a Wi-Fi network with no boomio advert on it
+     * costs the whole window in pure dead latency before the ladder can say anything. It
+     * passes a shorter one.
+     *
+     * Still a **maximum** either way: a candidate that answers the liveness gate pins
+     * immediately (see [collectCandidates]) and the window only bounds a silent network.
      */
-    suspend fun refresh() = browseMutex.withLock {
+    suspend fun refresh(windowMs: Long = BROWSE_WINDOW_MS) = browseMutex.withLock {
         // Stamped on entry, not on success: a browse that finds nothing is still a
         // browse, and re-running it on every foreground would be pure traffic.
         lastBrowsedAtMs = SystemClock.elapsedRealtime()
@@ -317,7 +333,7 @@ internal object OverlayLocalDiscovery {
         // lock is needed. Every entry is a *distinct* address -- the worker dedupes.
         val verified = mutableListOf<Candidate>()
         val candidates = try {
-            collectCandidates(nsd) { candidate ->
+            collectCandidates(nsd, windowMs) { candidate ->
                 verified += candidate
                 if (verified.size == 1) {
                     // ⚠️ **The cold-launch win, and it is worth seconds.** This pin used to
@@ -441,7 +457,7 @@ internal object OverlayLocalDiscovery {
     )
 
     /**
-     * Browses for up to [BROWSE_WINDOW_MS] and returns everything that resolved.
+     * Browses for up to [windowMs] and returns everything that resolved.
      *
      * `resolveService` handles one service at a time and throws if re-entered, so
      * found services are queued to a single worker rather than resolved inline.
@@ -451,14 +467,20 @@ internal object OverlayLocalDiscovery {
      *
      * ⚠️ **[onVerified] is what makes the window a maximum instead of an obligatory
      * wait.** The liveness probe used to run *after* the window closed, so the caller
-     * could not pin until [BROWSE_WINDOW_MS] had elapsed even when mDNS had answered in
+     * could not pin until the window had elapsed even when mDNS had answered in
      * ~180 ms. Probing here lets the caller pin on the first server that answers, which
      * is the difference between a 62 s cold launch and a ~2 s one (measured 2026-10-05).
      * Only a *distinct* address is reported, so Avahi re-announcing the same server about
      * once a second cannot read as a second server.
+     *
+     * ⚠️ **The window still runs to its full length after a candidate is verified**, because
+     * the caller may be waiting on the *list* and not just the first entry — [refresh]'s
+     * ambiguity check ("More than one server on this network") is exactly that. Who waits how
+     * long is therefore the caller's choice, which is what [windowMs] is for.
      */
     private suspend fun collectCandidates(
         nsd: NsdManager,
+        windowMs: Long,
         onVerified: (Candidate) -> Unit,
     ): List<Candidate> = coroutineScope {
         val queue = Channel<NsdServiceInfo>(Channel.UNLIMITED)
@@ -500,7 +522,7 @@ internal object OverlayLocalDiscovery {
                 }
             }
 
-            delay(BROWSE_WINDOW_MS)
+            delay(windowMs)
             queue.close()
             worker.join()
         } finally {

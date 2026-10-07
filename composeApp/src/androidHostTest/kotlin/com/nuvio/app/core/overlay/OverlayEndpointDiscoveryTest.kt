@@ -2,7 +2,11 @@ package com.nuvio.app.core.overlay
 
 import android.app.Application
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -482,6 +486,75 @@ class OverlayEndpointDiscoveryTest {
             OverlayEndpointState.manualSubmit = previous
             OverlayEndpointState.reset()
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The race — §3's cap on the walk
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    fun `the rungs are genuinely concurrent, not merely interleaved`() = runBlocking {
+        // ⚠️ A **barrier**, not a stopwatch. Both rungs must reach this point before either may
+        // answer, so a sequential walk parks on the first `await` forever — `withTimeout` turns
+        // that into a failure rather than a hung suite, which is the only reason it is here.
+        // Asserting concurrency by measuring elapsed time would pass on a fast box for an
+        // implementation that merely happened to be quick.
+        val arrived = AtomicInteger(0)
+        val bothArrived = CompletableDeferred<Unit>()
+
+        val first: suspend () -> String = {
+            if (arrived.incrementAndGet() == 2) bothArrived.complete(Unit)
+            bothArrived.await()
+            "first"
+        }
+        val second: suspend () -> String = {
+            if (arrived.incrementAndGet() == 2) bothArrived.complete(Unit)
+            bothArrived.await()
+            "second"
+        }
+
+        val results = withTimeout(5_000) { raceRungs(first, second) }
+        assertEquals(listOf("first", "second"), results)
+    }
+
+    @Test
+    fun `answers come back in rung order however they finish`() = runBlocking {
+        // ⚠️ The ordering is load-bearing, not cosmetic: the gate walks this list in order and
+        // "first one that passes" *is* the rung preference. Racing to completion order instead
+        // would make which rung wins a race outcome, which is the one thing §4.4's ladder is
+        // specified not to be.
+        val releaseFirst = CompletableDeferred<Unit>()
+        val results = withTimeout(5_000) {
+            raceRungs(
+                { releaseFirst.await(); "first" },
+                { releaseFirst.complete(Unit); "second" },
+            )
+        }
+        assertEquals(listOf("first", "second"), results)
+    }
+
+    @Test
+    fun `a rung that answers null is dropped and the others are kept`() = runBlocking {
+        // A null is an answer — "nothing here" — not a failure, and off-LAN it is the expected
+        // one from rung 1. Dropping the *others* with it would delete the rung that matters.
+        assertEquals(listOf("second"), raceRungs({ null as String? }, { "second" }))
+        assertTrue(raceRungs<String>().isEmpty(), "a walk with no rungs has no answers")
+    }
+
+    @Test
+    fun `the race costs its slowest rung rather than the sum of them`() = runBlocking {
+        // ⚠️ The only wall-clock assertion in this file, and the margins are deliberately coarse
+        // — the property is "max, not sum", a factor of two, not a tight budget. Two 300 ms
+        // rungs raced cost ~300 ms and walked in sequence cost ~600 ms; a loaded build box can
+        // stretch the first number, but it cannot pull the second one under 550 ms.
+        val startedAt = System.nanoTime()
+        val results = raceRungs(
+            { delay(300); "slow" },
+            { delay(300); "also slow" },
+        )
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        assertEquals(listOf("slow", "also slow"), results)
+        assertTrue(elapsedMs < 550, "the race took ${elapsedMs}ms; walked in sequence it is ~600ms")
     }
 
     // -----------------------------------------------------------------------------------------

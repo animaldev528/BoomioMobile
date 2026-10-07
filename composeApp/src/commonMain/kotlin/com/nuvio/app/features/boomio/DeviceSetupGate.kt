@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -18,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nuvio.app.core.overlay.OverlayEndpointStatusRow
 import com.nuvio.app.core.ui.nuvio
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.device_setup_description
@@ -48,6 +50,15 @@ import org.jetbrains.compose.resources.stringResource
  * Success needs no callback: the link finishes by writing a session, the gate observes that
  * session, and it moves on by itself. `onSkip` exists only for the case where there is nothing to
  * wait for.
+ *
+ * ⚠️ **The endpoint row is on this screen because pairing is not the first thing that has to
+ * work — reaching the server is.** A device that cannot find the overlay endpoint has nothing to
+ * pair *against*, and until now the only place that said so was a diagnostics row buried in
+ * Settings, behind a sign-in screen the device could not get past. §3 puts the field here for a
+ * second reason too: this screen is where a walk the user did not ask for is running in front of
+ * them, and a field that appeared only once the walk had failed would be a field hidden for the
+ * whole of the walk. `alwaysOfferManual` shows it from the first frame instead — see
+ * [OverlayEndpointStatusRow].
  */
 @Composable
 internal fun DeviceSetupGate(
@@ -74,6 +85,15 @@ internal fun DeviceSetupGate(
             linkState = linkState,
             title = stringResource(Res.string.device_setup_title),
             description = stringResource(Res.string.device_setup_description),
+        )
+
+        Spacer(Modifier.height(16.dp))
+        // ⚠️ Below the card and above the skip, because it is the *other* way to get moving: the
+        // card's Connect is blocked on an address that this row is what supplies.
+        OverlayEndpointStatusRow(
+            modifier = Modifier.fillMaxWidth(),
+            showUnavailable = true,
+            alwaysOfferManual = true,
         )
 
         Spacer(Modifier.height(16.dp))
