@@ -110,15 +110,62 @@ sealed interface OverlayEndpointStatus {
  * separate slots. These are *rungs of one ladder*, tried in sequence, stopping at the first
  * success: a later rung never has an opinion while an earlier one is holding, so a second slot
  * could only ever be empty.
+ *
+ * ### This object carries a message *back* as well, and that is deliberate
+ *
+ * [status] goes platform → UI. [submitManual] goes UI → platform. Both are the same seam seen
+ * from its two ends, and they belong on one object because they are one conversation: the UI
+ * renders [OverlayEndpointStatus.NeedsManual], whose entire content is *an action*, and the
+ * control that performs that action has to reach rung 3 of the same ladder. A second object
+ * holding only the uplink would be a second name for the same boundary.
+ *
+ * ⚠️ **The uplink is a registered handler, not an `expect`/`actual` pair**, for the reason the
+ * class docblock above already gives for the downlink: the ladder is Android code
+ * ([OverlayEndpointDiscovery]) and an `expect` would demand a stub in each of
+ * `AppFeaturePolicy`'s five actuals. So commonMain declares the shape and androidMain supplies
+ * the body — exactly how [LocalServerState.update] works, one direction over.
  */
 object OverlayEndpointState {
     private val mutable = MutableStateFlow<OverlayEndpointStatus>(OverlayEndpointStatus.Idle)
 
     val status: StateFlow<OverlayEndpointStatus> = mutable.asStateFlow()
 
+    /**
+     * What a typed address does, or null before platform code has registered one.
+     *
+     * Null is a real state and not an error: the UI is composed on platforms and in tests where
+     * the ladder does not exist, and [submitManual] handles that by doing nothing rather than by
+     * throwing at some later frame.
+     *
+     * ⚠️ **Written once, during initialisation, before any UI can compose** — `initialize` runs
+     * in `MainActivity.onCreate`, ahead of the first composition. It is a plain `var` rather than
+     * a flow because a *later* registration has no meaning: there is exactly one ladder per
+     * process, and it exists for the whole of it.
+     */
+    var manualSubmit: (suspend (rawAuthority: String) -> Unit)? = null
+
     /** Called by platform code. Not for UI. */
     fun update(value: OverlayEndpointStatus) {
         mutable.value = value
+    }
+
+    /**
+     * Offers a user-typed endpoint to the ladder. Called by UI.
+     *
+     * The parameter is the **address only**. The server's public key is the one field a person
+     * cannot reasonably produce — it is a base64 X25519 key, published by the mDNS advert and the
+     * DuckDNS TXT record — so it is not asked for here. Rung 3 already reads a key that this
+     * process holds ([com.nuvio.app.features.boomio.BoomioConfig.overlayServerPubKey], written by
+     * enrollment on a device that has one), and [OverlayEndpointStatus.NeedsManual]'s reason
+     * names the key explicitly when even that is missing. Asking for a key in a text field would
+     * be a field nobody could fill in correctly.
+     *
+     * Nothing is returned because the answer arrives the way every other answer does: as
+     * [status]. The ladder republishes — `Found` if the address worked, `NeedsManual` with a
+     * fresh reason if it did not — and the caller is already collecting that.
+     */
+    suspend fun submitManual(rawAuthority: String) {
+        manualSubmit?.invoke(rawAuthority)
     }
 
     /** Tests only — production code always moves to another state. */

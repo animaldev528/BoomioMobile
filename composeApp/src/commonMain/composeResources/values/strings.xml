@@ -397,6 +397,12 @@
     <string name="overlay_endpoint_found">Overlay endpoint %1$s</string>
     <string name="overlay_endpoint_needs_manual">Overlay tunnel: %1$s</string>
     <string name="overlay_endpoint_unavailable">Overlay tunnel unavailable (%1$s)</string>
+    <!-- The one control §10.7's failure state needs: `needs_manual` names an action, and
+         without this field there was nothing to perform it with. The hint is the shape the
+         field accepts, not an example server — this app is deployed on exactly one. -->
+    <string name="overlay_manual_label">Server address</string>
+    <string name="overlay_manual_hint">host or host:port</string>
+    <string name="overlay_manual_submit">Use this address</string>
     <string name="server_discovery_label">Server discovery</string>
     <string name="server_review_title">Review custom server</string>
     <string name="server_review_description">The discovery document is valid. Connecting will sign you out of the current server and restart the app. Confirm that this is a server you own or trust.</string>

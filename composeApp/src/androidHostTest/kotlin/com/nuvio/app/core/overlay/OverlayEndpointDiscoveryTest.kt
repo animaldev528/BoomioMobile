@@ -2,6 +2,7 @@ package com.nuvio.app.core.overlay
 
 import android.app.Application
 import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -418,6 +419,69 @@ class OverlayEndpointDiscoveryTest {
     fun `a label longer than 63 bytes produces no query at all`() {
         // A length prefix is one byte, so a 64-byte label would corrupt every field after it.
         assertTrue(OverlayDnsClient.buildQuery("x".repeat(64) + ".org", TYPE_A, 1).isEmpty())
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The uplink — rung 3's control reaching the ladder
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    fun `a typed address reaches the registered handler unchanged`() = runBlocking {
+        // ⚠️ Trimmed by the *field*, not here — this asserts the seam passes the string through
+        // untouched, so that whatever the UI decided to send is what the ladder parses. A seam
+        // that silently normalised would make `parseEndpointAuthority`'s forgiving-input cases
+        // above describe behaviour the app never actually exercises.
+        val seen = mutableListOf<String>()
+        val previous = OverlayEndpointState.manualSubmit
+        try {
+            OverlayEndpointState.manualSubmit = { raw -> seen.add(raw) }
+            OverlayEndpointState.submitManual("192.168.68.65:51820")
+            assertEquals(listOf("192.168.68.65:51820"), seen)
+        } finally {
+            OverlayEndpointState.manualSubmit = previous
+        }
+    }
+
+    @Test
+    fun `submitting with nothing registered does not throw`() = runBlocking {
+        // The UI composes in tests and on platforms where the ladder does not exist, and the
+        // button has no second guard in front of it. A null handler has to be a no-op rather than
+        // a crash that only appears where the ladder is absent.
+        val previous = OverlayEndpointState.manualSubmit
+        try {
+            OverlayEndpointState.manualSubmit = null
+            OverlayEndpointState.submitManual("192.168.68.65")
+            assertEquals(null, OverlayEndpointState.manualSubmit)
+        } finally {
+            OverlayEndpointState.manualSubmit = previous
+        }
+    }
+
+    @Test
+    fun `wiring the uplink points it at rung 3, not at a copy of it`() = runBlocking {
+        // ⚠️ Asserts the *effect*, not just that a lambda was installed: submitting a value that
+        // is not an address has to come back as `NeedsManual` carrying a reason, which only
+        // happens if the handler really is `offerManual`. A handler that merely existed would
+        // pass a `assertNotNull` and still leave the row a dead end.
+        val previous = OverlayEndpointState.manualSubmit
+        try {
+            OverlayEndpointState.manualSubmit = null
+            OverlayEndpointDiscovery.wireManualEntry()
+            assertNotNull(OverlayEndpointState.manualSubmit)
+
+            // Reachable from a test without a `Context`, which is why `wireManualEntry` is split
+            // out of `initialize`: the ladder's observers and the ConnectivityManager have
+            // nothing to do with this one assignment.
+            OverlayEndpointState.submitManual("not an address")
+            val status = OverlayEndpointState.status.value
+            assertTrue(
+                status is OverlayEndpointStatus.NeedsManual,
+                "expected a manual-entry reason, got $status",
+            )
+        } finally {
+            OverlayEndpointState.manualSubmit = previous
+            OverlayEndpointState.reset()
+        }
     }
 
     // -----------------------------------------------------------------------------------------

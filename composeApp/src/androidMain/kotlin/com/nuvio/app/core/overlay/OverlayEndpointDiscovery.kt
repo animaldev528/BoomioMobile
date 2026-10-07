@@ -143,10 +143,33 @@ internal object OverlayEndpointDiscovery {
 
     fun initialize(context: Context) {
         appContext = context.applicationContext
+        // ⚠️ Called **above** the once-per-process guard, and that ordering is deliberate. The
+        // guard makes everything after it a no-op on a second call, which is right for observers
+        // — but the UI's uplink is not an observer. Assigning a captured lambda twice costs
+        // nothing; failing to assign it once leaves a ladder with no way to feed it rung 3, which
+        // is the dead end the field exists to close.
+        wireManualEntry()
         if (lifecycleStarted) return
         lifecycleStarted = true
         observeForeground()
         observeNetworkChanges()
+    }
+
+    /**
+     * Points the UI's "use this address" control at this ladder's rung 3.
+     *
+     * Split out from [initialize] so it can be tested without dragging a `Context`, a lifecycle
+     * observer and a `ConnectivityManager` into a test that is only about one assignment — the
+     * same division the pure half of the test file already draws for the parsers.
+     *
+     * ⚠️ **The key is deliberately not taken from the UI.** [offerManual] falls back to the
+     * server public key already held in `BoomioConfig`, which enrollment wrote on any device that
+     * has one; a person cannot read a base64 X25519 key off anything they own. When even that is
+     * missing, `offerManual` says so in the status the row renders, so the gap is reported rather
+     * than guessed at.
+     */
+    internal fun wireManualEntry() {
+        OverlayEndpointState.manualSubmit = { raw -> offerManual(raw, null) }
     }
 
     /** Re-runs the ladder on foreground, at most once per [RESULT_TTL_MS]. */
