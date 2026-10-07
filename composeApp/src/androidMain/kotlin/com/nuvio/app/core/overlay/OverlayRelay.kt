@@ -177,8 +177,33 @@ internal object OverlayRelay {
     fun initialize() {
         if (lifecycleStarted) return
         lifecycleStarted = true
+        ensureStarted()
+    }
+
+    /**
+     * Binds the listener once there is an overlay address to route for.
+     *
+     * ⚠️ **Re-checked on every call rather than latched with the rest of [initialize]**,
+     * because the address is learned from enrollment and on a fresh install it is still blank
+     * when this object initializes — `MainActivity` starts the relay *before*
+     * [OverlayEnrollment] on purpose, since enrollment needs the keypair [OverlaySession]
+     * creates. A latch would leave the relay unbound for the whole process on precisely the
+     * build it exists for, so a device that had just enrolled would reach the overlay with
+     * every engine still dialling directly until it was restarted.
+     */
+    @Synchronized
+    private fun ensureStarted() {
+        if (handle != null) return
         if (BoomioConfig.overlayServerAddress.isBlank()) return
         start(scope, dialers, ::localServerHosts)
+    }
+
+    /**
+     * Announces that [BoomioConfig.overlayServerAddress] has just been written, possibly for
+     * the first time on this install. See [ensureStarted] for why the check cannot be latched.
+     */
+    internal fun onServerAddressLearned() {
+        ensureStarted()
     }
 
     /**

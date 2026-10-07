@@ -211,6 +211,12 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
             // The server's address on the WireGuard overlay. Not a URL: it is what the
             // public FQDNs above resolve to while the tunnel is up, never what the app
             // dials. Blank by default, which leaves the overlay resolver inert.
+            //
+            // ⚠️ A FALLBACK, not the source. Enrollment derives the same value from the
+            // overlay CIDR it is assigned (OverlayAssignment.serverAddress) and writes it
+            // into BoomioConfig at runtime, so a build that bakes nothing here still works
+            // against any deployment. Set this only to cover the window before a device has
+            // ever enrolled.
             resolve("BoomioOverlayConfig.kt").writeText(
                 """
                 |package com.nuvio.app.features.boomio

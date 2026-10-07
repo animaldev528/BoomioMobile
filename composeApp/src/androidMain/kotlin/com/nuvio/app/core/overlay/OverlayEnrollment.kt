@@ -51,6 +51,49 @@ internal data class OverlayAssignment(
 ) {
     /** The `Address =` line's form. */
     val localCidr: String get() = "$address/32"
+
+    /**
+     * The **server's** own address on the overlay — the third overlay address, and the one
+     * nothing carried until enrollment did. See [overlayServerAddressOf].
+     *
+     * Derived rather than decoded, so it recomputes per read and stays out of the data class's
+     * equality: the declared fields are what the server assigned, and this is a reading of them.
+     */
+    val serverAddress: String get() = overlayServerAddressOf(overlayCidr)
+}
+
+/**
+ * The server's address inside [overlayCidr] — the network's first host.
+ *
+ * ⚠️ **A convention, and its other half is the allocator.** `next_peer_address()` in
+ * `overlay/overlay-server-setup.sh` hands out `10.77.0.${n}` starting at **n = 2**, so the
+ * first host of the overlay is never assigned to a peer — it is the server, which is why
+ * `10.77.0.1` is where the tunnel's DNS responder and its 443 both live. Deriving it is what
+ * lets one shipped build work against any deployment: `BOOMIO_OVERLAY_ADDR` was build-time
+ * with no fallback, and an app that must be *compiled* knowing where the server sits on a
+ * private network cannot be shipped to anyone.
+ *
+ * ⚠️ **Blank for anything unparseable, and blank leaves the overlay resolver off** — the
+ * fail-closed direction. A wrong address here would point every boomio FQDN at a host that
+ * never answers, which is indistinguishable from a broken tunnel and much harder to find.
+ */
+internal fun overlayServerAddressOf(overlayCidr: String): String {
+    val prefix = overlayCidr.substringAfter('/', "").trim().toIntOrNull() ?: return ""
+    // A /31 and a /32 have no first *host* to speak of, and a /0 has no network boundary.
+    if (prefix !in 1..30) return ""
+
+    val octets = overlayCidr.substringBefore('/').trim().split('.')
+    if (octets.size != 4) return ""
+    val values = octets.map { it.toIntOrNull()?.takeIf { value -> value in 0..255 } ?: return "" }
+    val network = values.fold(0L) { acc, value -> (acc shl 8) or value.toLong() }
+
+    // Masked, so a caller handed a host address rather than the network still gets the same
+    // answer: `10.77.0.7/24` and `10.77.0.0/24` both name 10.77.0.1.
+    val mask = (0xFFFFFFFFL shl (32 - prefix)) and 0xFFFFFFFFL
+    val firstHost = ((network and mask) + 1) and 0xFFFFFFFFL
+    return listOf(24, 16, 8, 0).joinToString(".") { shift ->
+        ((firstHost shr shift) and 0xFF).toString()
+    }
 }
 
 /** An assignment together with the device key it was issued for. */
@@ -448,14 +491,38 @@ internal object OverlayEnrollment {
         runCatching { OverlayWgTunnelController.instance?.publicKeyBase64() }.getOrNull()
 
     /**
-     * Points the app at the assigned server. Synchronous on purpose: three of these four are
-     * read live by the ladder ([OverlayEndpointDiscovery.rung3Manual]) and by
-     * [OverlaySessionDriver], so writing them is what "the assignment took effect" means.
+     * Points the app at the assigned server. Synchronous on purpose: these are read live by the
+     * ladder ([OverlayEndpointDiscovery.rung3Manual]), by [OverlaySessionDriver] and by the DNS
+     * seam, so writing them is what "the assignment took effect" means.
      */
     private fun writeConfig(assignment: OverlayAssignment) {
         BoomioConfig.overlayLocalCidr = assignment.localCidr
         BoomioConfig.overlayEndpoint = assignment.endpoint
         BoomioConfig.overlayServerPubKey = assignment.serverPublicKeyBase64
+
+        // ⚠️ The one field here that used to have a build-time source *only*, and the reason
+        // this area was a gap: with `BOOMIO_OVERLAY_ADDR` unset the DNS seam was dead and the
+        // app resolved every boomio FQDN publicly, so a shipped build could not work against a
+        // deployment it had not been compiled for. The address arrives with the assignment now.
+        //
+        // Blank means the CIDR did not parse, and a blank must NOT clobber a build-time value:
+        // an operator who set `BOOMIO_OVERLAY_ADDR` gets to keep it, and the seam stays off
+        // only when there is genuinely nothing to aim it at.
+        assignment.serverAddress.takeIf { it.isNotBlank() }?.let {
+            BoomioConfig.overlayServerAddress = it
+        }
+
+        // ⚠️ **The assignment taking effect has to be announced, not merely written.** The two
+        // components that gate on the address check it at their own start-up, and start-up is
+        // long over by the time this runs: `MainActivity` initializes `OverlaySession` and
+        // `OverlayRelay` *before* this object, deliberately, because enrollment needs the
+        // keypair the first of them creates. On a fresh install the address is blank at that
+        // moment, so without these two calls a device that had just enrolled would hold a
+        // perfectly good assignment and still not tunnel, not resolve over the overlay, and not
+        // reach the relay until the app was restarted. A no-op once the address is known, which
+        // is every run after the first.
+        OverlaySession.onServerAddressLearned()
+        OverlayRelay.onServerAddressLearned()
     }
 
     private fun read(store: SharedPreferences): CachedAssignment? {

@@ -57,15 +57,15 @@ object BoomioConfig {
      * tunnel is up — see `OverlayTunnel`. A hostname here is refused rather than
      * resolved, because resolving it is the exact behaviour the seam replaces.
      *
-     * Sourced from `BOOMIO_OVERLAY_ADDR` in `local.properties` (via the generated
-     * [BoomioOverlayConfig]); override at startup if needed. Blank-inert, like the
-     * seams above: [iptvBaseUrl] and [companionBaseUrl] are the hosts, this is the
-     * address they take on the overlay.
+     * **Learned, not configured.** Enrollment writes it: the assignment carries the overlay
+     * CIDR, and the server holds that network's first host, so a build aimed at no deployment
+     * in particular still gets this right — and a device that enrolled once keeps it across a
+     * cold start from the cached assignment. `BOOMIO_OVERLAY_ADDR` from `local.properties`
+     * (via the generated [BoomioOverlayConfig]) stands in only until a device has enrolled;
+     * it is a fallback now, not the source.
      *
-     * In the end state this is *learned*, not configured — pairing (phase 3) mints a
-     * code on the server and the client receives the overlay address with it, which is
-     * what makes a fresh client work with no manual configuration. Until that exists,
-     * it is one field, and it is the only one.
+     * Blank-inert, like the seams above: [iptvBaseUrl] and [companionBaseUrl] are the
+     * hosts, this is the address they take on the overlay.
      */
     var overlayServerAddress: String = BoomioOverlayConfig.ADDR
 

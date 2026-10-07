@@ -265,6 +265,44 @@ class OverlayEnrollmentTest {
         assertEquals("10.77.0.7/32", assignment.localCidr)
     }
 
+    @Test
+    fun `an assignment names the server at the overlay's first host`() {
+        // ⚠️ The value that used to be build-time only. bsc has never sent the server's own
+        // overlay address, so the client derives it — and `next_peer_address()` in
+        // overlay/overlay-server-setup.sh allocates from **.2**, which is what makes .1 the
+        // server rather than a guess. This test is the client half of that convention: if the
+        // allocator's base ever moves, this is where it should fail.
+        assertEquals("10.77.0.1", assignment.serverAddress)
+    }
+
+    @Test
+    fun `the server address is derived from the network, not from the device's own`() {
+        // A device at .7 on somebody else's overlay must not be told the server is at .8.
+        assertEquals("10.77.0.1", overlayServerAddressOf("10.77.0.0/24"))
+
+        // Masking means a host address and its network give the same answer.
+        assertEquals("10.77.0.1", overlayServerAddressOf("10.77.0.7/24"))
+
+        // And a different plan is a different answer — nothing here is hardcoded to 10.77.
+        assertEquals("10.8.0.1", overlayServerAddressOf("10.8.0.0/16"))
+        assertEquals("172.16.5.1", overlayServerAddressOf("172.16.5.0/24"))
+    }
+
+    @Test
+    fun `an unparseable cidr yields no server address rather than a wrong one`() {
+        // ⚠️ Blank is the fail-closed answer: the resolver stays off. A wrong address would
+        // point every boomio FQDN at a host that never answers, which reads exactly like a
+        // broken tunnel and costs far more to find than a resolver that never turned on.
+        assertEquals("", overlayServerAddressOf(""))
+        assertEquals("", overlayServerAddressOf("10.77.0.0"))
+        assertEquals("", overlayServerAddressOf("not-a-cidr/24"))
+        assertEquals("", overlayServerAddressOf("10.77.0/24"))
+        assertEquals("", overlayServerAddressOf("10.77.0.256/24"))
+        assertEquals("", overlayServerAddressOf("10.77.0.0/31"))
+        assertEquals("", overlayServerAddressOf("10.77.0.0/32"))
+        assertEquals("", overlayServerAddressOf("10.77.0.0/0"))
+    }
+
     // ── the wire contract with bsc ──────────────────────────────────────────────────────────
 
     @Test

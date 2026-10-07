@@ -5,6 +5,7 @@ import android.util.Log
 import com.nuvio.app.features.boomio.BoomioConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -42,11 +43,42 @@ internal object OverlaySession {
     @Volatile
     private var driver: OverlaySessionDriver? = null
 
+    /**
+     * The ladder collector, held so [stop] can actually stop it.
+     *
+     * ⚠️ Without this, `stop` would null the driver and leave its collector running against a
+     * driver nothing references any more. That was harmless while the gate could only ever open
+     * once; now that [onServerAddressLearned] can reopen it, a stop-then-start would leave two
+     * collectors both driving the tunnel.
+     */
+    @Volatile
+    private var driverJob: Job? = null
+
     @Volatile
     private var lifecycleStarted = false
 
     /**
      * Starts the session for this process, once.
+     *
+     * ⚠️ **The keypair is created here unconditionally, and that is load-bearing.** Creating a
+     * keypair is not starting a tunnel: it is the device acquiring an *identity*, which commits
+     * the app to nothing and is what [OverlayEnrollment] enrols *as*. Under the previous order
+     * the address gate sat above this line, so on an install built without
+     * `BOOMIO_OVERLAY_ADDR` the controller was never created at all, `devicePublicKey()`
+     * answered null, and the first enrollment could not happen — the device had no key to ask
+     * with, which is the one case the whole provisioning ingress exists for. The gate below is
+     * about the *ladder*, not the keypair, and it stays exactly where it was.
+     */
+    fun initialize(context: Context) {
+        if (lifecycleStarted) return
+        lifecycleStarted = true
+
+        OverlayWgTunnelController.initialize(context)
+        startDriverIfConfigured()
+    }
+
+    /**
+     * Starts the ladder-driven bring-up, once there is an address to aim it at.
      *
      * ⚠️ **Gated on [BoomioConfig.overlayServerAddress], the same single switch the relay
      * uses**, so one value turns the whole overlay subsystem on or off rather than each piece
@@ -54,20 +86,24 @@ internal object OverlaySession {
      * something": rung 2 resolves a **public** name, so on an install that runs no overlay
      * the ladder can still find a real endpoint and this would build a tunnel nobody enrolled
      * — a device that comes up, never handshakes, and reports nothing useful.
+     *
+     * ⚠️ **Re-checked on every call rather than latched with [initialize]**, because the
+     * address is *learned* now: on a fresh install it does not exist yet when this object
+     * initializes, so a latch here would leave the subsystem off for the entire process on
+     * exactly the build it exists to serve. [onServerAddressLearned] is what re-opens it.
      */
-    fun initialize(context: Context) {
-        if (lifecycleStarted) return
-        lifecycleStarted = true
+    @Synchronized
+    private fun startDriverIfConfigured() {
+        if (driver != null) return
         if (BoomioConfig.overlayServerAddress.isBlank()) return
 
-        OverlayWgTunnelController.initialize(context)
         val created = OverlaySessionDriver(
             tunnel = { OverlayWgTunnelController.instance },
             localCidr = { BoomioConfig.overlayLocalCidr },
         )
         driver = created
 
-        scope.launch {
+        driverJob = scope.launch {
             OverlayEndpointState.status
                 .map { it as? OverlayEndpointStatus.Found }
                 .distinctUntilChanged()
@@ -88,8 +124,24 @@ internal object OverlaySession {
         }
     }
 
+    /**
+     * Announces that [BoomioConfig.overlayServerAddress] has just been written, possibly for
+     * the first time on this install.
+     *
+     * Told, rather than watched, for the same reason [OverlayTunnel] is told when the ladder
+     * converges: the address is a plain `var` with no flow behind it, so watching would mean
+     * polling, and the writer is one call away. [OverlayEnrollment] is its only writer, and it
+     * calls this from the one place it writes.
+     */
+    internal fun onServerAddressLearned() {
+        startDriverIfConfigured()
+    }
+
     /** Tears the device down and stops reacting to the ladder. Tests and the debug probe. */
+    @Synchronized
     fun stop() {
+        driverJob?.cancel()
+        driverJob = null
         driver = null
         OverlayWgTunnelController.instance?.down()
     }

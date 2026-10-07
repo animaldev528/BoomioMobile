@@ -1,6 +1,7 @@
 package com.nuvio.app.core.overlay
 
 import android.app.Application
+import com.nuvio.app.features.boomio.BoomioConfig
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.InputStream
@@ -113,6 +114,42 @@ class OverlayRelayTest {
 
         assertEquals(RelayState.Down, OverlayRelay.state.value)
         assertNull(connectOrNull(port), "the listener must be closed")
+    }
+
+    @Test
+    fun `an unconfigured start is inert and a later address opens it`() {
+        // ⚠️ The regression this guards. `initialize` runs *before* enrollment, and on a
+        // fresh install the address does not exist yet — it is the thing enrollment is about
+        // to learn. If the blank check were latched alongside the rest of `initialize`, a
+        // device that had just enrolled would hold a perfectly good assignment and still have
+        // no relay until it was restarted, which is exactly the shipped-build case the runtime
+        // address change exists for.
+        //
+        // Only this test calls `initialize`, and it has to be that way: the latch is
+        // process-wide, so a second caller would be a silent no-op rather than a second relay.
+        val original = BoomioConfig.overlayServerAddress
+        try {
+            BoomioConfig.overlayServerAddress = ""
+            OverlayRelay.initialize()
+
+            assertEquals(
+                RelayState.Down,
+                OverlayRelay.state.value,
+                "no address means no listener, and no socket opened either",
+            )
+
+            BoomioConfig.overlayServerAddress = "10.77.0.1"
+            OverlayRelay.onServerAddressLearned()
+
+            val state = assertIs<RelayState.Up>(OverlayRelay.state.value)
+            assertTrue(state.port > 0, "the port must be the kernel's, not 0")
+        } finally {
+            // Both, or this test poisons every other one in the class: a bound handle would be
+            // handed back by `start`, and a left-behind address would turn the blank-inert
+            // assertions elsewhere into passes for the wrong reason.
+            OverlayRelay.stop()
+            BoomioConfig.overlayServerAddress = original
+        }
     }
 
     @Test
