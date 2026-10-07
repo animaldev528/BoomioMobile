@@ -83,19 +83,59 @@ private const val GATE_TIMEOUT_MS = 900
 internal object OverlayEndpointDiscovery {
 
     /**
-     * Rung 2's name.
+     * Rung 2's name — what the house resolver was meant to answer with, and what this ladder
+     * still climbs.
      *
-     * ⚠️ **The name is the one thing architecture §10.8 leaves open, and this constant is where
-     * that decision lands.** The owner has not yet chosen whether `boomio-local` is published
-     * publicly (resolvable everywhere, unroutable off-LAN, needing the probe below) or only in
-     * the house dnsmasq (NXDOMAIN everywhere else, which is cleaner). **The client does not
-     * care** — both options are a name the platform resolver either answers or does not, and
-     * both are gated on reachability here — so this is one string to change, not a code change.
+     * ⚠️ **Deliberately *not* [LAN_RECORD], even though that is the name the deployment actually
+     * publishes.** This rung hands whatever it finds to the reachability gate and then, when
+     * nothing passes, lets the ladder take the first candidate anyway. Pointing it at [LAN_RECORD]
+     * would be a *regression* away from home: that name is a public record holding a **private**
+     * address, so it resolves everywhere, the gate rejects it, and the fallback would then publish
+     * an unroutable LAN address in place of the manual prompt. Teaching rung 2 to climb two names
+     * is the names tier's job (`namedFallback`), not this constant's.
      *
-     * It is a single name rather than a list on purpose. Resolving several would multiply rung
-     * 2's budget by the number of misses, and §4.4 requires a miss to stay cheap.
+     * The owner has not yet chosen whether `boomio-local` is published publicly or only in the
+     * house dnsmasq; today it is NXDOMAIN from the house dnsmasq, the router and `1.1.1.1` alike.
      */
     internal const val LOCAL_RECORD = "boomio-local.tracemonkey.org"
+
+    /**
+     * The two names the server **actually publishes** its `A` + TXT tuple on, in the order a
+     * dialler should try them: the one that routes at home, then the one that routes away.
+     *
+     * ⚠️ **Neither of these was reachable from the client before this.** `LOCAL_RECORD` above is
+     * `boomio-local.tracemonkey.org`, a placeholder from §10.8's open question ("published
+     * publicly, or only in the house dnsmasq") that was never published in either form: it is
+     * NXDOMAIN against the house dnsmasq, against the router and against `1.1.1.1` alike
+     * (measured 2026-10-07). These two are what the deployment does publish — the same pair the
+     * tuple names in its own `lan=`/`wan=` fields — and each carries the full TXT (`pk`, `port`,
+     * `prov`, `ppk`) beside its `A`.
+     *
+     * ⚠️ **They exist for callers that *dial*, and deliberately not for [rung2LocalRecord].**
+     * That rung is gated on reachability and hands whatever it finds to the gate, so pointing it
+     * at [LAN_RECORD] would be a *regression* away from home: the name resolves everywhere (it is
+     * a public record holding a private address), the gate rejects it, and the ladder's "take the
+     * first candidate anyway" rule would then publish an unroutable LAN address in place of the
+     * manual prompt. Climbing two names in rung order is the names tier's job — see
+     * `namedFallback` — and it is not done here.
+     *
+     * A dialler walks both because it gets **one** attempt, not two: `ChannelPairingTransport`
+     * dials the address it is handed once and falls back to HTTPS rather than retrying. Ordering
+     * alone could not carry that, which is why the dialler also gates each candidate on a real
+     * connect — see `OverlayProvisioning.target`. With the gate in place the order is a
+     * preference: at home the LAN address answers and is taken, away from home it does not and
+     * the walk moves on, and the pair costs one bounded probe that only ever runs off-LAN.
+     *
+     * Compiled in, and it has to be: this is the **cold-start** bootstrap, and a client that has
+     * never reached the server has never read a publication to learn a name from.
+     */
+    internal const val LAN_RECORD = "boomio-lan.duckdns.org"
+
+    /** The WAN half of [LAN_RECORD]'s pair. See that constant for why the order matters. */
+    internal const val WAN_RECORD = "boomio.duckdns.org"
+
+    /** Both published names, in the order to try them. See [LAN_RECORD]. */
+    internal val PUBLISHED_NAMES = listOf(LAN_RECORD, WAN_RECORD)
 
     /** The WireGuard port, when nothing published one. */
     private const val DEFAULT_WG_PORT = OverlayAdvertTuple.DEFAULT_PORT
@@ -596,8 +636,15 @@ internal suspend fun resolveHost(host: String, budgetMs: Long): InetAddress? =
         }
     }
 
-/** True when a TCP connect to [host]:[port] completes inside [GATE_TIMEOUT_MS]. */
-private fun isReachable(host: String, port: Int): Boolean {
+/**
+ * True when a TCP connect to [host]:[port] completes inside [GATE_TIMEOUT_MS].
+ *
+ * `internal` rather than `private` so `OverlayProvisioning` can apply the *same* gate while it
+ * walks the published names. That walk needs it for a reason the ladder does not have to face: a
+ * provisioning dialler gets exactly one attempt at whichever address it picks, so "the name
+ * resolved" is not good enough — the address has to answer. See [OverlayProvisioning.target].
+ */
+internal fun isReachable(host: String, port: Int): Boolean {
     val startedAt = SystemClock.elapsedRealtime()
     return runCatching {
         Socket().use { socket ->
