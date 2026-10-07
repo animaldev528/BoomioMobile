@@ -560,6 +560,14 @@
     <string name="companion_unlinked_title">Not connected</string>
     <string name="companion_unlinked_description">Connect to a TV running the Nuvio companion hub to control playback from this phone.</string>
     <string name="companion_connect">Connect</string>
+    <!--
+      The first-run device setup step, shown before the sign-in screen on a device that has never
+      been paired. Deliberately NOT the companion copy above: that one describes controlling a TV
+      from this phone, which is a different job from getting this phone onto the server at all.
+    -->
+    <string name="device_setup_title">Set up this device</string>
+    <string name="device_setup_description">This device has to be paired with your server before you can sign in. Press Connect to get a code, then give that code to your server’s admin.</string>
+    <string name="device_setup_skip">Skip for now</string>
     <string name="companion_linking">Connecting…</string>
     <string name="companion_link_failed_start">Couldn’t start connecting. Try again.</string>
     <string name="companion_link_failed_expired">The link expired. Try again.</string>

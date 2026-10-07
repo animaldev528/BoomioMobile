@@ -241,10 +241,22 @@ private fun LiveTvRow(onOpen: () -> Unit) {
     }
 }
 
+/**
+ * The link machine, rendered. Shared by the companion screen in Settings and by the first-run
+ * setup gate, which is why it is [internal] and why the two headline strings are parameters.
+ *
+ * ⚠️ **The defaults are the companion's copy and are wrong for the gate.**
+ * `companion_unlinked_description` describes controlling a *TV* from this phone — a real job, but
+ * not the one the setup gate is doing, which is getting this phone onto the server at all. The
+ * machine underneath is identical, so passing different words is better than copying the `when`
+ * below into a second file, where the two would drift the first time a state is added.
+ */
 @Composable
-private fun UnlinkedCard(linkState: BoomioLinkState) {
-    val title = stringResource(Res.string.companion_unlinked_title)
-    val description = stringResource(Res.string.companion_unlinked_description)
+internal fun UnlinkedCard(
+    linkState: BoomioLinkState,
+    title: String = stringResource(Res.string.companion_unlinked_title),
+    description: String = stringResource(Res.string.companion_unlinked_description),
+) {
     val connectLabel = stringResource(Res.string.companion_connect)
     val linkingLabel = stringResource(Res.string.companion_linking)
     val failStart = stringResource(Res.string.companion_link_failed_start)
