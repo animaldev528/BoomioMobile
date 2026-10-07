@@ -562,7 +562,6 @@
     <string name="companion_connect">Connect</string>
     <string name="companion_linking">Connecting…</string>
     <string name="companion_link_failed_start">Couldn’t start connecting. Try again.</string>
-    <string name="companion_link_failed_unauthenticated">Sign in to Nuvio before connecting a TV.</string>
     <string name="companion_link_failed_expired">The link expired. Try again.</string>
     <string name="companion_link_awaiting_approval">Approve this code to finish connecting:</string>
     <string name="companion_link_approval_hint">Open the Boomio admin page on any device, sign in, and approve it. This screen finishes on its own.</string>

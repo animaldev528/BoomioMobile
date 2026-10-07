@@ -54,7 +54,6 @@ import nuvio.composeapp.generated.resources.companion_link_approval_hint
 import nuvio.composeapp.generated.resources.companion_link_awaiting_approval
 import nuvio.composeapp.generated.resources.companion_link_failed_expired
 import nuvio.composeapp.generated.resources.companion_link_failed_start
-import nuvio.composeapp.generated.resources.companion_link_failed_unauthenticated
 import nuvio.composeapp.generated.resources.watch_party_connect
 import nuvio.composeapp.generated.resources.watch_party_end
 import nuvio.composeapp.generated.resources.watch_party_end_confirm
@@ -147,7 +146,6 @@ private fun UnlinkedCard() {
     val connectLabel = stringResource(Res.string.watch_party_connect)
     val linkingLabel = stringResource(Res.string.watch_party_linking)
     val failStart = stringResource(Res.string.companion_link_failed_start)
-    val failUnauthenticated = stringResource(Res.string.companion_link_failed_unauthenticated)
     val failExpired = stringResource(Res.string.companion_link_failed_expired)
     val awaitingApprovalLabel = stringResource(Res.string.companion_link_awaiting_approval)
     val approvalHint = stringResource(Res.string.companion_link_approval_hint)
@@ -213,7 +211,6 @@ private fun UnlinkedCard() {
                 }
                 is BoomioLinkState.Failed -> {
                     val message = when (state.reason) {
-                        BoomioLinkFailure.Unauthenticated -> failUnauthenticated
                         BoomioLinkFailure.Expired -> failExpired
                         BoomioLinkFailure.Start -> failStart
                     }

@@ -75,9 +75,15 @@ sealed interface BoomioLinkState {
     data class Failed(val reason: BoomioLinkFailure) : BoomioLinkState
 }
 
+/**
+ * Why a link attempt failed.
+ *
+ * ⚠️ There is deliberately no "not signed in" member. There used to be, and the
+ * flow refused to start without an identity — which made the device-code exchange
+ * unusable for the device it exists for. Being signed out now means taking the
+ * human-approval path, not failing, so there is nothing to report.
+ */
 enum class BoomioLinkFailure {
-    /** Not signed in to Nuvio, so there is no identity to self-approve with. */
-    Unauthenticated,
     /** Device-code request or self-approve failed. */
     Start,
     /** Poll timed out or bsc reported the code expired. */
@@ -164,10 +170,21 @@ object BoomioSessionRepository {
     fun bearerToken(): String? = _session.value?.token
 
     /**
-     * Starts the device-code self-approve flow. Requires a signed-in Nuvio
-     * identity (anonymous users have a Supabase userId but the plan gates the
-     * companion on a real account). Safe to call repeatedly — no-op while the
+     * Starts the device-code flow. Safe to call repeatedly — no-op while the
      * flow is already running.
+     *
+     * ⚠️ **Signing in to Nuvio is not a precondition.** It used to be, and that
+     * gate was the load-bearing defect of the old flow: the device-code exchange
+     * exists precisely so a device with *no* identity can be admitted, and
+     * refusing to start it unless the device was already signed in made that
+     * impossible. The code is approved by a human on the bsm `/tv` page, which is
+     * the party that holds an account; the poll below mints the session either
+     * way, so a signed-out device completes this flow exactly as a signed-in one.
+     *
+     * A signed-in device additionally gets the one-tap path, because the edge may
+     * still permit it to approve its own code. If auth has not settled by the time
+     * this runs, [AuthRepository.state] reads as null and the flow takes the human
+     * path instead — slower, never wrong.
      */
     fun startLink() {
         if (!companionEnabled) {
@@ -187,13 +204,10 @@ object BoomioSessionRepository {
             _linkState.value = BoomioLinkState.Starting
             try {
                 val authUser = AuthRepository.state.value as? AuthState.Authenticated
-                if (authUser == null) {
-                    _linkState.value = BoomioLinkState.Failed(BoomioLinkFailure.Unauthenticated)
-                    return@launch
-                }
                 val request = requestDeviceCode()
 
-                // Best-effort self-approve. On an edge that gates /v1/auth/pair
+                // Best-effort self-approve, and only when there is an identity to do
+                // it with. On an edge that gates /v1/auth/pair
                 // (requireInternalKeyStrict — approval mints a 90-day session),
                 // this answers 401. That is NOT a failure of the link flow: the
                 // code is already live in Redis, so fall through to the human
@@ -201,14 +215,22 @@ object BoomioSessionRepository {
                 // /tv) complete the pair. The poll below picks up the token
                 // either way, so this stays a one-tap flow wherever the edge
                 // still permits self-approve.
-                val selfApproved = try {
-                    selfApprove(request.user_code, authUser)
-                    true
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    log.i { "self-approve declined (${error.message}); awaiting approval" }
+                //
+                // ⚠️ A null [authUser] short-circuits to the human path rather than
+                // failing the flow. That is the signed-out device, which is the case
+                // this flow exists for.
+                val selfApproved = if (authUser == null) {
                     false
+                } else {
+                    try {
+                        selfApprove(request.user_code, authUser)
+                        true
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        log.i { "self-approve declined (${error.message}); awaiting approval" }
+                        false
+                    }
                 }
                 _linkState.value = if (selfApproved) {
                     BoomioLinkState.Linking
@@ -302,9 +324,15 @@ object BoomioSessionRepository {
         }
     }
 
+    /**
+     * [authUser] is null for a device that is not signed in to Nuvio — the ordinary
+     * case for a fresh install being onboarded. It is only ever a *fallback* for the
+     * session's `userId`: the poll's own `id` wins, and a device admitted by the
+     * device-code flow has no local identity to prefer over it.
+     */
     private suspend fun pollAndComplete(
         request: DeviceRequestResponse,
-        authUser: AuthState.Authenticated,
+        authUser: AuthState.Authenticated?,
     ) {
         var attempts = 0
         var consecutiveFailures = 0
@@ -339,7 +367,7 @@ object BoomioSessionRepository {
                     _session.value = BoomioSession(
                         token = token,
                         deviceId = SyncClientIdentity.currentClientId(),
-                        userId = parsed.id ?: authUser.userId,
+                        userId = parsed.id ?: authUser?.userId,
                         displayName = parsed.display_name ?: parsed.username,
                     )
                     _linkState.value = BoomioLinkState.Idle
