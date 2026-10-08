@@ -11,6 +11,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.network.ServerConfigurationStorage
+import com.nuvio.app.core.mtls.MtlsRegistration
 import com.nuvio.app.core.overlay.OverlayEnrollment
 import com.nuvio.app.core.overlay.OverlayEndpointDiscovery
 import com.nuvio.app.core.overlay.OverlayLocalDiscovery
@@ -137,6 +138,20 @@ open class MainActivity : AppCompatActivity() {
         // address (`BOOMIO_OVERLAY_LOCAL_CIDR`) was fixed at compile time and the second
         // client on an overlay could never be right.
         OverlayEnrollment.initialize(applicationContext)
+        // The client certificate half of the mTLS plane: it mints a self-signed certificate for
+        // the name the server assigned this device and registers it. It reads the name
+        // `OverlayEnrollment` just applied, so it comes after it — and it *fires* from
+        // `OverlayEnrollment.writeConfig`, which makes the ordering a dependency rather than a
+        // preference.
+        //
+        // ⚠️ Note that `initialize` itself registers nothing. `writeConfig` runs synchronously
+        // inside `OverlayEnrollment.initialize` above, so its registration request was made before
+        // this call and was correctly dropped as "not started yet". The first real attempt comes
+        // from the enrollment refresh on its own coroutine — which is the right trigger anyway, and
+        // costs nothing when it does not happen: a device that was already registered needs no
+        // second POST (the plan short-circuits), and one that was not will be re-triggered the
+        // moment a refresh succeeds.
+        MtlsRegistration.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)

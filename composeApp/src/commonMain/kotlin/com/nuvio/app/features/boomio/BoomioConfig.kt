@@ -145,6 +145,25 @@ object BoomioConfig {
      */
     var overlayServerPubKey: String = BoomioOverlayConfig.PUBKEY
 
+    /**
+     * **This device's server-assigned name** — the `CN` of its client certificate, e.g.
+     * `device-kyle-s24-3f9a1b2c`.
+     *
+     * ⚠️ **Learned, never chosen.** It arrives in the enrollment reply (`POST
+     * /api/overlay/enroll`'s `name`), derived server-side by `peerNameFor(deviceId)`, and the
+     * certificate-registration route re-derives the same value from the session before it will
+     * accept a certificate. So a client that picked its own name would be refused with
+     * `cn_mismatch` and could never tell why from the certificate's contents alone.
+     *
+     * It is emphatically **not** [overlayServerAddress] (the server's overlay address) and not
+     * the user's device name from Settings — the two coincide in neither shape nor origin.
+     *
+     * Blank (the default) means the server has not named this device yet, which gates certificate
+     * registration: with no name there is no `CN` to mint for, so registration is skipped rather
+     * than failed.
+     */
+    var overlayDeviceName: String = ""
+
     /** True when the companion seam is configured ([companionBaseUrl] is set). */
     fun companionEnabled(): Boolean = companionBaseUrl.isNotBlank()
 
