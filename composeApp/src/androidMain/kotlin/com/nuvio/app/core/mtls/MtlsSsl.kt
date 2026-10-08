@@ -188,9 +188,21 @@ internal object MtlsSsl {
  * is the same manager OkHttp installs for itself, and [DeferredClientCertSocketFactory] delegates to
  * the platform socket factory whenever there is no certificate, so an ordinary TLS client is
  * configured exactly as it would have been.
+ *
+ * ── The interceptor, and why it rides along here ──────────────────────────
+ * P2.6's trigger is a *refused handshake*, and the only place that failure is visible is the client
+ * that presented the certificate. Attaching [MtlsHandshakeWatchInterceptor] here rather than at
+ * each site keeps the rule that **a client carrying the certificate is a client that notices it was
+ * rejected** — the same "there is no per-site decision" property the factory above is built on. It
+ * is inert today: nothing enforces yet, so nothing is refused.
+ *
+ * It is added as an *application* interceptor, outside OkHttp's retry and follow-up logic, so it
+ * observes the failure the caller will actually see rather than one of the internally-retried
+ * attempts along the way.
  */
 internal fun OkHttpClient.Builder.withClientCertificate(): OkHttpClient.Builder =
     sslSocketFactory(DeferredClientCertSocketFactory(), platformTrustManager())
+        .addInterceptor(MtlsHandshakeWatchInterceptor(MtlsHandshakeWatch.instance))
 
 /**
  * A socket factory whose identity is chosen when a **connection** is opened, not when the client is
