@@ -1,5 +1,6 @@
 package com.nuvio.app.features.boomio
 
+import com.nuvio.app.core.mtls.withClientCertificate
 import com.nuvio.app.core.network.IPv4FirstDns
 import com.nuvio.app.core.overlay.withOverlayProxy
 import io.ktor.client.HttpClient
@@ -15,13 +16,19 @@ import io.ktor.client.plugins.websocket.WebSockets
 // names the app resolves itself; under the app's own userspace tunnel the pin stands down
 // entirely (netstack installs no kernel route), and what carries boomio traffic then is
 // this proxy. `withOverlayProxy()` is inert — it answers "direct" — whenever no relay is up.
+//
+// `withClientCertificate()` is the mTLS half and is applied to both for the same reason the
+// proxy is: this is the plane that talks to Boomio's own hosts. It is inert until the device
+// has a registered certificate, and it picks one up without either client being rebuilt —
+// the certificate is resolved per *connection*, not per client, which is what P2.5 turns on.
+// See `MtlsSsl`.
 internal actual fun createBoomioHttpClient(): HttpClient = HttpClient(OkHttp) {
     install(HttpTimeout) {
         requestTimeoutMillis = 15_000
         connectTimeoutMillis = 10_000
     }
     expectSuccess = false
-    engine { config { dns(IPv4FirstDns()).withOverlayProxy() } }
+    engine { config { dns(IPv4FirstDns()).withOverlayProxy().withClientCertificate() } }
 }
 
 internal actual fun createBoomioWebSocketClient(): HttpClient = HttpClient(OkHttp) {
@@ -29,5 +36,5 @@ internal actual fun createBoomioWebSocketClient(): HttpClient = HttpClient(OkHtt
     install(WebSockets)
     // A `wss://` companion link reaches OkHttp as `https`, so it takes the CONNECT path
     // through the relay rather than the absolute-form one the relay refuses.
-    engine { config { dns(IPv4FirstDns()).withOverlayProxy() } }
+    engine { config { dns(IPv4FirstDns()).withOverlayProxy().withClientCertificate() } }
 }

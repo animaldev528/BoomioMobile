@@ -432,10 +432,10 @@ private fun assignmentOf(dto: ProvisionMessageDto): OverlayAssignment {
         mtu = dto.mtu ?: OVERLAY_ENROLL_DEFAULT_MTU,
         // ⚠️ **Not part of "does this assignment work", and carried anyway.** A name the server
         // omitted is a name we do not have, not a reason to refuse an otherwise complete
-        // assignment — the tunnel is usable without it and the mTLS half reads `null` as
+        // assignment — the tunnel is usable without it and the mTLS half reads blank as
         // "nothing to mint against". Deliberately outside the blank-check above for exactly
         // that reason: refusing here would cost a device its tunnel over a field it does not
         // need in order to route packets.
-        assignedName = dto.name,
+        deviceName = dto.name.orEmpty(),
     )
 }

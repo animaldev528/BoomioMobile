@@ -3,6 +3,7 @@ package com.nuvio.app.features.addons
 import android.content.Context
 import android.content.SharedPreferences
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
+import com.nuvio.app.core.mtls.withClientCertificate
 import com.nuvio.app.core.network.IPv4FirstDns
 import com.nuvio.app.core.overlay.withOverlayProxy
 import kotlinx.coroutines.CancellationException
@@ -114,6 +115,10 @@ private fun buildAddonHttpClient(cache: Cache? = null): OkHttpClient =
         // leaving it would have kept the addon plane permanently off the overlay while
         // every other engine moved. Removed, not appended to.
         .withOverlayProxy()
+        // The addon plane carries BSF's own endpoints, so it is on the enforced side of the
+        // edge. Inert until this device has a registered certificate, and inert *on the wire*
+        // at any host that does not ask for one.
+        .withClientCertificate()
         .apply {
             if (cache != null) {
                 cache(cache)

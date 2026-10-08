@@ -153,6 +153,14 @@ open class MainActivity : AppCompatActivity() {
         // missing: without it `MtlsRegistration.registrar` is null, `ensureRegistered` returns
         // `Skipped`, and the client never registers a certificate at all. `MtlsSsl` needs no
         // equivalent — it reads the certificate through this object lazily, per call.
+        //
+        // ⚠️ Note that `initialize` itself registers nothing. `writeConfig` runs synchronously
+        // inside `OverlayEnrollment.initialize` above, so its registration request was made before
+        // this call and was correctly dropped as "not started yet". The first real attempt comes
+        // from the enrollment refresh on its own coroutine — which is the right trigger anyway, and
+        // costs nothing when it does not happen: a device that was already registered needs no
+        // second POST (the plan short-circuits), and one that was not will be re-triggered the
+        // moment a refresh succeeds.
         MtlsRegistration.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)

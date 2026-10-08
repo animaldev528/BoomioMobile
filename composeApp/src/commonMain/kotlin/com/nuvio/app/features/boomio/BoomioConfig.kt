@@ -24,21 +24,32 @@ object BoomioConfig {
     var bsmBaseUrl: String = ""
 
     /**
-     * Base URL of the bsc companion hub, e.g. `wss://bsc.example.com`. The phone
-     * companion bridge connects to `{companionBaseUrl}/ws/phone?session_token=…&device_id=…`
-     * and the TV to `{companionBaseUrl}/ws`. Sourced from `BOOMIO_COMPANION_URL` in
+     * Base URL of the bsc companion hub, e.g. `wss://bsc.example.com` — or, on the
+     * collapsed edge, `wss://boomio.example.com/bsc`. The phone companion bridge
+     * connects to `{companionBaseUrl}/ws/phone?session_token=…&device_id=…` and the
+     * TV to `{companionBaseUrl}/ws`. Sourced from `BOOMIO_COMPANION_URL` in
      * `local.properties` (via the generated [BoomioCompanionConfig]); override at
      * startup if needed. Inert when blank — mirrors the blank-inert pattern of the
      * other seams above.
+     *
+     * ⚠️ **A trailing path prefix here is load-bearing and must survive every
+     * derivation.** `wss://` is not cosmetic: [companionPhoneWsUrl] appends `/ws/phone`
+     * to this value and Ktor refuses an `https://` scheme there, while
+     * [companionRestBaseUrl] rewrites the scheme to `https://` and leaves the rest
+     * alone, so the prefix carries into REST calls too. Stripping the `/bsc` segment
+     * would 404 every companion request and the WS would fail silently, with no retry.
      */
     var companionBaseUrl: String = BoomioCompanionConfig.BASE_URL
 
     /**
-     * Base URL of the bss-iptv live edge, e.g. `https://bss-iptv.example.com`.
+     * Base URL of the bss-iptv live edge, e.g. `https://bss-iptv.example.com` — or,
+     * on the collapsed edge, `https://boomio.example.com/bss-iptv`.
      * Sourced from `BOOMIO_IPTV_URL` in `local.properties` (via the generated
-     * [BoomioIptvConfig]). This is a DIFFERENT host from [companionBaseUrl]: the
-     * channel catalogue is served by the IPTV role edge, while the companion
-     * socket and the party REST live on bsc.
+     * [BoomioIptvConfig]).
+     *
+     * Under the collapse this is **the same host as [companionBaseUrl]** and only the
+     * path segment differs; before it, the two were distinct hosts. Nothing may be
+     * keyed off host inequality — the services are told apart by prefix.
      *
      * The phone reads the catalogue directly from the edge — its existing
      * `bs_ses_*` token is valid there because both services share the same
@@ -51,8 +62,9 @@ object BoomioConfig {
      * the overlay resolver entirely.
      *
      * ⚠️ **This is an address, not a URL and not a hostname.** The app never *dials* it:
-     * every request keeps naming `bsc.tracemonkey.org` and Caddy picks the site block
-     * from that name, so a bare address has nothing to match and fails TLS. All this
+     * every request keeps naming the collapsed edge host (e.g. `boomio.tracemonkey.org`)
+     * and Caddy picks the site block from that name, so a bare address has nothing to
+     * match and fails TLS. All this
      * value does is tell the DNS seam what those names should resolve to while the
      * tunnel is up — see `OverlayTunnel`. A hostname here is refused rather than
      * resolved, because resolving it is the exact behaviour the seam replaces.
@@ -161,6 +173,9 @@ object BoomioConfig {
      * transports — `GET /api/overlay/enroll/status`'s `name`, and the provisioning channel's
      * `enroll.ready.name` — and [com.nuvio.app.core.overlay.OverlayEnrollment] writes it from
      * whichever one answered, alongside the address, so the two can never disagree.
+     *
+     * It is emphatically **not** [overlayServerAddress] (the server's overlay address) and not the
+     * user's device name from Settings — the three coincide in neither shape nor origin.
      *
      * Blank-inert: `MtlsRegistrar.planCertificate` treats an unknown name as `Unavailable`, so a
      * device that has not enrolled registers nothing rather than minting for a name it guessed.
