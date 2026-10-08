@@ -19,6 +19,7 @@ import com.nuvio.app.core.overlay.OverlayProvisioning
 import com.nuvio.app.core.overlay.OverlayRelay
 import com.nuvio.app.core.overlay.OverlaySession
 import com.nuvio.app.core.overlay.OverlayTunnel
+import com.nuvio.app.core.overlay.SecurityPolicyRefresh
 import com.nuvio.app.features.boomio.BoomioSessionRepository
 import com.nuvio.app.features.boomio.BoomioSessionStorage
 import com.nuvio.app.features.boomio.PrivateListeningSession
@@ -139,6 +140,12 @@ open class MainActivity : AppCompatActivity() {
         // address (`BOOMIO_OVERLAY_LOCAL_CIDR`) was fixed at compile time and the second
         // client on an overlay could never be right.
         OverlayEnrollment.initialize(applicationContext)
+        // Applies the cached security policy synchronously, then pulls the current one on
+        // app-foreground and at enrollment. Placed with the overlay group because the policy it
+        // carries decides *routing* between the planes those objects build; it needs no other
+        // overlay object itself — only a `Context` for the cache — so its position is not
+        // load-bearing, only tidy.
+        SecurityPolicyRefresh.initialize(applicationContext)
         // And last of all, the way *in* for a device that has nothing: the provisioning channel.
         // It registers itself as `BoomioSessionRepository`'s second pairing transport, so it has
         // to exist before any UI can call `startLink()` — which is what this position guarantees,
@@ -224,6 +231,18 @@ open class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIncomingAppIntent(intent)
+    }
+
+    /**
+     * The app-foreground trigger for the security policy.
+     *
+     * ⚠️ Fire-and-forget and throttled: `onAppForegrounded` launches onto its own scope and returns
+     * at once, so a policy pull can never delay a resumed frame, and the cache in force is what the
+     * routing seams read until it lands. See `SecurityPolicyRefresh`.
+     */
+    override fun onResume() {
+        super.onResume()
+        SecurityPolicyRefresh.onAppForegrounded()
     }
 
     override fun onUserLeaveHint() {

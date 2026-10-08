@@ -149,6 +149,23 @@ internal class OverlayProvisionConnection private constructor(
             }
         )
 
+    /**
+     * `policy.get` — the security policy the server currently records.
+     *
+     * ⚠️ **The `t` is a guess; the committed server half serves this over HTTP only.** See
+     * `ChannelSecurityPolicyApi` for why the channel is nonetheless the client's only authenticated
+     * pull path. A server that does not understand this answers `{t:'error'}` (raised as
+     * [OverlayProvisionException.ServerError]) or faults on the unknown type — both of which the
+     * caller treats as "no answer", leaving the cached policy in force.
+     */
+    suspend fun securityPolicy(sessionToken: String): ProvisionMessage =
+        request(
+            buildJsonObject {
+                put("t", JsonPrimitive("policy.get"))
+                put("session_token", JsonPrimitive(sessionToken))
+            }
+        )
+
     override fun close() {
         // Best-effort throughout: closing happens on both the success and every failure
         // path, and a throw here would replace whatever the caller was actually reporting.

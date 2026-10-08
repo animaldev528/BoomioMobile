@@ -6,6 +6,7 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 
 /**
  * The pre-tunnel provisioning protocol's wire format: framing, opcodes, and the message
@@ -256,6 +257,15 @@ internal sealed interface ProvisionMessage {
      */
     data class CertRefused(val code: String, val message: String) : ProvisionMessage
 
+    /**
+     * The security policy the server currently records — a reply to `policy.get`.
+     *
+     * ⚠️ **Named `Policy` and not `SecurityPolicy` deliberately.** The payload type is the top-level
+     * [SecurityPolicy], and a nested member of the same name would shadow it inside this sealed
+     * interface, so the field here would silently refer to the wrong type.
+     */
+    data class Policy(val policy: SecurityPolicy) : ProvisionMessage
+
     data class Error(val code: String, val message: String) : ProvisionMessage
 }
 
@@ -306,6 +316,9 @@ internal data class ProvisionMessageDto(
     @SerialName("fingerprint_sha256") val fingerprintSha256: String? = null,
     @SerialName("not_before") val notBefore: String? = null,
     @SerialName("not_after") val notAfter: String? = null,
+    // policy — the four booleans as one nested object, exactly the shape bsm stores under
+    // `security_policy` in system_kv (routes/security.js), so the two halves cannot drift.
+    @SerialName("security_policy") val securityPolicy: JsonObject? = null,
     // error / cert.refused
     val code: String? = null,
     val message: String? = null,
@@ -394,6 +407,16 @@ internal fun decodeProvisionMessage(plaintext: ByteArray): ProvisionMessage {
         "cert.refused" -> ProvisionMessage.CertRefused(
             code = dto.code.orEmpty(),
             message = dto.message ?: "The server refused the certificate.",
+        )
+
+        // ⚠️ A `policy` message with no parseable policy is a ProtocolFault rather than a null: the
+        // server answered the question, so silently leaving the caller on the cached policy would
+        // make a server-side regression look like a network miss.
+        "policy" -> ProvisionMessage.Policy(
+            securityPolicyFrom(dto.securityPolicy)
+                ?: throw OverlayProvisionException.ProtocolFault(
+                    "the server's policy message carried no policy"
+                ),
         )
 
         // The message is `ProvisionMessage.Error`; the *exception* raised for it by the

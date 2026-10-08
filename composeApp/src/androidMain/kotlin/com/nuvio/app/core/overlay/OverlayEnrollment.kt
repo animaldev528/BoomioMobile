@@ -502,6 +502,11 @@ internal object OverlayEnrollment {
                 .collect { token ->
                     if (token == null) return@collect
                     refresh()
+                    // ⚠️ The policy is refreshed on the same trigger, and here rather than only on
+                    // app-foreground so a freshly enrolled device has a policy *before* it has a
+                    // tunnel — the moment the server's answer matters most. Best effort: a failure
+                    // leaves the cached policy in force (see SecurityPolicyRefresh).
+                    SecurityPolicyRefresh.refresh()
                 }
         }
     }
@@ -541,7 +546,17 @@ internal object OverlayEnrollment {
         // away with a session and no tunnel. `OverlayProvisioning` answers null wherever the
         // channel is not the right transport (the ingress is off, or the device is on the home
         // L2 where the base URL works), and that null *is* the fallback.
-        OverlayProvisioning.enrollmentApi(token)?.let { return it }
+        //
+        // ⚠️ **The plain-HTTPS bootstrap arm sits around that, and it is the owner's *"freeze the
+        // enrolment if it is not possible or desired"* requirement.** "Not desired" is the
+        // client-side switch, which skips the channel entirely; "not possible" is the channel
+        // answering null, which is already the fall-through below. When the fallback is switched
+        // off *and* the channel does not apply, this returns null — the pre-existing behaviour.
+        // See `BootstrapFallback` for why the base URL is the public edge without a pin.
+        if (!BootstrapFallback.plainHttpsPreferred) {
+            OverlayProvisioning.enrollmentApi(token)?.let { return it }
+        }
+        if (!BootstrapFallback.shouldUsePlainHttps(overlayAvailable = false)) return null
 
         val base = BoomioConfig.companionRestBaseUrl.takeIf { it.isNotBlank() } ?: return null
         return BscOverlayEnrollmentApi(baseUrl = base, token = token)
