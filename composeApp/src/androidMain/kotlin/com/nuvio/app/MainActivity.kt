@@ -10,6 +10,7 @@ import androidx.activity.SystemBarStyle
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
+import com.nuvio.app.core.mtls.MtlsRegistration
 import com.nuvio.app.core.network.ServerConfigurationStorage
 import com.nuvio.app.core.overlay.OverlayEnrollment
 import com.nuvio.app.core.overlay.OverlayEndpointDiscovery
@@ -145,6 +146,14 @@ open class MainActivity : AppCompatActivity() {
         // above matters: the two only meet through `OverlayEnrollment`'s *api factory*, which is
         // read per enrollment rather than captured here.
         OverlayProvisioning.initialize(applicationContext)
+        // The mTLS half, and it is here rather than at the top of the list because its api
+        // factory asks `OverlayProvisioning` which transport linked this device (§13.2). That is a
+        // *read*, made per registration rather than captured, so this position is not load-bearing
+        // — it is chosen so the overlay group stays one block. ⚠️ This call is what P2.3 was
+        // missing: without it `MtlsRegistration.registrar` is null, `ensureRegistered` returns
+        // `Skipped`, and the client never registers a certificate at all. `MtlsSsl` needs no
+        // equivalent — it reads the certificate through this object lazily, per call.
+        MtlsRegistration.initialize(applicationContext)
         LibraryStorage.initialize(applicationContext)
         WatchedStorage.initialize(applicationContext)
         MetaScreenSettingsStorage.initialize(applicationContext)

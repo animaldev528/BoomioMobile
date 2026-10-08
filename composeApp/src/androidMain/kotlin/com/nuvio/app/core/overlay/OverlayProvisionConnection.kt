@@ -127,6 +127,28 @@ internal class OverlayProvisionConnection private constructor(
             }
         )
 
+    /**
+     * `cert.register` — files this device's client certificate in the edge's allow-list.
+     *
+     * ⚠️ **No device id and no name.** The server derives the CN it expects from the *verified
+     * session* (`peerNameFor(session.device_id)`), so a name sent from here would be a value the
+     * server is right to ignore — the same rule the HTTPS route follows. The session token is the
+     * whole identity, exactly as it is for [enroll].
+     *
+     * ⚠️ **The certificate must be the same name the session maps to**, and `name` in an
+     * `enroll.ready` is that name: a certificate minted for any other CN is refused with
+     * `cn_mismatch` rather than quietly accepted, which is what binds a self-signed certificate to
+     * an identity the server computed rather than one the device asserted.
+     */
+    suspend fun certRegister(sessionToken: String, certPem: String): ProvisionMessage =
+        request(
+            buildJsonObject {
+                put("t", JsonPrimitive("cert.register"))
+                put("session_token", JsonPrimitive(sessionToken))
+                put("cert", JsonPrimitive(certPem))
+            }
+        )
+
     override fun close() {
         // Best-effort throughout: closing happens on both the success and every failure
         // path, and a throw here would replace whatever the caller was actually reporting.

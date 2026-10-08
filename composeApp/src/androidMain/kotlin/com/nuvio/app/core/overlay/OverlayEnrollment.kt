@@ -50,6 +50,20 @@ internal data class OverlayAssignment(
     val endpoint: String,
     val overlayCidr: String,
     val mtu: Int,
+    /**
+     * The name the server filed this device under, e.g. `device-pixel-7-pro-430f9ca3`.
+     *
+     * ⚠️ **Carried here rather than alongside, and that is a deliberate choice about failure.**
+     * It is the *identity* the edge's mTLS allow-list will be keyed on, and it is issued by the
+     * same call that issues [address]. Anything that applies one without the other produces a
+     * device holding a tunnel it is allowed to use and a certificate it is not — which is why
+     * they travel as one value and are cached as one record rather than as two fields that could
+     * be written on different paths. `null` means the server did not send one, which the mTLS
+     * half reads as "no name yet" and refuses to mint against.
+     *
+     * Defaulted so a caller that predates it — and every test fixture — still constructs.
+     */
+    val assignedName: String? = null,
 ) {
     /** The `Address =` line's form. */
     val localCidr: String get() = "$address/32"
@@ -355,6 +369,12 @@ internal fun decodeEnrollStatus(body: String): EnrollPoll {
                         endpoint = endpoint,
                         overlayCidr = dto.overlayCidr ?: OVERLAY_ENROLL_DEFAULT_CIDR,
                         mtu = dto.mtu ?: OVERLAY_ENROLL_DEFAULT_MTU,
+                        // ⚠️ The route has always sent this and this parser has always dropped
+                        // it, which is why `BoomioConfig.overlayDeviceName` had no writer at all.
+                        // Every field above is about reaching the server; this is the one the
+                        // server uses to identify *us*, and the mTLS registration cannot happen
+                        // without it.
+                        assignedName = dto.name,
                     ),
                 )
             }
@@ -399,6 +419,7 @@ internal object OverlayEnrollment {
     private const val KEY_ENDPOINT = "endpoint"
     private const val KEY_OVERLAY_CIDR = "overlay_cidr"
     private const val KEY_MTU = "mtu"
+    private const val KEY_DEVICE_NAME = "device_name"
     private const val KEY_ISSUED_FOR = "issued_for_public_key"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -545,6 +566,18 @@ internal object OverlayEnrollment {
             BoomioConfig.overlayServerAddress = it
         }
 
+        // ⚠️ **The device's own name, and it is the one field here the app cannot derive.** Every
+        // other line above is about reaching the server; this one is what the server calls *us*,
+        // and it is the CN the edge's mTLS allow-list is keyed on. `bsc` computes it from the
+        // device id, so a build has no way to know it in advance — and a name this app invented
+        // for itself would be a name the allow-list has never heard of.
+        //
+        // Blank must NOT clobber a learned value, for the same reason as the address above: a
+        // reply that omits the name is not an instruction to forget the one we have.
+        assignment.assignedName?.takeIf { it.isNotBlank() }?.let {
+            BoomioConfig.overlayDeviceName = it
+        }
+
         // ⚠️ **The assignment taking effect has to be announced, not merely written.** The two
         // components that gate on the address check it at their own start-up, and start-up is
         // long over by the time this runs: `MainActivity` initializes `OverlaySession` and
@@ -570,6 +603,12 @@ internal object OverlayEnrollment {
                 endpoint = endpoint,
                 overlayCidr = store.getString(KEY_OVERLAY_CIDR, null) ?: "10.77.0.0/24",
                 mtu = store.getInt(KEY_MTU, 1420),
+                // Absent on a record written before this field existed, and that reads as
+                // "unknown" rather than as an error: the next `refresh()` fills it in. Reading it
+                // back matters for the cold start — without it a device that enrolled last week
+                // and has no network this morning would know its address and not its own name,
+                // and the mTLS half would sit at `Unavailable` until something else woke it.
+                assignedName = store.getString(KEY_DEVICE_NAME, null),
             ),
             issuedForPublicKeyBase64 = issuedFor,
         )
@@ -582,6 +621,7 @@ internal object OverlayEnrollment {
             .putString(KEY_ENDPOINT, cached.assignment.endpoint)
             .putString(KEY_OVERLAY_CIDR, cached.assignment.overlayCidr)
             .putInt(KEY_MTU, cached.assignment.mtu)
+            .putString(KEY_DEVICE_NAME, cached.assignment.assignedName)
             .putString(KEY_ISSUED_FOR, cached.issuedForPublicKeyBase64)
             .apply()
     }

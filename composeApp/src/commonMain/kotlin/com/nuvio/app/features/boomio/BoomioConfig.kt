@@ -145,6 +145,28 @@ object BoomioConfig {
      */
     var overlayServerPubKey: String = BoomioOverlayConfig.PUBKEY
 
+    /**
+     * The name the **server** gave this device, e.g. `device-pixel-7-pro-430f9ca3`. Blank until
+     * a device has enrolled, and blank means "we have not learned it yet" — never a placeholder.
+     *
+     * ⚠️ **This is not a label, and it is not [overlayLocalCidr].** It is the *identity* half of an
+     * enrollment: the server derives it from the device id (`peerNameFor` in `bsc/lib/overlay-store.js`)
+     * and files everything it later learns about this device — its WireGuard peer record, its entry
+     * in the edge's mTLS allow-list — under exactly this string. A certificate minted for any other
+     * CN is refused `cn_mismatch` by `POST /api/overlay/cert` and by the channel alike, so a wrong
+     * value here does not degrade: it fails closed, and the device never gets a certificate.
+     *
+     * ⚠️ **The server is the only source, and it must stay that way.** A name this app invented for
+     * itself would be a name the allow-list has never heard of. It arrives on both enrollment
+     * transports — `GET /api/overlay/enroll/status`'s `name`, and the provisioning channel's
+     * `enroll.ready.name` — and [com.nuvio.app.core.overlay.OverlayEnrollment] writes it from
+     * whichever one answered, alongside the address, so the two can never disagree.
+     *
+     * Blank-inert: `MtlsRegistrar.planCertificate` treats an unknown name as `Unavailable`, so a
+     * device that has not enrolled registers nothing rather than minting for a name it guessed.
+     */
+    var overlayDeviceName: String = ""
+
     /** True when the companion seam is configured ([companionBaseUrl] is set). */
     fun companionEnabled(): Boolean = companionBaseUrl.isNotBlank()
 
