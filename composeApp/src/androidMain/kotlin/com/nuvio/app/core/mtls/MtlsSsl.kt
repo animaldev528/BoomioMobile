@@ -2,6 +2,7 @@ package com.nuvio.app.core.mtls
 
 import android.util.Log
 import okhttp3.OkHttpClient
+import java.net.InetAddress
 import java.net.Socket
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -33,17 +34,33 @@ import javax.net.ssl.X509TrustManager
  * "attach at every Boomio-facing client" a defensible default rather than a list that has to be
  * kept in sync with the edge's per-path enforcement (§8), which is still being decided in §13.
  *
- * ── ⚠️ It is a no-op until the device has a certificate, and that is load-bearing ───
- * [TlsContext] is read from the keystore at the moment a client is *built*, so at start-up — before
- * enrollment has landed and registration has run — every client is built exactly as it is today.
- * Getting the certificate in afterwards therefore requires the client to be **rebuilt**, which is
- * P2.5 and is why P2.5 is not optional: attaching here and rebuilding there are two halves of one
- * change, and a device that registers but never rebuilds looks precisely like a device whose mTLS
- * does not work.
+ * ── P2.5: the client does not have to be rebuilt, and that is the point ──────
+ * The obvious shape for this is to read [context] once, at the moment a client is built, and hand
+ * the result to the builder. That shape has a defect that P2.5 exists to repair: at start-up —
+ * before enrollment has landed and registration has run — there is no certificate, so every client
+ * is built plain and stays plain for the life of the process. A device that registers but never
+ * rebuilds then looks *precisely* like a device whose mTLS does not work, and the repair is a
+ * rebuild hook on every singleton that holds a client ([SupabaseProvider], [AddonHttpClientProvider],
+ * and four `private val http` objects in `commonMain` that `androidMain` cannot reach) — which is
+ * the same machinery again for P2.6, where re-registering installs a *different* certificate.
  *
- * ⚠️ The same property is why the certificate is *not* fetched per request. There is no
- * `SSLSocketFactory` that consults a callback mid-handshake, and OkHttp resolves a client's TLS
- * configuration when the client is constructed.
+ * So the attach is **deferred instead**: the builder is always given
+ * [DeferredClientCertSocketFactory], which resolves [context] once per **socket** rather than once
+ * per client. OkHttp creates a socket per connection and pools the results, so a connection opened
+ * after registration carries the certificate and one opened before it does not — which costs
+ * nothing, because a pre-registration connection to an enforced host could not have completed
+ * anyway. Re-minting is then picked up for free by the same mechanism.
+ *
+ * ⚠️ This is why the certificate is *not* resolved per **handshake**. A socket's `SSLContext` is
+ * fixed when the socket is created, so per-handshake resolution is not available; per-connection
+ * is, and it is the granularity the pool already gives us.
+ *
+ * ⚠️ One consequence worth stating: this installs a socket factory on **every** client it is
+ * applied to, including ones pointed at hosts that will never ask for a certificate. That is not a
+ * behaviour change — with no certificate the factory delegates to the platform default socket
+ * factory, the same one OkHttp would have built — but it does mean the factory is on the path for
+ * ordinary TLS, so it must stay a pure passthrough. [DeferredClientCertSocketFactory] is written to
+ * be exactly that.
  *
  * ── Where it is deliberately *not* applied ───────────────────────────────────
  * `PlayerPlaybackNetworking` (its `checkServerTrusted = Unit` is scoped to playback and §8 says
@@ -57,12 +74,15 @@ internal object MtlsSsl {
     private const val TAG = "BoomioMtls"
 
     /**
-     * A TLS configuration that presents the client certificate: what an HTTP client needs, plus the
-     * fingerprint it was built for so the cache below can tell when it has gone stale.
+     * A TLS configuration that presents the client certificate: the socket factory a client needs,
+     * plus the fingerprint it was built for so the cache below can tell when it has gone stale.
+     *
+     * There is no trust manager here, and that is not an omission — see [withClientCertificate]. It
+     * is the platform default whichever way this resolves, so carrying a copy would only invite a
+     * caller to use this one.
      */
     internal class TlsContext(
         val socketFactory: SSLSocketFactory,
-        val trustManager: X509TrustManager,
         val fingerprint: String,
     )
 
@@ -93,12 +113,9 @@ internal object MtlsSsl {
             // is tested without one — so the Android-only half of this file is the half that talks
             // to Android. [context] catches what this throws and says nothing.
             try {
-                val trustManagers = platformTrustManagers()
-                val trustManager = trustManagers.filterIsInstance<X509TrustManager>().firstOrNull()
-                    ?: throw IllegalStateException("the platform offers no X509 trust manager")
                 val context = SSLContext.getInstance("TLS")
-                context.init(keyManagers(), trustManagers, null)
-                return TlsContext(context.socketFactory, trustManager, fingerprint)
+                context.init(keyManagers(), arrayOf<TrustManager>(platformTrustManager()), null)
+                return TlsContext(context.socketFactory, fingerprint)
             } catch (t: Throwable) {
                 Log.w(TAG, "Could not build a TLS context for the client certificate", t)
                 throw t
@@ -120,10 +137,12 @@ internal object MtlsSsl {
         cached?.let { if (it.fingerprint == fingerprint) return it }
         synchronized(this) {
             cached?.let { if (it.fingerprint == fingerprint) return it }
-            // A failure here must not escape into a client's construction — a client that cannot get
-            // a client certificate is the pre-registration state, which is ordinary, and the
-            // alternative is a crash on start-up for a device that merely has not enrolled yet.
-            // Nothing is cached on failure, so the next call retries.
+            // A failure here must not escape into the caller. `context()` is on the path of every
+            // https connection this app makes once [withClientCertificate] has been applied, so a
+            // throw here would turn a keystore hiccup into a crash on an ordinary request; answering
+            // `null` instead means the connection is made the way it would have been made without
+            // mTLS at all, which is the pre-registration behaviour. Nothing is cached on failure, so
+            // the next connection retries and a transient failure heals on its own.
             val built = try {
                 source.build(fingerprint)
             } catch (t: Throwable) {
@@ -156,30 +175,103 @@ internal object MtlsSsl {
 }
 
 /**
- * Point an `OkHttpClient.Builder` at the client certificate, or leave it alone.
+ * Point an `OkHttpClient.Builder` at the client certificate — always, and without deciding yet
+ * whether there is one.
  *
- * Leaving it alone is the common case, and it is not an optimisation: the alternative — attaching a
- * context with no identity behind it — would replace OkHttp's trust manager for nothing.
+ * ⚠️ **There is deliberately no early return for "this device has no certificate yet".** Deciding
+ * that here is the defect [MtlsSsl]'s KDoc describes: the answer is fixed at build time and a client
+ * built before registration can never present a certificate afterwards. Every call site is a
+ * construction site that may run before enrollment, so none of them can make that decision.
+ *
+ * The trust manager is the platform's, and it is passed unconditionally because
+ * `sslSocketFactory(factory, trustManager)` will not take a null one. That is not a concession: it
+ * is the same manager OkHttp installs for itself, and [DeferredClientCertSocketFactory] delegates to
+ * the platform socket factory whenever there is no certificate, so an ordinary TLS client is
+ * configured exactly as it would have been.
  */
-internal fun OkHttpClient.Builder.withClientCertificate(): OkHttpClient.Builder {
-    val context = MtlsSsl.context() ?: return this
-    return sslSocketFactory(context.socketFactory, context.trustManager)
+internal fun OkHttpClient.Builder.withClientCertificate(): OkHttpClient.Builder =
+    sslSocketFactory(DeferredClientCertSocketFactory(), platformTrustManager())
+
+/**
+ * A socket factory whose identity is chosen when a **connection** is opened, not when the client is
+ * built.
+ *
+ * OkHttp calls one of the `createSocket` overloads once per connection and pools the socket, so
+ * resolving [MtlsSsl.context] from inside them is what lets a client built before registration
+ * present the certificate on its next connection, and what makes a re-minted certificate (P2.6)
+ * take effect without anything being rebuilt.
+ *
+ * ⚠️ The delegation target is resolved on **every** call rather than cached, because caching it is
+ * the very defect this class exists to avoid — but "resolved" is cheap and already memoised one
+ * level down: [MtlsSsl.context] re-reads the keystore only to hash the certificate, and returns the
+ * same `TlsContext` it built last time when the hash has not moved.
+ */
+internal class DeferredClientCertSocketFactory : SSLSocketFactory() {
+
+    private fun delegate(): SSLSocketFactory =
+        MtlsSsl.context()?.socketFactory ?: platformSocketFactory()
+
+    override fun getDefaultCipherSuites(): Array<String> = delegate().defaultCipherSuites
+
+    override fun getSupportedCipherSuites(): Array<String> = delegate().supportedCipherSuites
+
+    override fun createSocket(): Socket = delegate().createSocket()
+
+    override fun createSocket(host: String, port: Int): Socket = delegate().createSocket(host, port)
+
+    override fun createSocket(
+        host: String,
+        port: Int,
+        localHost: InetAddress,
+        localPort: Int,
+    ): Socket = delegate().createSocket(host, port, localHost, localPort)
+
+    override fun createSocket(
+        socket: Socket,
+        host: String,
+        port: Int,
+        autoClose: Boolean,
+    ): Socket = delegate().createSocket(socket, host, port, autoClose)
+
+    override fun createSocket(host: InetAddress, port: Int): Socket = delegate().createSocket(host, port)
+
+    override fun createSocket(
+        address: InetAddress,
+        port: Int,
+        localAddress: InetAddress,
+        localPort: Int,
+    ): Socket = delegate().createSocket(address, port, localAddress, localPort)
 }
 
 /**
- * The trust managers to keep alongside the certificate.
+ * The trust manager to keep alongside the certificate.
  *
- * ⚠️ These are the **platform defaults, built the same way OkHttp builds them itself**
+ * ⚠️ This is the **platform default, built the same way OkHttp builds it itself**
  * (`Platform.platformTrustManager()` is exactly these three lines), so attaching a client
  * certificate changes *who we are* and nothing about *who we trust*. That matters twice over: this
  * app's trust decisions belong to `network_security_config.xml`, which the default `X509TrustManager`
  * honours, and a custom trust manager sneaked in beside the key manager is how "we added mTLS" turns
  * into "we stopped verifying the server".
  */
-private fun platformTrustManagers(): Array<TrustManager> =
+private fun platformTrustManager(): X509TrustManager =
     TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
         .apply { init(null as KeyStore?) }
         .trustManagers
+        .filterIsInstance<X509TrustManager>()
+        .firstOrNull()
+        ?: throw IllegalStateException("the platform offers no X509 trust manager")
+
+/**
+ * The socket factory OkHttp would have used had we not attached anything: the platform default
+ * context with the platform default key and trust managers.
+ *
+ * ⚠️ `init(null, null, null)` is not a shortcut. It is literally how OkHttp builds its own default
+ * (`Platform.newSslSocketFactory`), so when this device has no certificate the handshake is
+ * byte-for-byte the one the app performs today. Installing a *different* default here would be a
+ * silent change to every https request in the app.
+ */
+private fun platformSocketFactory(): SSLSocketFactory =
+    SSLContext.getInstance("TLS").apply { init(null, null, null) }.socketFactory
 
 /**
  * The key manager for [alias], wrapped so it cannot decline to present it.

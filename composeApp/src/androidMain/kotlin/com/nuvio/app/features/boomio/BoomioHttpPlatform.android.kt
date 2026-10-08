@@ -19,8 +19,9 @@ import io.ktor.client.plugins.websocket.WebSockets
 //
 // `withClientCertificate()` is the mTLS half and is applied to both for the same reason the
 // proxy is: this is the plane that talks to Boomio's own hosts. It is inert until the device
-// has a registered certificate, and *then* it needs P2.5's rebuild to take effect on clients
-// that were built before that — see `MtlsSsl`.
+// has a registered certificate, and it picks one up without either client being rebuilt —
+// the certificate is resolved per *connection*, not per client, which is what P2.5 turns on.
+// See `MtlsSsl`.
 internal actual fun createBoomioHttpClient(): HttpClient = HttpClient(OkHttp) {
     install(HttpTimeout) {
         requestTimeoutMillis = 15_000

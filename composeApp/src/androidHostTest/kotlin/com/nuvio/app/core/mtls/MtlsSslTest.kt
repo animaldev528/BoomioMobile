@@ -8,10 +8,11 @@ import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.Principal
 import java.security.PrivateKey
+import java.security.cert.CertificateException
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManagerFactory
+import javax.net.ssl.SSLSocket
 import javax.net.ssl.X509KeyManager
 import javax.net.ssl.X509TrustManager
 import javax.security.auth.x500.X500Principal
@@ -19,15 +20,16 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
- * Attaching the client certificate to an HTTP client — `MtlsSsl`, P2.4.
+ * Attaching the client certificate to an HTTP client — `MtlsSsl`, P2.4 and P2.5.
  *
- * Two halves, and the second is the one that matters:
+ * Four things, and the last two are the ones with a decision in them:
  *
  * 1. **The key manager** is driven through a **real** `KeyStore` holding a real RSA-2048 keypair and
  *    a real certificate minted by `MtlsCertificate`, so the assertions are about the provider that
@@ -37,8 +39,18 @@ import kotlin.test.assertTrue
  *    sent no certificate" into a visible failure, and it is tested against a delegate that
  *    **provably** declines. The same behaviour is then checked end-to-end through the real provider —
  *    but that check cannot tell *why* it passed, which is exactly why both exist.
+ * 3. **The cache**, which decides when a context is rebuilt and when it is reused.
+ * 4. **The deferral**, which is P2.5: the certificate is resolved when a *connection* is opened, not
+ *    when a client is built. Three tests hold that line — that building resolves nothing, that
+ *    opening resolves, and that a certificate arriving *between* two connections is picked up
+ *    without anything being rebuilt. The last of those is the property the whole design turns on,
+ *    and it is the reason `withClientCertificate()` has no early return.
  *
- * ⚠️ **Every fake source below uses a fingerprint of its own, and that is not decoration.** the
+ * ⚠️ Also covered here: that attaching a client certificate did not disable server verification.
+ * That is the one thing an mTLS change can break silently and expensively, and the assertion is
+ * that a self-signed certificate unknown to any trust store is still **refused**.
+ *
+ * ⚠️ **Every fake source below uses a fingerprint of its own, and that is not decoration.** The
  * cache in `MtlsSsl` is process-scoped and deliberately has no invalidation hook, so two tests
  * sharing a fingerprint would share a cached context and the second would silently not build.
  * Distinct literals make that impossible however JUnit orders the class.
@@ -176,22 +188,69 @@ class MtlsSslTest {
     // ── the attach itself ────────────────────────────────────────────────────
 
     @Test
-    fun `a builder is left untouched when there is no certificate`() {
-        val source = FakeSource(fingerprint = null)
+    fun `a builder gets the deferred factory and no context is built`() {
+        val source = FakeSource(fingerprint = "fp-six")
         MtlsSsl.source = source
         val builder = OkHttpClient.Builder()
         assertSame(builder, builder.withClientCertificate())
-        assertTrue(source.built.isEmpty(), "a builder with no certificate must not build a context")
+        assertTrue(builder.build().sslSocketFactory is DeferredClientCertSocketFactory)
+        // ⚠️ The assertion that matters. Resolving the certificate here is precisely the defect:
+        // the answer would be fixed at build time and a client built before registration could
+        // never present one afterwards. Nothing may be resolved until a connection is opened.
+        assertTrue(source.built.isEmpty(), "the attach resolved the certificate at build time")
     }
 
     @Test
-    fun `a builder is given the context's socket factory`() {
-        val source = FakeSource(fingerprint = "fp-six")
+    fun `a builder is given the deferred factory even with no certificate`() {
+        // ⚠️ This is the whole of P2.5. The old shape returned the builder untouched in this case,
+        // and a client built this way could never pick a certificate up later.
+        val source = FakeSource(fingerprint = null)
         MtlsSsl.source = source
-        val context = assertNotNull(MtlsSsl.context())
+        assertTrue(OkHttpClient.Builder().withClientCertificate().build().sslSocketFactory is DeferredClientCertSocketFactory)
+        assertTrue(source.built.isEmpty())
+    }
+
+    @Test
+    fun `opening a connection resolves the certificate at that moment`() {
+        val source = FakeSource(fingerprint = "fp-seven")
+        MtlsSsl.source = source
+        val factory = DeferredClientCertSocketFactory()
+        assertTrue(source.built.isEmpty(), "constructing the factory must resolve nothing")
+        factory.createSocket()
+        assertEquals(listOf("fp-seven"), source.built)
+    }
+
+    @Test
+    fun `a connection opened before registration and one after are not the same identity`() {
+        val source = FakeSource(fingerprint = null)
+        MtlsSsl.source = source
+        val factory = DeferredClientCertSocketFactory()
+
+        // Before: no certificate, so the platform default — exactly the handshake the app performs
+        // today. The socket is still a real one; the attach is not allowed to break ordinary TLS.
+        assertTrue(factory.createSocket() is SSLSocket)
+        assertTrue(source.built.isEmpty())
+
+        // Registration lands. Nothing is rebuilt and nothing is invalidated.
+        source.fingerprint = "fp-eight"
+        factory.createSocket()
+        assertEquals(listOf("fp-eight"), source.built)
+
+        // And it keeps working the other way: losing the certificate returns to the platform
+        // default rather than holding a stale identity.
+        source.fingerprint = null
+        assertNotNull(factory.createSocket())
+    }
+
+    @Test
+    fun `the attach does not stop the server being verified`() {
+        // ⚠️ The failure this guards is "we added mTLS and quietly stopped checking the server".
+        // A self-signed certificate that no trust store knows must still be refused.
         val client = OkHttpClient.Builder().withClientCertificate().build()
-        assertSame(context.socketFactory, client.sslSocketFactory)
-        assertEquals(listOf("fp-six"), source.built, "the attach rebuilt instead of using the cache")
+        val trustManager = assertNotNull(client.x509TrustManager)
+        assertFailsWith<CertificateException> {
+            trustManager.checkServerTrusted(arrayOf(testIdentity().certificate), "RSA")
+        }
     }
 
     // ── fixtures ─────────────────────────────────────────────────────────────
@@ -261,13 +320,13 @@ class MtlsSslTest {
     }
 }
 
-/** A genuine TLS context, so the attach has real objects to hand out. */
+/**
+ * A genuine TLS context, so the attach has real objects to hand out — and, in
+ * `opening a connection resolves the certificate at that moment`, a real socket at the end of the
+ * delegation. `init(null, null, null)` is the platform default, the same thing `MtlsSsl` falls back
+ * to when there is no certificate.
+ */
 private fun realContext(fingerprint: String): MtlsSsl.TlsContext {
     val ssl = SSLContext.getInstance("TLS").apply { init(null, null, null) }
-    val trustManager = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-        .apply { init(null as KeyStore?) }
-        .trustManagers
-        .filterIsInstance<X509TrustManager>()
-        .first()
-    return MtlsSsl.TlsContext(ssl.socketFactory, trustManager, fingerprint)
+    return MtlsSsl.TlsContext(ssl.socketFactory, fingerprint)
 }
