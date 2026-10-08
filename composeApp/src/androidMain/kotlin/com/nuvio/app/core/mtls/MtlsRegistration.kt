@@ -97,11 +97,16 @@ internal object MtlsRegistration {
     @Volatile
     private var http: HttpClient? = null
 
+    /** Kept so [presentableCertificate] can answer after start-up, not only during it. */
+    @Volatile
+    private var prefs: SharedPreferences? = null
+
     fun initialize(context: Context) {
         if (started) return
         started = true
 
         val store = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs = store
 
         registrar = MtlsRegistrar(
             api = ::apiOrNull,
@@ -141,16 +146,35 @@ internal object MtlsRegistration {
     }
 
     /**
+     * The certificate to present in a handshake, or `null` when there is nothing legitimate to
+     * present. This is what `MtlsSsl` hands to an HTTP client.
+     *
+     * ⚠️ **The comparison is on the full DER, not on the public key.** `AndroidKeyStore` installs a
+     * **placeholder** certificate (`CN=Unverified…`) for every generated keypair, and the
+     * placeholder carries the *same public key* as the real certificate — so a public-key
+     * comparison answers "usable" for a key whose real certificate has not been installed. That
+     * state is not reachable through [MtlsRegistrar] as it stands (nothing is written down until
+     * [MtlsIdentity.installCertificate] has succeeded), which is precisely why it is worth pinning
+     * with a test that does not depend on that argument continuing to hold: what it would produce
+     * is a client presenting a placeholder, which the edge rejects by raw-DER comparison and which
+     * therefore reads as a *broken* certificate rather than as a missing one.
+     */
+    internal fun presentableCertificate(): X509Certificate? {
+        val bound = runCatching { MtlsIdentity.certificate() }.getOrNull() ?: return null
+        val pem = prefs?.getString(KEY_CERT_PEM, null)?.takeIf { it.isNotBlank() } ?: return null
+        val registered = parseCertificate(pem) ?: return null
+        return if (bound.encoded.contentEquals(registered.encoded)) bound else null
+    }
+
+    /**
      * The client's certificate, PEM. `null` until one has been minted and bound.
      *
-     * Read from the keystore rather than from the stored PEM, so it is the certificate that is
-     * actually usable for a handshake — the two can differ for exactly one window, between a
-     * regenerated key and the re-registration that follows it, and in that window the stored PEM is
-     * the wrong answer.
+     * The value returned is the keystore's **own** instance, so it is the certificate that will go
+     * on the wire; the stored PEM is consulted only to establish that the two are the same
+     * certificate. [presentableCertificate] says why that gate exists.
      */
-    fun certificatePem(): String? = runCatching {
-        MtlsIdentity.certificate()?.let { MtlsCertificate.toPem(it.encoded) }
-    }.getOrNull()
+    fun certificatePem(): String? =
+        presentableCertificate()?.let { MtlsCertificate.toPem(it.encoded) }
 
     // ── the wire ─────────────────────────────────────────────────────────────
 
@@ -230,11 +254,16 @@ internal object MtlsRegistration {
      * what it is.
      */
     private fun isBoundToCurrentKey(pem: String): Boolean = runCatching {
-        val parsed = CertificateFactory.getInstance("X.509")
-            .generateCertificate(ByteArrayInputStream(pem.toByteArray(Charsets.US_ASCII))) as X509Certificate
+        val parsed = parseCertificate(pem) ?: return@runCatching false
         MtlsIdentity.certificate()?.publicKey == parsed.publicKey
     }.getOrDefault(false)
 }
+
+/** A stored PEM as a certificate, or `null` if it will not parse. An unparseable PEM is unusable. */
+private fun parseCertificate(pem: String): X509Certificate? = runCatching {
+    CertificateFactory.getInstance("X.509")
+        .generateCertificate(ByteArrayInputStream(pem.toByteArray(Charsets.US_ASCII))) as X509Certificate
+}.getOrNull()
 
 /**
  * `POST /api/overlay/cert` on the companion session.
