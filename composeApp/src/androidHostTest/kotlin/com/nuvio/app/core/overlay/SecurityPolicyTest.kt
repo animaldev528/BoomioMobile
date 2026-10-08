@@ -48,6 +48,7 @@ class SecurityPolicyTest {
         BootstrapFallback.reset()
         SecurityPolicyRefresh.apiFactory = { null }
         SecurityPolicyRefresh.minIntervalMs = 5 * 60 * 1000L
+        SecurityPolicyRefresh.lastAnswerStale = false
     }
 
     // ── the default is today's behaviour ─────────────────────────────────────────────────────
@@ -303,6 +304,143 @@ class SecurityPolicyTest {
         // Switched off entirely: the overlay or nothing, the pre-existing behaviour.
         BootstrapFallback.enabled = false
         assertFalse(BootstrapFallback.shouldUsePlainHttps(overlayAvailable = false))
+    }
+
+    // ── the HTTPS read, its freshness label, and the transport chain ──────────────────────────
+
+    @Test
+    fun `a 200 decodes the policy and its freshness`() {
+        val answer = decodeSecurityPolicyReply(
+            status = 200,
+            body = """{"policy":{"directLanPlayback":false,"directWanPlayback":true,"mtlsEnforcedOnLan":false,"mtlsEnforcedOnWan":true},"stale":false,"age_ms":0}""",
+        )
+
+        assertEquals(
+            SecurityPolicy(
+                directLanPlayback = false,
+                directWanPlayback = true,
+                mtlsEnforcedOnLan = false,
+                mtlsEnforcedOnWan = true,
+            ),
+            answer?.policy,
+        )
+        assertEquals(false, answer?.stale)
+    }
+
+    @Test
+    fun `a stale 200 is still an answer, and is applied`() {
+        // The case this requirement exists for: bsc served its last known good value after a failed
+        // re-read. That is an ANSWER, not a failure — the values are the ones an admin last saved —
+        // so it must be applied; the only difference from a fresh one is the label.
+        val answer = decodeSecurityPolicyReply(
+            status = 200,
+            body = """{"policy":{"directLanPlayback":false,"directWanPlayback":true,"mtlsEnforcedOnLan":false,"mtlsEnforcedOnWan":false},"stale":true,"age_ms":42000}""",
+        )
+        assertEquals(SecurityPolicy(directLanPlayback = false, directWanPlayback = true), answer?.policy)
+        assertEquals(true, answer?.stale)
+        assertEquals(42_000L, answer?.ageMs)
+
+        // And it survives the whole way to the routing predicate and the observable label, so a
+        // stale answer is provably not treated as a failure anywhere between the wire and the seam.
+        val context = RuntimeEnvironment.getApplication()
+        val stalePolicy = SecurityPolicy(directLanPlayback = false, directWanPlayback = true)
+        SecurityPolicyStore.save(context, SecurityPolicy())
+        SecurityPolicyRefresh.initialize(context)
+        SecurityPolicyRefresh.apiFactory = {
+            securityPolicyApiChain(
+                https = object : SecurityPolicyApi, SecurityPolicyFreshness {
+                    override val lastAnswer = SecurityPolicyAnswer(stalePolicy, stale = true, ageMs = 42_000L)
+                    override suspend fun fetch(): SecurityPolicy = stalePolicy
+                },
+                channel = SecurityPolicyApi { null },
+            )
+        }
+
+        assertTrue(runBlocking { SecurityPolicyRefresh.refresh() })
+        assertEquals(stalePolicy, SecurityPolicyState.current)
+        assertTrue(SecurityPolicyRefresh.lastAnswerStale, "a stale answer must be labelled, not discarded")
+        assertFalse(mayDialDirectly(DirectPlane.LAN), "the stale policy still drives routing")
+    }
+
+    @Test
+    fun `a 503 is no answer and leaves the cached policy in force`() {
+        assertNull(
+            decodeSecurityPolicyReply(
+                status = 503,
+                body = """{"error":"policy unavailable","reason":"policy_unavailable"}""",
+            ),
+        )
+
+        val context = RuntimeEnvironment.getApplication()
+        val cached = SecurityPolicy(directLanPlayback = true, directWanPlayback = true)
+        SecurityPolicyStore.save(context, cached)
+        SecurityPolicyRefresh.initialize(context)
+
+        // Both arms answer nothing — an unavailable server, and no channel either. The cache stays.
+        SecurityPolicyRefresh.apiFactory = {
+            securityPolicyApiChain(https = SecurityPolicyApi { null }, channel = SecurityPolicyApi { null })
+        }
+        assertFalse(runBlocking { SecurityPolicyRefresh.refresh() })
+        assertEquals(cached, SecurityPolicyState.current, "a 503 must not reset the policy")
+    }
+
+    @Test
+    fun `a 401 and a 429 are no answer`() {
+        // Both are "keep what you have": no/invalid bearer, and this device's poll budget spent.
+        assertNull(decodeSecurityPolicyReply(401, ""))
+        assertNull(decodeSecurityPolicyReply(429, """{"error":"Policy read rate limited."}"""))
+    }
+
+    @Test
+    fun `a malformed policy body is no answer`() {
+        // One key missing: not a policy with a hole in it, a body that went wrong. Refuse it.
+        assertNull(
+            decodeSecurityPolicyReply(
+                200,
+                """{"policy":{"directLanPlayback":true,"directWanPlayback":false,"mtlsEnforcedOnLan":false},"stale":false}""",
+            ),
+        )
+        // One key non-boolean: same, and it must not be coerced to the default.
+        assertNull(
+            decodeSecurityPolicyReply(
+                200,
+                """{"policy":{"directLanPlayback":"yes","directWanPlayback":false,"mtlsEnforcedOnLan":false,"mtlsEnforcedOnWan":false}}""",
+            ),
+        )
+        // No `policy` at all; a body that is not an object; one that will not parse.
+        assertNull(decodeSecurityPolicyReply(200, """{"stale":false}"""))
+        assertNull(decodeSecurityPolicyReply(200, "[]"))
+        assertNull(decodeSecurityPolicyReply(200, "not json"))
+    }
+
+    @Test
+    fun `the factory's chain prefers HTTPS and falls back to the channel only on a null answer`() {
+        val httpsPolicy = SecurityPolicy(directLanPlayback = false)
+        val channelPolicy = SecurityPolicy(directLanPlayback = true, directWanPlayback = true)
+
+        var httpsCalls = 0
+        var channelCalls = 0
+        val https = SecurityPolicyApi { httpsCalls++; httpsPolicy }
+        val channel = SecurityPolicyApi { channelCalls++; channelPolicy }
+
+        // HTTPS answers → it is the answer, and the channel is never touched.
+        val both = securityPolicyApiChain(https, channel)!!
+        assertEquals(httpsPolicy, runBlocking { both.fetch() })
+        assertEquals(1, httpsCalls)
+        assertEquals(0, channelCalls, "the channel must not be consulted while HTTPS answers")
+
+        // HTTPS yields null — an unreachable edge, a non-200, a malformed body — so the channel is
+        // reached, and is reached only now.
+        val httpsNull = SecurityPolicyApi { httpsCalls++; null }
+        val fallback = securityPolicyApiChain(httpsNull, channel)!!
+        assertEquals(channelPolicy, runBlocking { fallback.fetch() })
+        assertEquals(2, httpsCalls, "HTTPS is always tried first")
+        assertEquals(1, channelCalls, "the channel answers only because HTTPS was null")
+
+        // One arm absent → the other is used alone; neither → nothing, and the cache stays in force.
+        assertEquals(https, securityPolicyApiChain(https, null))
+        assertEquals(channel, securityPolicyApiChain(null, channel))
+        assertNull(securityPolicyApiChain(null, null))
     }
 }
 

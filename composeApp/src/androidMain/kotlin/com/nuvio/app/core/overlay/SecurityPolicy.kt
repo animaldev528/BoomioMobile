@@ -146,6 +146,28 @@ internal fun parseSecurityPolicy(text: String?): SecurityPolicy? {
     return securityPolicyFrom(element)
 }
 
+/**
+ * Decodes a policy **strictly**: all four keys must be present as booleans, or this answers null.
+ *
+ * ⚠️ **The opposite of [securityPolicyFrom] on purpose, and the difference is the caller.**
+ * [securityPolicyFrom] decodes the local cache and older blobs, where a short object is a *value* to
+ * merge over the defaults. This one decodes a live `200` from `GET /api/overlay/policy`, and the
+ * server has already validated its own record before it answers (`lib/security-policy.js`'s
+ * `accept`). So an object that is not exactly four booleans is not a policy with a hole in it — it is
+ * a body that went wrong on the way (a proxy, a hand-edit, a version skew), and the honest reading of
+ * that is "no answer". Applying a partial object here would silently reset a knob the admin set;
+ * refusing leaves the cached policy in force, which is the direction that cannot loosen routing.
+ */
+internal fun strictSecurityPolicyFrom(obj: JsonObject): SecurityPolicy? {
+    fun bool(key: String): Boolean? = (obj[key] as? JsonPrimitive)?.booleanOrNull
+    return SecurityPolicy(
+        directLanPlayback = bool("directLanPlayback") ?: return null,
+        directWanPlayback = bool("directWanPlayback") ?: return null,
+        mtlsEnforcedOnLan = bool("mtlsEnforcedOnLan") ?: return null,
+        mtlsEnforcedOnWan = bool("mtlsEnforcedOnWan") ?: return null,
+    )
+}
+
 /** The policy as a JSON object, for the persistent cache. */
 internal fun SecurityPolicy.toJsonObject(): JsonObject = JsonObject(
     mapOf(
