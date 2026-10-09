@@ -5,9 +5,10 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
+import com.nuvio.app.core.mtls.hostIsOurs
 import com.nuvio.app.core.mtls.withClientCertificate
 import com.nuvio.app.core.network.IPv4FirstDns
-import com.nuvio.app.core.overlay.OverlayPinRegistry
+import com.nuvio.app.core.overlay.hostOf
 import com.nuvio.app.core.overlay.withOverlayProxy
 import okhttp3.OkHttpClient
 import java.net.HttpURLConnection
@@ -54,7 +55,7 @@ internal object PlayerPlaybackNetworking {
      * accepts any certificate and any hostname, so on this path TLS authenticates
      * nothing. Following a pin here would let an unauthenticated mDNS advert redirect
      * the media stream — and the `Authorization` header riding on it — to whatever LAN
-     * host the advert named. Pinned hosts use [pinnedPlaybackHttpClient] instead.
+     * host the advert named. Our own hosts use [ownServerPlaybackHttpClient] instead.
      */
     private val playbackHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -73,8 +74,7 @@ internal object PlayerPlaybackNetworking {
     }
 
     /**
-     * The validating twin, selected only when the source host is one we pinned
-     * ourselves.
+     * The validating twin, selected when the source host is one **our own server answers for**.
      *
      * Identical timeouts, redirects and interceptor to [playbackHttpClient]; the single
      * difference is that TLS is left at the platform default, so following the pin is
@@ -89,8 +89,20 @@ internal object PlayerPlaybackNetworking {
      * trust-all factory and lose the SSLException fallback that exists for third-party sources.
      * Before 2026-10-09 playback carried no certificate at all, which was half of why "every rung
      * presents the cert" was false for the media plane.
+     *
+     * ⚠️ **The selector is host *identity*, not pin presence — corrected 2026-10-09.** It used to
+     * be `OverlayPinRegistry.isPinnedHost(sourceUrl)`, which asked two different questions at once:
+     * *may this caller follow the pin (a DNS override)?* and *must this caller present our
+     * certificate?* Only the first needs a pin. Tying the certificate to one meant that the moment
+     * the pin went away — a browse that found nothing, an arm the policy suppressed — the app
+     * reclassified **its own media host** as a third-party host and silently stopped offering the
+     * certificate. Measured: four `403 client_certificate_required` on `/bss-dav/proxy/…` while
+     * keystore2 logged no `create_operation` at all, i.e. the key was never asked to sign. The
+     * predicate is now the one the handshake watch already uses, and it covers the media plane's
+     * hosts (`bss-dav`, `bss-tor`, `nzbdav`) by registrable domain rather than by enumeration.
+     * A URL with no parseable host, or an IP literal, is **not** ours and stays on [playbackHttpClient].
      */
-    private val pinnedPlaybackHttpClient: OkHttpClient by lazy {
+    private val ownServerPlaybackHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .dns(IPv4FirstDns())
             .withOverlayProxy()
@@ -125,11 +137,18 @@ internal object PlayerPlaybackNetworking {
         sourceUrl: String? = null,
     ): DataSource.Factory {
         val requestHeaders = sanitizeHeaders(defaultHeaders)
-        // A loopback source is 127.0.0.1 and can never be a pinned host, so the
-        // long-read-timeout client needs no pinned twin.
+        // A loopback source is 127.0.0.1 and can never be one of our hosts, so the
+        // long-read-timeout client needs no validating twin.
+        //
+        // ⚠️ **Identity, not pin presence.** See [ownServerPlaybackHttpClient] for why this is not
+        // `OverlayPinRegistry.isPinnedHost`: the certificate must not depend on whether a pin
+        // happens to exist this second. `hostOf` returns null for a blank or unparseable URL and a
+        // bare address is never in `serverHosts`, so both fall to [playbackHttpClient], the
+        // trust-all client — the same place they landed before.
+        val ownsSource = sourceUrl?.let { hostOf(it) }?.let { hostIsOurs(it) } == true
         val baseClient = when {
             useLongReadTimeout -> loopbackPlaybackHttpClient
-            sourceUrl != null && OverlayPinRegistry.isPinnedHost(sourceUrl) -> pinnedPlaybackHttpClient
+            ownsSource -> ownServerPlaybackHttpClient
             else -> playbackHttpClient
         }
         val client = requestHeaders.headerValue("Authorization")?.let { authorization ->
