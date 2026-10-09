@@ -115,6 +115,8 @@ import nuvio.composeapp.generated.resources.companion_pl_error_timeout
 import nuvio.composeapp.generated.resources.companion_pl_sync
 import nuvio.composeapp.generated.resources.companion_pl_sync_hint
 import nuvio.composeapp.generated.resources.companion_pl_sync_ms
+import nuvio.composeapp.generated.resources.companion_pl_tv_speakers
+import nuvio.composeapp.generated.resources.companion_pl_tv_speakers_hint
 import nuvio.composeapp.generated.resources.companion_private_listening
 import nuvio.composeapp.generated.resources.companion_private_listening_hint
 import nuvio.composeapp.generated.resources.companion_private_listening_on
@@ -868,6 +870,10 @@ private fun PrivateListeningToggle() {
                     onCheckedChange = { PrivateListeningSession.toggle() },
                 )
             }
+            // The TV's own speakers are the phone's call — there is no switch for
+            // them on the TV — so this is shown whenever private listening exists:
+            // set it before arming, or flip it mid-session.
+            PrivateListeningTvSpeakersToggle()
             // Only reachable while audio is actually forking — tune against the
             // live TV picture; releasing the thumb re-cushions at the new delay
             // (a brief gap, then audio at the new latency).
@@ -875,6 +881,47 @@ private fun PrivateListeningToggle() {
                 AudioSyncSlider()
             }
         }
+    }
+}
+
+/**
+ * Whether the TV keeps playing through its own speakers while it forks audio to this
+ * phone. The TV has no switch of its own, so this is the only control for it. The value
+ * is persisted and rides every arm; flipping it while a fork is live reaches the TV
+ * immediately — the TV applies it without rebuilding the tee, so the phone's audio
+ * never gaps.
+ */
+@Composable
+private fun PrivateListeningTvSpeakersToggle() {
+    val keepTvAudio by PrivateListeningSession.tvSpeakersEnabled.collectAsStateWithLifecycle()
+    val label = stringResource(Res.string.companion_pl_tv_speakers)
+    val hint = stringResource(Res.string.companion_pl_tv_speakers_hint)
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            Switch(
+                checked = keepTvAudio,
+                onCheckedChange = { PrivateListeningSession.setTvSpeakersEnabled(it) },
+            )
+        }
+        Text(
+            hint,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

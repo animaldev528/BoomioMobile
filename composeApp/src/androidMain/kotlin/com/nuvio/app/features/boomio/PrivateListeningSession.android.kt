@@ -19,6 +19,7 @@ import kotlinx.coroutines.withTimeout
 
 private const val PREFS_NAME = "nuvio_private_listening"
 private const val SYNC_OFFSET_KEY = "sync_offset_ms"
+private const val TV_SPEAKERS_KEY = "tv_speakers_enabled"
 
 /**
  * Android actual of [PrivateListeningSession].
@@ -51,19 +52,27 @@ actual object PrivateListeningSession {
     private val _syncOffsetMs = MutableStateFlow(0)
     actual val syncOffsetMs: StateFlow<Int> = _syncOffsetMs.asStateFlow()
 
+    private val _tvSpeakersEnabled = MutableStateFlow(false)
+    actual val tvSpeakersEnabled: StateFlow<Boolean> = _tvSpeakersEnabled.asStateFlow()
+
     @Volatile private var appContext: Context? = null
 
     private var ackJob: Job? = null
     private var linkWatchJob: Job? = null
     @Volatile private var receiver: ForkUdpReceiver? = null
 
+    /** Endpoint of the last arm — lets a mid-fork preference change re-announce it. */
+    @Volatile private var armedIp: String? = null
+    @Volatile private var armedPort: Int = 0
+
     /** App-lifetime Context for the foreground service + persisted sync offset. */
     fun initialize(context: Context) {
         appContext = context.applicationContext
-        _syncOffsetMs.value = appContext
-            ?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            ?.getInt(SYNC_OFFSET_KEY, 0)
-            ?: 0
+        val prefs = appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        _syncOffsetMs.value = prefs?.getInt(SYNC_OFFSET_KEY, 0) ?: 0
+        // Off by default: a fork the viewer started for *private* listening should not leave
+        // the room audible. The switch sits under the private-listening toggle to turn it back on.
+        _tvSpeakersEnabled.value = prefs?.getBoolean(TV_SPEAKERS_KEY, false) ?: false
     }
 
     actual fun setSyncOffsetMs(offsetMs: Int) {
@@ -73,6 +82,23 @@ actual object PrivateListeningSession {
             ?.putInt(SYNC_OFFSET_KEY, offsetMs)
             ?.apply()
         receiver?.setSyncOffsetMs(offsetMs)
+    }
+
+    actual fun setTvSpeakersEnabled(enabled: Boolean) {
+        _tvSpeakersEnabled.value = enabled
+        appContext?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putBoolean(TV_SPEAKERS_KEY, enabled)
+            ?.apply()
+        // Mid-fork, re-announce the arm carrying the new preference. The TV recognises the
+        // endpoint it is already forking to and applies the flag without rebuilding the tee,
+        // so the phone's audio never gaps. While idle there is nothing to tell — the value
+        // rides the next arm.
+        if (_state.value.status == PrivateListeningStatus.Active) {
+            val ip = armedIp
+            val port = armedPort
+            if (ip != null && port > 0) CompanionBridge.startAudioFork(ip, port, enabled)
+        }
     }
 
     actual fun toggle() {
@@ -91,6 +117,7 @@ actual object PrivateListeningSession {
         ackJob?.cancel(); ackJob = null
         linkWatchJob?.cancel(); linkWatchJob = null
         receiver?.close(); receiver = null
+        armedIp = null; armedPort = 0
         _state.value = PrivateListeningUiState(status = PrivateListeningStatus.Stopping)
         // Harmless when nothing armed; clears a partial arm / unwinds a live fork.
         CompanionBridge.stopAudioFork()
@@ -124,7 +151,9 @@ actual object PrivateListeningSession {
         // land on an unsubscribed flow, then send the arm.
         val waiter = CompanionBridge.registerAudioForkAckWaiter()
         log.i { "Private listening arm -> $ip:$port" }
-        CompanionBridge.startAudioFork(ip, port)
+        armedIp = ip
+        armedPort = port
+        CompanionBridge.startAudioFork(ip, port, _tvSpeakersEnabled.value)
 
         // Tear down if the companion link dies at any point (the hub already
         // stopped the fork on the TV via its heartbeat timeout by then).
@@ -176,6 +205,7 @@ actual object PrivateListeningSession {
         ackJob?.cancel(); ackJob = null
         linkWatchJob?.cancel(); linkWatchJob = null
         receiver?.close(); receiver = null
+        armedIp = null; armedPort = 0
     }
 
     /** Promote the foreground service while Active; drop it otherwise. */

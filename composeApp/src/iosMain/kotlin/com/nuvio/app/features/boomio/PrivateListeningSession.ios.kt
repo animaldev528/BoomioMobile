@@ -13,13 +13,20 @@ actual object PrivateListeningSession {
         PrivateListeningUiState(status = PrivateListeningStatus.Unsupported),
     )
     private val _syncOffsetMs = MutableStateFlow(0)
+    private val _tvSpeakersEnabled = MutableStateFlow(false)
 
     actual val state: StateFlow<PrivateListeningUiState> = _state.asStateFlow()
 
     actual val syncOffsetMs: StateFlow<Int> = _syncOffsetMs.asStateFlow()
 
+    actual val tvSpeakersEnabled: StateFlow<Boolean> = _tvSpeakersEnabled.asStateFlow()
+
     actual fun setSyncOffsetMs(offsetMs: Int) {
         _syncOffsetMs.value = offsetMs
+    }
+
+    actual fun setTvSpeakersEnabled(enabled: Boolean) {
+        _tvSpeakersEnabled.value = enabled
     }
 
     actual fun toggle() = Unit

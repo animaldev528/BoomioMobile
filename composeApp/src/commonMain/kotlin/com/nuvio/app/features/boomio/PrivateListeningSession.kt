@@ -91,4 +91,17 @@ expect object PrivateListeningSession {
 
     /** Adjust [syncOffsetMs] (persisted, live-applied to an active fork). */
     fun setSyncOffsetMs(offsetMs: Int)
+
+    /**
+     * Whether the TV keeps playing through its own speakers while it forks audio to
+     * this phone. This switch is the only one — the TV has no setting of its own —
+     * so it is what decides whether the room hears the programme too.
+     *
+     * Persisted on the phone; false by default, because a fork the viewer started
+     * for *private* listening should not leave the room audible.
+     */
+    val tvSpeakersEnabled: StateFlow<Boolean>
+
+    /** Set [tvSpeakersEnabled] (persisted, live-applied to an active fork). */
+    fun setTvSpeakersEnabled(enabled: Boolean)
 }

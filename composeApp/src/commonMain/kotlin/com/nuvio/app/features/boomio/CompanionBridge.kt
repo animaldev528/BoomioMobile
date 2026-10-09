@@ -349,9 +349,19 @@ object CompanionBridge {
      * at [ip]:[port]. [ip] must be the phone's actual LAN IPv4 (the TV rejects
      * anything off its own subnet with `different_network`) and [port] the
      * already-bound receiver's local port — the hub relays both as supplied.
+     *
+     * [keepTvAudio] is the phone's "play on the TV too" choice. It rides this frame because
+     * the TV needs it at arm time, and re-sending the frame to the same `ip:port` is how a
+     * mid-session change is delivered: the TV sees the endpoint it is already forking to and
+     * applies the flag without rebuilding the tee.
      */
-    fun startAudioFork(ip: String, port: Int) =
-        sendFrame { put("type", "audio_fork_start"); put("phoneIp", ip); put("port", port) }
+    fun startAudioFork(ip: String, port: Int, keepTvAudio: Boolean) =
+        sendFrame {
+            put("type", "audio_fork_start")
+            put("phoneIp", ip)
+            put("port", port)
+            put("keepTvAudio", keepTvAudio)
+        }
 
     /** Ask the paired TV to stop forking its audio to this phone. */
     fun stopAudioFork() =
