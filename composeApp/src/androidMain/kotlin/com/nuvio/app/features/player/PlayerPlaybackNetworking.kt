@@ -5,6 +5,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
+import com.nuvio.app.core.mtls.withClientCertificate
 import com.nuvio.app.core.network.IPv4FirstDns
 import com.nuvio.app.core.overlay.OverlayPinRegistry
 import com.nuvio.app.core.overlay.withOverlayProxy
@@ -79,11 +80,21 @@ internal object PlayerPlaybackNetworking {
      * difference is that TLS is left at the platform default, so following the pin is
      * safe. This costs nothing on the path it serves: the user's own hosts present real
      * certificates (verified live in A1), and third-party hosts never reach it.
+     *
+     * ⚠️ **This is the one client in this file that carries the client certificate, and the
+     * pairing is not a coincidence.** It is the only playback client that follows a pin, and a pin
+     * is only followed under real certificate validation — `withClientCertificate()` installs the
+     * *platform* trust manager alongside the certificate, which is exactly the property a pinned
+     * dial needs. [playbackHttpClient] above must never take it: there it would replace the
+     * trust-all factory and lose the SSLException fallback that exists for third-party sources.
+     * Before 2026-10-09 playback carried no certificate at all, which was half of why "every rung
+     * presents the cert" was false for the media plane.
      */
     private val pinnedPlaybackHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .dns(IPv4FirstDns())
             .withOverlayProxy()
+            .withClientCertificate()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
