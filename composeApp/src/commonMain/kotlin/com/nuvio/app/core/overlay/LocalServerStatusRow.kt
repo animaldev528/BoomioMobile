@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import com.nuvio.app.core.ui.nuvio
 import nuvio.composeapp.generated.resources.Res
+import nuvio.composeapp.generated.resources.server_direct_found
 import nuvio.composeapp.generated.resources.server_local_found
 import nuvio.composeapp.generated.resources.server_local_searching
 import nuvio.composeapp.generated.resources.server_local_unavailable
@@ -41,6 +42,13 @@ internal fun LocalServerStatusRow(
         is LocalServerStatus.Found -> when (status.source) {
             LocalServerSource.LAN -> stringResource(Res.string.server_local_found, status.address)
             LocalServerSource.TUNNEL -> stringResource(Res.string.server_overlay_found, status.address)
+            // ⚠️ **Not "local", and the distinction is the whole reason this is a separate
+            // string.** This address came from the discovery record and is the server's *public*
+            // one; calling it local would send a user looking on their own network for a machine
+            // that is not on it. Nothing publishes this state today — the WAN pin is placed by
+            // `OverlayEndpointDiscovery.applyServicePins`, which does not own a status slot — so
+            // this branch exists to keep the `when` exhaustive rather than because it renders.
+            LocalServerSource.WAN -> stringResource(Res.string.server_direct_found, status.address)
         }
         LocalServerStatus.Searching ->
             if (showUnavailable) stringResource(Res.string.server_local_searching) else null

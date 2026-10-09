@@ -17,6 +17,46 @@ package com.nuvio.app.features.boomio
  * the boomio plane yet.
  */
 object BoomioConfig {
+
+    /**
+     * The **service origin** — one name, and every boomio URL in this object is built from it.
+     *
+     * ⚠️ **One seam, not four setters with four call sites.** The four base URLs below are the same
+     * host with four path prefixes (`/bsc`, `/bsf`, `/bss-iptv`, `/bsm`); assigning them
+     * individually would let a discovery result land on three of them and miss the fourth, and the
+     * miss would be silent — the seam's consumers no-op on a blank base rather than failing. The
+     * setter re-derives all four from one value, so they cannot disagree.
+     *
+     * ⚠️ **The baked value here is a floor, not the source.** Discovery overwrites it from the
+     * record's `svc=` field the moment a publication is read, which is what makes the DuckDNS name
+     * drive the client's URLs rather than a compile-time constant — the point of the whole v2
+     * record.
+     *
+     * ⚠️ **Do not read this as "the companion seam can never be blank at cold start" — it can.**
+     * Assigning the initializer does not run the setter (see below), so construction leaves the four
+     * bases exactly as the generated config left them; on a build with no `BOOMIO_*` entry in
+     * `local.properties` they are empty until discovery lands. The floor that actually prevents a
+     * brick is the *overlay* pair — the baked endpoint and the baked server pubkey, which are what
+     * get a tunnel up in the first place. The order is tunnel → record → this setter → the four
+     * bases, so a blank base is a state the app passes through, not one it is stuck in, provided
+     * the overlay pair is baked. A build that bakes neither is broken by construction, not by a
+     * missing default here.
+     *
+     * ⚠️ **Assigning the initializer does not run the setter**, so the four bases are *not* rebuilt
+     * at construction: a build whose `local.properties` names a different host keeps it until
+     * discovery learns otherwise. That ordering is deliberate — it means this field can be
+     * introduced without changing the behaviour of any existing build.
+     */
+    var serviceOrigin: String = DEFAULT_SERVICE_ORIGIN
+        set(value) {
+            val normalised = value.trim().trimEnd('/')
+            // A blank assignment would strip every base URL to a bare path and disable the seams
+            // in a way that looks like "no server configured" rather than like a bug. Refuse it.
+            if (normalised.isBlank()) return
+            field = normalised
+            applyServiceOrigin(normalised)
+        }
+
     /** Base URL of the boomio media plane (bsf), e.g. `https://bsf.example.com`. */
     var boomioBaseUrl: String = ""
 
@@ -187,6 +227,39 @@ object BoomioConfig {
 
     /** True when the live IPTV edge is configured ([iptvBaseUrl] is set). */
     fun iptvEnabled(): Boolean = iptvBaseUrl.isNotBlank()
+
+    /**
+     * Rebuilds the four base URLs from [origin], each with the path prefix the collapsed edge
+     * serves it under.
+     *
+     * ⚠️ **The prefixes are not decoration.** Every boomio service is a site block behind one
+     * Caddy, told apart by path rather than by host, so the prefix is part of the address. The
+     * companion one is *also* the scheme conversion: the bridge is a WebSocket and Ktor refuses an
+     * `https://` scheme for it, while [companionRestBaseUrl] converts back for REST — so storing
+     * `wss://…/bsc` here is what keeps both halves working from one value.
+     */
+    private fun applyServiceOrigin(origin: String) {
+        companionBaseUrl = origin.toWebSocketScheme() + "/bsc"
+        iptvBaseUrl = "$origin/bss-iptv"
+        boomioBaseUrl = "$origin/bsf"
+        bsmBaseUrl = "$origin/bsm"
+    }
+}
+
+/**
+ * The host every boomio URL falls back to when no publication has been read.
+ *
+ * Public DNS, and deliberately so: a client that has never reached this server has never read a
+ * record, so there is nothing to discover a name *from*. The discovery record (`boomio-prov`) is
+ * what supplies the real one, including on a deployment that renames its service origin.
+ */
+private const val DEFAULT_SERVICE_ORIGIN = "https://boomio.duckdns.org"
+
+/** `https://…` → `wss://…`, and `http://…` → `ws://…`; anything else is passed through unchanged. */
+private fun String.toWebSocketScheme(): String = when {
+    startsWith("https://") -> "wss://" + removePrefix("https://")
+    startsWith("http://") -> "ws://" + removePrefix("http://")
+    else -> this
 }
 
 /** REST (`https://`) variant of [BoomioConfig.companionBaseUrl] for the bsc companion API. */

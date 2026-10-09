@@ -386,6 +386,12 @@
          server is, and the overlay one is reached through a tunnel from anywhere. -->
     <string name="server_local_found">Local server detected — %1$s</string>
     <string name="server_overlay_found">Overlay tunnel — %1$s</string>
+    <!-- The third Found string, and it names neither "local" nor the tunnel on purpose: this
+         address is the server's *public* one, published in the discovery record. Saying
+         "local" would send a user looking on their own network for a machine that is not on
+         it. Nothing publishes this state yet; the string exists so the row's `when` stays
+         exhaustive now that `LocalServerSource` has a third arm. -->
+    <string name="server_direct_found">Server reached directly — %1$s</string>
     <string name="server_local_searching">Looking for a server on this network…</string>
     <string name="server_local_unavailable">No local server on this network (%1$s)</string>
     <!-- The endpoint ladder (architecture §4.4). Authored in the default locale only, like the

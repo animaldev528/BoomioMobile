@@ -3,6 +3,8 @@ package com.nuvio.app.core.network
 import android.app.Application
 import com.nuvio.app.core.overlay.LocalServerSource
 import com.nuvio.app.core.overlay.OverlayPinRegistry
+import com.nuvio.app.core.overlay.SecurityPolicy
+import com.nuvio.app.core.overlay.SecurityPolicyState
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -30,12 +32,18 @@ class IPv4FirstDnsTest {
     private val publicHost = "bsc.tracemonkey.org"
     private val pinned = InetAddress.getByName("192.168.68.65")
     private val overlay = InetAddress.getByName("10.77.0.1")
+    private val wan = InetAddress.getByName("209.107.100.169")
     private val publicV4 = InetAddress.getByName("203.0.113.10") as Inet4Address
     private val publicV6 = InetAddress.getByName("2001:db8::1") as Inet6Address
+
+    /** Production's own value, restored after every test — the suppression tests below write it. */
+    private val wasCarriesTraffic = OverlayPinRegistry.ownTunnelCarriesTraffic
 
     @AfterTest
     fun tearDown() {
         OverlayPinRegistry.clearAll()
+        OverlayPinRegistry.ownTunnelCarriesTraffic = wasCarriesTraffic
+        SecurityPolicyState.reset()
     }
 
     private fun dnsOf(vararg answers: InetAddress) = IPv4FirstDns(
@@ -206,5 +214,67 @@ class IPv4FirstDnsTest {
         OverlayPinRegistry.clear(LocalServerSource.TUNNEL)
 
         assertEquals(pinned, dnsOf(publicV4).lookup(publicHost).first())
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The two direct planes — the v2 chain, at the seam that actually carries it
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    fun `both direct pins come before the delegate, LAN then WAN`() {
+        // ⚠️ **The owner's "tries the lan ip first, then the wan", end to end.** The service name's
+        // public `A` record is the server's *private* address, so off-LAN the name resolves to
+        // something undialable and the discovery record's `wan=` literal is the only way to the HTTP
+        // plane. Handing the connect both addresses is what makes that survive: a private address on
+        // a foreign network is refused immediately, so trying it first costs nothing.
+        //
+        // ⚠️ `directWanPlayback` must be loosened first: it defaults `false`, and that toggle
+        // suppresses the WAN arm. Absent that, this returns the LAN pin alone.
+        SecurityPolicyState.apply(SecurityPolicy(directWanPlayback = true))
+        val serviceName = "boomio.duckdns.org"
+        OverlayPinRegistry.pin(LocalServerSource.WAN, listOf(serviceName), wan)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(serviceName), pinned)
+
+        assertEquals(listOf(pinned, wan, publicV4), dnsOf(publicV4).lookup(serviceName))
+    }
+
+    @Test
+    fun `a forbidden WAN arm leaves the LAN pin answering alone`() {
+        // The default policy on this deployment, at the seam. It is the toggle working — but see
+        // `OverlayPinRegistry.isSuppressed` for why the server's premise for that default no longer
+        // holds for the v2 origin.
+        val serviceName = "boomio.duckdns.org"
+        OverlayPinRegistry.pin(LocalServerSource.WAN, listOf(serviceName), wan)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(serviceName), pinned)
+
+        assertEquals(listOf(pinned, publicV4), dnsOf(publicV4).lookup(serviceName))
+    }
+
+    @Test
+    fun `the chain is returned in full when system dns fails`() {
+        // The no-LAN-DNS case the whole design exists for: a stranger's house has no resolver entry
+        // for the service name, so the pin chain *is* the answer. Returning only the first would
+        // strand an off-LAN device on an address it cannot reach.
+        SecurityPolicyState.apply(SecurityPolicy(directWanPlayback = true))
+        val serviceName = "boomio.duckdns.org"
+        OverlayPinRegistry.pin(LocalServerSource.WAN, listOf(serviceName), wan)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(serviceName), pinned)
+
+        assertEquals(listOf(pinned, wan), failingDns().lookup(serviceName))
+    }
+
+    @Test
+    fun `while our own tunnel carries traffic the seam falls through to the system resolver`() {
+        // Both direct arms stand down together — see `OverlayPinRegistry`. A WAN pin left answering
+        // here would quietly put every name on the public edge while a healthy tunnel carried
+        // nothing, and it would look like success because the edge answers too.
+        SecurityPolicyState.apply(SecurityPolicy(directWanPlayback = true))
+        val serviceName = "boomio.duckdns.org"
+        OverlayPinRegistry.pin(LocalServerSource.WAN, listOf(serviceName), wan)
+        OverlayPinRegistry.pin(LocalServerSource.LAN, listOf(serviceName), pinned)
+
+        OverlayPinRegistry.ownTunnelCarriesTraffic = { true }
+
+        assertEquals(listOf(publicV4), dnsOf(publicV4).lookup(serviceName))
     }
 }
