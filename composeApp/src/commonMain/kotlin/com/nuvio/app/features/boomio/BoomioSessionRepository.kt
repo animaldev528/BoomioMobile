@@ -288,20 +288,26 @@ object BoomioSessionRepository {
                 val authUser = AuthRepository.state.value as? AuthState.Authenticated
                 val request = requestDeviceCode()
 
-                // Best-effort self-approve, and only when there is an identity to do
-                // it with. On an edge that gates /v1/auth/pair
-                // (requireInternalKeyStrict — approval mints a 90-day session),
-                // this answers 401. That is NOT a failure of the link flow: the
-                // code is already live in Redis, so fall through to the human
-                // approval path and let whoever opens `verification_uri` (bsm
-                // /tv) complete the pair. The poll below picks up the token
-                // either way, so this stays a one-tap flow wherever the edge
-                // still permits self-approve.
+                // Best-effort self-approve. Two things can authorise it, and the
+                // request carries whichever the device has:
                 //
-                // ⚠️ A null [authUser] short-circuits to the human path rather than
-                // failing the flow. That is the signed-out device, which is the case
-                // this flow exists for.
-                val selfApproved = if (authUser == null) {
+                //  • the Nuvio identity it is signed in with, and
+                //  • its own live companion session — the proof that matters for an
+                //    ALREADY-approved device. Signing out of the Nuvio account does
+                //    not unlink the device ([unlink] is what clears the token), so
+                //    that session survives and re-linking costs no human tap. Only a
+                //    first-ever link, or an explicit unlink, reaches the approver.
+                //
+                // An edge that still gates /v1/auth/pair against both answers 401.
+                // That is NOT a failure of the link flow: the code is already live
+                // in Redis, so fall through to the human approval path and let
+                // whoever opens `verification_uri` (bsm /tv) complete the pair. The
+                // poll below picks up the token either way.
+                //
+                // ⚠️ With neither an identity nor a session there is nothing to prove,
+                // so the flow goes straight to the human path rather than failing.
+                // That is the fresh install, which is the case this flow exists for.
+                val selfApproved = if (authUser == null && bearerToken() == null) {
                     false
                 } else {
                     try {
@@ -457,16 +463,27 @@ object BoomioSessionRepository {
         throw BoomioSessionException("device request failed: HTTP ${response.status.value}")
     }
 
-    private suspend fun selfApprove(userCode: String, authUser: AuthState.Authenticated) {
+    private suspend fun selfApprove(userCode: String, authUser: AuthState.Authenticated?) {
         val metadata = currentDeviceClientMetadata()
+        // The device's own companion session, when it still has one. This is the
+        // credential bsc accepts for an already-approved device, and it is the one
+        // that survives an account sign-out — so it, not [authUser], is what makes
+        // the ordinary re-link a single tap. Absent on a first link and after an
+        // explicit unlink, where the request falls through to human approval.
+        val deviceSession = bearerToken()
         val response = http.post("${BoomioConfig.companionRestBaseUrl}/api/v1/auth/pair") {
             contentType(ContentType.Application.Json)
+            if (!deviceSession.isNullOrBlank()) {
+                header(HttpHeaders.Authorization, "Bearer $deviceSession")
+            }
             setBody(
                 json.encodeToString(
                     PairPayload(
                         code = userCode,
-                        user_id = authUser.userId,
-                        username = authUser.email?.substringBefore("@"),
+                        // Empty when the device is signed out of Nuvio; bsc then
+                        // binds it to whoever its companion session says it is.
+                        user_id = authUser?.userId.orEmpty(),
+                        username = authUser?.email?.substringBefore("@"),
                         display_name = metadata.deviceName,
                     ),
                 ),
