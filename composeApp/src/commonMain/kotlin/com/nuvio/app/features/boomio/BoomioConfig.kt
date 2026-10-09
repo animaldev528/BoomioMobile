@@ -3,18 +3,18 @@ package com.nuvio.app.features.boomio
 /**
  * Runtime configuration for the boomio media-plane integration seam.
  *
- * Both URLs default to blank, which keeps the seam **inert**: [BoomioStreamResolver]
- * and [BsmRatingGate] no-op when their respective base URL is blank, leaving the
- * existing addon/debrid resolvers as the primary stream sources.
+ * ⚠️ **The base URLs are not blank by default — they floor on [BOOMIO_SERVICE_HOST].** The `init`
+ * block below derives all four from [serviceOrigin], so a build that names no host still points at
+ * the live service rather than at the empty string its seams no-op on. Blanking a base
+ * *deliberately* still disables its seam: [BoomioStreamResolver] and [BsmRatingGate] no-op when
+ * their base URL is blank, leaving the existing addon/debrid resolvers as the primary stream
+ * sources.
  *
  * These are deliberately mutable vars rather than build-time constants so the
  * host application can inject them at startup from its own config source
- * (BuildConfig / gradle properties / env), matching the legacy
- * `BuildConfig.BOOMIO_BASE_URL` / `BuildConfig.BSM_BASE_URL` wiring. Nothing here
+ * (BuildConfig / gradle properties / env). A build value overrides the base it names;
+ * [serviceOrigin] is the one knob that moves all four together. Nothing here
  * is read from a secret store or inlined — assign the values at app start.
- *
- * NOTE: this is a static, uncompiled port; the seam has not been exercised against
- * the boomio plane yet.
  */
 object BoomioConfig {
 
@@ -32,20 +32,17 @@ object BoomioConfig {
      * drive the client's URLs rather than a compile-time constant — the point of the whole v2
      * record.
      *
-     * ⚠️ **Do not read this as "the companion seam can never be blank at cold start" — it can.**
-     * Assigning the initializer does not run the setter (see below), so construction leaves the four
-     * bases exactly as the generated config left them; on a build with no `BOOMIO_*` entry in
-     * `local.properties` they are empty until discovery lands. The floor that actually prevents a
-     * brick is the *overlay* pair — the baked endpoint and the baked server pubkey, which are what
-     * get a tunnel up in the first place. The order is tunnel → record → this setter → the four
-     * bases, so a blank base is a state the app passes through, not one it is stuck in, provided
-     * the overlay pair is baked. A build that bakes neither is broken by construction, not by a
-     * missing default here.
+     * ⚠️ **Construction runs this setter once, so the four bases are never blank.** The `init`
+     * block at the end of this object assigns [DEFAULT_SERVICE_ORIGIN] through this setter, which
+     * derives all four prefixes from the one name before anything can read them. A build with no
+     * `BOOMIO_*` entry in `local.properties` therefore gets a working floor instead of empty strings
+     * the seams silently no-op on; a non-blank build value for one base still overrides that base
+     * alone, so a build aimed at a different deployment is unaffected.
      *
-     * ⚠️ **Assigning the initializer does not run the setter**, so the four bases are *not* rebuilt
-     * at construction: a build whose `local.properties` names a different host keeps it until
-     * discovery learns otherwise. That ordering is deliberate — it means this field can be
-     * introduced without changing the behaviour of any existing build.
+     * ⚠️ **That floor is a starting point, not a source of truth.** Until discovery reads a record
+     * the service URLs are the compile-time name; afterwards they are the record's `svc=`. A build
+     * that bakes a *stale* per-service host still beats the floor — which is why the per-service
+     * keys are the wrong knob once the edge is collapsed onto one name. The origin is the knob.
      */
     var serviceOrigin: String = DEFAULT_SERVICE_ORIGIN
         set(value) {
@@ -102,7 +99,7 @@ object BoomioConfig {
      * the overlay resolver entirely.
      *
      * ⚠️ **This is an address, not a URL and not a hostname.** The app never *dials* it:
-     * every request keeps naming the collapsed edge host (e.g. `boomio.tracemonkey.org`)
+     * every request keeps naming the collapsed edge host ([BOOMIO_SERVICE_HOST])
      * and Caddy picks the site block from that name, so a bare address has nothing to
      * match and fails TLS. All this
      * value does is tell the DNS seam what those names should resolve to while the
@@ -178,9 +175,15 @@ object BoomioConfig {
      * is what names resolve to. This one is where the *tunnel's UDP* goes, in the clear, over
      * whatever network the device is on. Different planes, different addresses.
      *
-     * In the end state this is **discovered**, not configured — the ladder in architecture
-     * §4.4 tries mDNS, then `boomio-local`, then asks the user. This field is what a debug
+     * In the end state this is **discovered**, not configured — the ladder tries mDNS, then the
+     * discovery record's `lan=`/`wan=` literals, then asks the user. This field is what a debug
      * build bakes in so the transport can be exercised before that ladder exists.
+     *
+     * ⚠️ **Never floor this to [BOOMIO_SERVICE_HOST].** After the collapse that name's `A` record is
+     * the server's *private* address, so a baked `boomio.duckdns.org:51820` is a dial target that
+     * works on the LAN and is unroutable off it — the trap the ladder exists to avoid. The published
+     * literals are the only correct endpoints, and a blank here leaves the tunnel inert rather than
+     * pointed somewhere wrong.
      *
      * Sourced from `BOOMIO_OVERLAY_ENDPOINT` in `local.properties`.
      */
@@ -244,16 +247,54 @@ object BoomioConfig {
         boomioBaseUrl = "$origin/bsf"
         bsmBaseUrl = "$origin/bsm"
     }
+
+    /**
+     * Establishes the one-name floor, then lets a build override each base individually.
+     *
+     * ⚠️ **This block exists because assigning [serviceOrigin]'s initializer does not run its
+     * setter.** Without it the four bases are whatever the generated config left them — empty on a
+     * build with no `BOOMIO_*` entry in `local.properties`, which reads downstream as "no server
+     * configured" rather than as a build that simply never named one. Running the derivation at
+     * construction is what makes the floor real, and it is the fix for the floor that shipped
+     * pointing at the retired pre-collapse hosts: the *source* floor is now the one live name.
+     *
+     * ⚠️ **The order is the whole content of this block.** The floor is applied first and each build
+     * value second, so a build that names a host wins and a build that names none still gets the one
+     * name. It must stay the last thing in the object body — a build value assigned before the floor
+     * would be silently overwritten by it.
+     */
+    init {
+        serviceOrigin = DEFAULT_SERVICE_ORIGIN
+        BoomioCompanionConfig.BASE_URL.trim().takeIf { it.isNotEmpty() }?.let { companionBaseUrl = it }
+        BoomioIptvConfig.BASE_URL.trim().takeIf { it.isNotEmpty() }?.let { iptvBaseUrl = it }
+    }
 }
 
 /**
- * The host every boomio URL falls back to when no publication has been read.
+ * **The one name.** The service origin, the discovery record, and the same string.
+ *
+ * ⚠️ **One constant, because they are one name.** [DEFAULT_SERVICE_ORIGIN] is every boomio URL's
+ * pre-discovery floor, and `OverlayEndpointDiscovery.PROV_RECORD` is the name rung 2 resolves;
+ * before the edge collapse those were two names maintained in two files, and a deployment that
+ * renamed one and not the other failed rung 2 for a reason that had nothing to do with DNS. They
+ * are one constant now, declared here in `commonMain` so the android-only discovery package can see
+ * it, and a deployment that renames its origin moves both at once or neither.
+ *
+ * ⚠️ **It is not a dial target off-LAN.** The published `A` record holds the server's *private*
+ * address, so the name is reachable on the LAN and unroutable off it. An off-LAN client dials the
+ * `wan=` literal out of the TXT record while keeping SNI and `Host` on this name — which is why
+ * this constant must never be baked as an *endpoint*, only used as an origin.
+ */
+internal const val BOOMIO_SERVICE_HOST = "boomio.duckdns.org"
+
+/**
+ * The origin every boomio URL falls back to when no publication has been read.
  *
  * Public DNS, and deliberately so: a client that has never reached this server has never read a
- * record, so there is nothing to discover a name *from*. The discovery record (`boomio-prov`) is
- * what supplies the real one, including on a deployment that renames its service origin.
+ * record, so there is nothing to discover a name *from*. The discovery record is what supplies the
+ * real one, including on a deployment that renames its service origin.
  */
-private const val DEFAULT_SERVICE_ORIGIN = "https://boomio.duckdns.org"
+private const val DEFAULT_SERVICE_ORIGIN = "https://$BOOMIO_SERVICE_HOST"
 
 /** `https://…` → `wss://…`, and `http://…` → `ws://…`; anything else is passed through unchanged. */
 private fun String.toWebSocketScheme(): String = when {
