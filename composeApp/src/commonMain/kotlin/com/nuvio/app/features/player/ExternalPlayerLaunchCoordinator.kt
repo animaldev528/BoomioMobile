@@ -67,7 +67,13 @@ suspend fun prepareExternalPlayerLaunch(
 
             if (subtitles != null) {
                 onOverlayMessage(getString(Res.string.player_external_downloading_subtitles))
-                val cachedSubtitles = SubtitleCacheProvider.cacheForExternalPlayer(subtitles)
+                // The stream's own headers ride along: a subtitle hosted beside the media needs the
+                // same device credential the media surface requires. The cache forwards them only to
+                // URLs that are ours, so a public subtitle provider never receives them.
+                val cachedSubtitles = SubtitleCacheProvider.cacheForExternalPlayer(
+                    subtitles = subtitles,
+                    headers = request.sourceHeaders,
+                )
                 // Fallback: use original URLs if caching fails
                 cachedSubtitles ?: subtitles
             } else {

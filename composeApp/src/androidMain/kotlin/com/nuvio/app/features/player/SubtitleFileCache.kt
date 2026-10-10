@@ -5,6 +5,8 @@ import android.net.Uri
 import android.util.Log
 import androidx.core.content.FileProvider
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
+import com.nuvio.app.core.mtls.urlIsOurs
+import com.nuvio.app.core.mtls.withClientCertificate
 import com.nuvio.app.core.network.IPv4FirstDns
 import com.nuvio.app.core.overlay.withOverlayProxy
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +33,30 @@ object SubtitleFileCache {
             .build()
     }
 
+    /**
+     * The certificate-bearing twin, for subtitle URLs that are **ours**.
+     *
+     * Subtitles for our own streams are served from the same hosts the media surface is: on the
+     * enforced plane the media surface is certificate-exempt (libmpv can never present one) but
+     * **not** tunnel-exempt, and a subtitle URL on one of our hosts is reached through the same
+     * overlay relay. [okHttpClient] above already rides the relay, so a subtitle on a *refused*
+     * control path is the only thing missing a certificate.
+     *
+     * ⚠️ Selected by [urlIsOurs], never by a pin: the pin evaporates on the LAN and a certificate
+     * tied to it disappears exactly at home. See `PlayerPlaybackNetworking.clientForSource` for the
+     * defect that spelling caused, and `MtlsHandshakeWatch.urlIsOurs` for why the predicate is
+     * shared rather than re-derived.
+     *
+     * Third-party subtitle hosts keep [okHttpClient] — they were never ours to present a
+     * certificate to, and TLS there is validated by the platform default either way.
+     */
+    private val ownServerOkHttpClient: OkHttpClient by lazy {
+        okHttpClient.newBuilder().withClientCertificate().build()
+    }
+
+    private fun clientFor(url: String): OkHttpClient =
+        if (urlIsOurs(url)) ownServerOkHttpClient else okHttpClient
+
     fun initialize(context: Context) {
         appContext = context.applicationContext
     }
@@ -44,17 +70,28 @@ object SubtitleFileCache {
      *
      * Subtitles that fail to download are silently skipped (not included in result).
      * Returns null if no subtitles could be downloaded.
+     *
+     * [headers] are the same playback headers the stream is being launched with (see
+     * `ExternalPlayerPlaybackRequest.sourceHeaders`). They are sent **only** to URLs that are ours:
+     * a subtitle on our server needs the same device stream token the media surface requires, while
+     * forwarding the stream's `Authorization` to a public subtitle host would hand it a credential
+     * it has no business seeing. Sanitized here rather than at the call site so every caller is
+     * covered, and so this file owns the "what may leave the device" decision.
      */
-    suspend fun cacheSubtitles(subtitles: List<SubtitleInput>): List<SubtitleInput>? {
+    suspend fun cacheSubtitles(
+        subtitles: List<SubtitleInput>,
+        headers: Map<String, String> = emptyMap(),
+    ): List<SubtitleInput>? {
         if (subtitles.isEmpty()) return null
         val context = appContext ?: return null
+        val sanitizedHeaders = sanitizePlaybackHeaders(headers)
 
         // Clean old cached subtitles before downloading new ones
         clearCache()
 
         val cached = subtitles.mapNotNull { input ->
             try {
-                val localUri = downloadToCache(context, input)
+                val localUri = downloadToCache(context, input, sanitizedHeaders)
                 if (localUri != null) {
                     input.copy(url = localUri.toString())
                 } else {
@@ -73,7 +110,11 @@ object SubtitleFileCache {
     /**
      * Downloads a single subtitle file and returns a content:// URI.
      */
-    private suspend fun downloadToCache(context: Context, input: SubtitleInput): Uri? =
+    private suspend fun downloadToCache(
+        context: Context,
+        input: SubtitleInput,
+        headers: Map<String, String>,
+    ): Uri? =
         withContext(Dispatchers.IO) {
             val dir = cacheDir ?: return@withContext null
             val extension = guessExtension(input.url)
@@ -85,8 +126,14 @@ object SubtitleFileCache {
                     File(URI(input.url)).copyTo(file, overwrite = true)
                     return@withContext FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
                 }
-                val request = Request.Builder().url(input.url).build()
-                okHttpClient.newCall(request).execute().use { response ->
+                // Headers are ours-only by construction: they are applied here, on the branch that
+                // sends them, and the third-party path below builds the same request without them.
+                val request = Request.Builder().url(input.url).apply {
+                    if (urlIsOurs(input.url)) {
+                        headers.forEach { (key, value) -> header(key, value) }
+                    }
+                }.build()
+                clientFor(input.url).newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         Log.w(TAG, "HTTP ${response.code} downloading subtitle: ${input.url}")
                         return@withContext null

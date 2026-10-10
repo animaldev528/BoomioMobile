@@ -1,14 +1,11 @@
 package com.nuvio.app.features.player
 
-import android.content.Context
 import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
-import com.nuvio.app.core.mtls.hostIsOurs
+import com.nuvio.app.core.mtls.urlIsOurs
 import com.nuvio.app.core.mtls.withClientCertificate
 import com.nuvio.app.core.network.IPv4FirstDns
-import com.nuvio.app.core.overlay.hostOf
 import com.nuvio.app.core.overlay.withOverlayProxy
 import okhttp3.OkHttpClient
 import java.net.HttpURLConnection
@@ -131,6 +128,23 @@ internal object PlayerPlaybackNetworking {
             .build()
     }
 
+    /**
+     * The client for [sourceUrl] — the player's client-selection rule, in one place.
+     *
+     * Extracted so that anything which talks to **the same host the player is about to stream
+     * from** cannot answer with a third spelling of the rule. The MIME probe is the caller that
+     * matters: it asks a media URL the player will fetch a moment later, so a probe that dialled on
+     * some other client would be diagnosing a different connection than the one that failed — and
+     * with the media surface refused on any plane but the overlay, an unproxied dial does not
+     * merely differ, it fails.
+     *
+     * The rule itself is [urlIsOurs]; see [ownServerPlaybackHttpClient] for why it is identity and
+     * never pin presence, and why our own hosts get the certificate-bearing client while everyone
+     * else gets the trust-all one.
+     */
+    internal fun clientForSource(sourceUrl: String?): OkHttpClient =
+        if (urlIsOurs(sourceUrl)) ownServerPlaybackHttpClient else playbackHttpClient
+
     fun createHttpDataSourceFactory(
         defaultHeaders: Map<String, String> = emptyMap(),
         useLongReadTimeout: Boolean = false,
@@ -142,15 +156,10 @@ internal object PlayerPlaybackNetworking {
         //
         // ⚠️ **Identity, not pin presence.** See [ownServerPlaybackHttpClient] for why this is not
         // `OverlayPinRegistry.isPinnedHost`: the certificate must not depend on whether a pin
-        // happens to exist this second. `hostOf` returns null for a blank or unparseable URL and a
-        // bare address is never in `serverHosts`, so both fall to [playbackHttpClient], the
-        // trust-all client — the same place they landed before.
-        val ownsSource = sourceUrl?.let { hostOf(it) }?.let { hostIsOurs(it) } == true
-        val baseClient = when {
-            useLongReadTimeout -> loopbackPlaybackHttpClient
-            ownsSource -> ownServerPlaybackHttpClient
-            else -> playbackHttpClient
-        }
+        // happens to exist this second. [urlIsOurs] answers false for a blank or unparseable URL and
+        // for a bare address, so both fall to [playbackHttpClient], the trust-all client — the same
+        // place they landed before.
+        val baseClient = if (useLongReadTimeout) loopbackPlaybackHttpClient else clientForSource(sourceUrl)
         val client = requestHeaders.headerValue("Authorization")?.let { authorization ->
             baseClient.newBuilder()
                 .addNetworkInterceptor { chain ->
@@ -176,16 +185,15 @@ internal object PlayerPlaybackNetworking {
         }
     }
 
-    fun createDataSourceFactory(
-        context: Context,
-        defaultHeaders: Map<String, String> = emptyMap(),
-        useLongReadTimeout: Boolean = false,
-    ): DataSource.Factory {
-        return DefaultDataSource.Factory(
-            context,
-            createHttpDataSourceFactory(defaultHeaders, useLongReadTimeout),
-        )
-    }
+    // `createDataSourceFactory(context, …)` used to sit here: a `DefaultDataSource.Factory` wrapper
+    // that forwarded only `defaultHeaders` and `useLongReadTimeout` to
+    // [createHttpDataSourceFactory], **dropping the `sourceUrl`** its sibling takes. Both real call
+    // sites go through the per-flavour `PlatformPlaybackDataSourceFactory`, which passes
+    // `sourceUrl = sourceUrl`; this one had no callers at all, so it was a trap rather than an API —
+    // a future caller reaching for it would have silently received the trust-all, certificate-less
+    // client for **our own media hosts**, which is the exact defect this file exists to prevent.
+    // Deleted rather than given a `sourceUrl` parameter, because an unused function has no caller to
+    // keep honest and the compiler now enforces that nobody re-adds one without thinking about it.
 
     fun openConnection(
         url: String,

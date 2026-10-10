@@ -5,7 +5,10 @@ package com.nuvio.app.features.player
  * via FileProvider so external players can read them.
  */
 actual object SubtitleCacheProvider {
-    actual suspend fun cacheForExternalPlayer(subtitles: List<SubtitleInput>): List<SubtitleInput>? {
-        return SubtitleFileCache.cacheSubtitles(subtitles)
+    actual suspend fun cacheForExternalPlayer(
+        subtitles: List<SubtitleInput>,
+        headers: Map<String, String>,
+    ): List<SubtitleInput>? {
+        return SubtitleFileCache.cacheSubtitles(subtitles, headers)
     }
 }

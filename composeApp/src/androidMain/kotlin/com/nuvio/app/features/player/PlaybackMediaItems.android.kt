@@ -2,8 +2,7 @@ package com.nuvio.app.features.player
 
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
-import java.net.HttpURLConnection
-import java.net.URL
+import okhttp3.Request
 import java.util.Locale
 
 internal fun playbackMediaItemFromUrl(
@@ -195,32 +194,49 @@ private fun inferMimeTypeFromDelimitedToken(value: String): String? =
         else -> null
     }
 
+/**
+ * The `Content-Type` [url] answers with, or null.
+ *
+ * ⚠️ **This asks the media host the player is about to ask, so it has to dial the way the player
+ * dials.** It used to build a raw `java.net.HttpURLConnection`, which follows neither the overlay
+ * relay nor the device certificate. On the enforced plane that is fatal rather than merely
+ * different: the media surface is refused on any plane but the overlay, so the old probe could not
+ * reach a media URL the player itself could reach, and it returned null exactly when it was most
+ * needed — the player had just failed on that source.
+ *
+ * It now rides [PlayerPlaybackNetworking.clientForSource], the player's own selection, so our own
+ * hosts get the certificate-bearing, pin-following client and everyone else the trust-all one —
+ * the same connection the player makes a moment later. [headers] are the player's own sanitized
+ * request headers, so a device stream token the media surface requires rides along with the probe.
+ *
+ * Called off the main thread (the one call site wraps this in `withContext(Dispatchers.IO)`), which
+ * is why a blocking `execute()` is acceptable here.
+ */
 internal fun probeMimeType(url: String, headers: Map<String, String>): String? {
     if (!url.startsWith("http://") && !url.startsWith("https://")) return null
+    val client = PlayerPlaybackNetworking.clientForSource(url)
     val methods = listOf("HEAD", "GET")
     methods.forEach { method ->
-        runCatching {
-            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = method
-                connectTimeout = 3_000
-                readTimeout = 3_000
-                instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "Mozilla/5.0")
-                setRequestProperty("Accept", "*/*")
-                headers.forEach { (key, value) ->
-                    setRequestProperty(key, value)
+        val probed = runCatching {
+            val request = Request.Builder()
+                .url(url)
+                .method(method, null)
+                .header("User-Agent", "Mozilla/5.0")
+                .header("Accept", "*/*")
+                .apply {
+                    headers.forEach { (key, value) ->
+                        // `sanitizePlaybackHeaders` has already dropped `Range`; this is the second
+                        // line of defence, because a `Range` on the probe would ask for one byte and
+                        // some origins answer 206 to a HEAD, which the old code read as "not 2xx".
+                        if (!key.equals("Range", ignoreCase = true)) header(key, value)
+                    }
                 }
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (response.code in 200..299) normalizeMimeType(response.header("Content-Type")) else null
             }
-            try {
-                val responseCode = connection.responseCode
-                if (responseCode in 200..299) {
-                    val contentType = connection.contentType
-                    normalizeMimeType(contentType)
-                } else null
-            } finally {
-                connection.disconnect()
-            }
-        }.getOrNull()?.let { return it }
+        }.getOrNull()
+        if (probed != null) return probed
     }
     return null
 }

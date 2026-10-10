@@ -3,6 +3,7 @@ package com.nuvio.app.features.addons
 import android.content.Context
 import android.content.SharedPreferences
 import com.nuvio.app.core.diagnostics.SentryNetworkBreadcrumbInterceptor
+import com.nuvio.app.core.mtls.urlIsOurs
 import com.nuvio.app.core.mtls.withClientCertificate
 import com.nuvio.app.core.network.IPv4FirstDns
 import com.nuvio.app.core.overlay.withOverlayProxy
@@ -88,6 +89,18 @@ internal object AddonHttpClientProvider {
     private const val cacheSizeBytes = 50L * 1024L * 1024L
     private var client = buildAddonHttpClient()
 
+    /**
+     * The certificate-bearing twin of [client], selected only for hosts our own server answers for.
+     *
+     * ⚠️ **It is a separate client rather than a certificate on [client] itself, and that is the
+     * whole point.** The addon plane is not one plane: it carries BSF's *own* endpoints, which are
+     * ours and sit on the enforced side of the edge, **and** arbitrary public Stremio addon hosts,
+     * which are neither. A certificate is a stable identifier for *this* device, so attaching it to
+     * the shared client offers that credential to every public addon a user installs — a host that
+     * has no business learning this device enrols here, or the name the registrar minted for it.
+     */
+    private var ownServerClient = client.newBuilder().withClientCertificate().build()
+
     fun initialize(context: Context) {
         if (client.cache != null) return
         client = buildAddonHttpClient(
@@ -96,9 +109,20 @@ internal object AddonHttpClientProvider {
                 maxSize = cacheSizeBytes,
             ),
         )
+        ownServerClient = client.newBuilder().withClientCertificate().build()
     }
 
-    fun get(): OkHttpClient = client
+    /**
+     * The client [url] must travel over: the certificate-bearing twin when the host is one our own
+     * server answers for, the plain validating client otherwise.
+     *
+     * ⚠️ **Scoped by [urlIsOurs] — host identity — and never applied unconditionally.** [urlIsOurs]
+     * is the shared predicate (see `MtlsHandshakeWatch.urlIsOurs`); it is deliberately *not* the
+     * overlay pin, which evaporates on the LAN and would withdraw the certificate exactly at home.
+     * An unparseable URL or an IP literal is **not** ours, so it falls to the plain client — the safe
+     * default for a stranger's host.
+     */
+    fun getFor(url: String): OkHttpClient = if (urlIsOurs(url)) ownServerClient else client
 }
 
 private fun buildAddonHttpClient(cache: Cache? = null): OkHttpClient =
@@ -115,10 +139,10 @@ private fun buildAddonHttpClient(cache: Cache? = null): OkHttpClient =
         // leaving it would have kept the addon plane permanently off the overlay while
         // every other engine moved. Removed, not appended to.
         .withOverlayProxy()
-        // The addon plane carries BSF's own endpoints, so it is on the enforced side of the
-        // edge. Inert until this device has a registered certificate, and inert *on the wire*
-        // at any host that does not ask for one.
-        .withClientCertificate()
+        // ⚠️ **No `withClientCertificate()` here — it is applied to the twin in
+        // [AddonHttpClientProvider], not to this client.** Attached here it would ride every addon
+        // request, including the public Stremio hosts this client exists to serve; see the provider
+        // for why the choice has to be per request.
         .apply {
             if (cache != null) {
                 cache(cache)
@@ -217,7 +241,7 @@ private suspend fun executeTextRequest(
         builder.method(normalizedMethod, null)
     }.build()
 
-    AddonHttpClientProvider.get().newCall(request).execute().use { response ->
+    AddonHttpClientProvider.getFor(url).newCall(request).execute().use { response ->
         val payload = readResponseBody(response.body)
         if (!response.isSuccessful) {
             error(runBlocking { getString(Res.string.network_request_failed_http, response.code) })
@@ -299,10 +323,11 @@ actual suspend fun httpRequestRaw(
             builder.method(normalizedMethod, null)
         }.build()
 
+        val base = AddonHttpClientProvider.getFor(url)
         val client = if (followRedirects) {
-            AddonHttpClientProvider.get()
+            base
         } else {
-            AddonHttpClientProvider.get().newBuilder()
+            base.newBuilder()
                 .followRedirects(false)
                 .followSslRedirects(false)
                 .build()

@@ -145,8 +145,12 @@ internal class AndroidDownloadScheduler(val context: Context) {
         val fileName = transfer.item.fileName
         if (!isActive(transfer)) return@withLock false
         val destination = File(directory, fileName)
+        // Start from the host-selected client, so a download of one of our own streams carries the
+        // device certificate. Binding it to a `Network` only swaps the socket factory and resolver;
+        // the certificate, the overlay relay and the TLS configuration are inherited.
+        val baseClient = downloadClientFor(transfer.item.sourceUrl)
         val client = if (network != null) {
-            downloadHttpClient.newBuilder()
+            baseClient.newBuilder()
                 .socketFactory(network.socketFactory)
                 // Compose, don't replace: the network-bound resolver stays the
                 // delegate, and `IPv4FirstDns` layers the overlay pin in front of it
@@ -155,7 +159,7 @@ internal class AndroidDownloadScheduler(val context: Context) {
                 .dns(IPv4FirstDns(delegate = Dns { network.getAllByName(it).toList() }))
                 .connectionPool(ConnectionPool())
                 .build()
-        } else downloadHttpClient
+        } else baseClient
         try {
             DownloadSubtitles.prepare(transfer.item, destination.toURI().toString())
             currentCoroutineContext().ensureActive()

@@ -16,6 +16,14 @@ expect object SubtitleCacheProvider {
      *
      * Returns null if caching fails or no subtitles could be downloaded.
      * On platforms where caching is not needed, returns the input list unchanged.
+     *
+     * [headers] are the playback headers the stream is being launched with. A subtitle served from
+     * the same host as the media needs the same device credential the media surface requires, so the
+     * implementation forwards them **to our own hosts only** — see the Android actual for the rule.
+     * The default keeps every existing caller compiling and behavior unchanged.
      */
-    suspend fun cacheForExternalPlayer(subtitles: List<SubtitleInput>): List<SubtitleInput>?
+    suspend fun cacheForExternalPlayer(
+        subtitles: List<SubtitleInput>,
+        headers: Map<String, String> = emptyMap(),
+    ): List<SubtitleInput>?
 }

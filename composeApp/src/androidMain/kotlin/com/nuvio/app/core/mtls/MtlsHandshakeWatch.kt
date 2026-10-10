@@ -1,6 +1,7 @@
 package com.nuvio.app.core.mtls
 
 import android.util.Log
+import com.nuvio.app.core.overlay.hostOf
 import com.nuvio.app.core.overlay.localServerHosts
 import com.nuvio.app.core.overlay.serverDomainSuffixes
 import okhttp3.Interceptor
@@ -154,6 +155,25 @@ internal fun hostIsOurs(host: String): Boolean = hostIsOurs(host, localServerHos
 /** [hostIsOurs] against a caller-supplied host set — the form that needs no repositories. */
 internal fun hostIsOurs(host: String, serverHosts: Set<String>): Boolean =
     host in serverHosts || serverDomainSuffixes(serverHosts).any { host.endsWith(".$it") }
+
+/**
+ * [hostIsOurs] for a caller that holds a whole URL rather than a host — the **one** spelling of
+ * "does this URL name our own server".
+ *
+ * ⚠️ **This exists so the rule cannot be re-derived, slightly differently, at each call site.**
+ * The predicate is two steps, `hostOf` then `hostIsOurs`, and the second is the one that has
+ * already been got wrong once: tying the client certificate to a *pin* rather than to identity
+ * (`OverlayPinRegistry.isPinnedHost`) means the pin evaporates on the LAN and the device silently
+ * stops presenting its certificate exactly at home. That defect was found and fixed in
+ * `PlayerPlaybackNetworking`; a shared helper is what keeps a third spelling from appearing beside
+ * it — the probe, the subtitle cache and the download transfer all ask this one function.
+ *
+ * A URL with no parseable host, or an IP literal, is **not** ours: `hostOf` answers null for the
+ * first and `hostIsOurs` for the second. That is the safe default for every caller — an unknown
+ * host falls to the third-party client, which is where it belongs.
+ */
+internal fun urlIsOurs(url: String?): Boolean =
+    url?.let { hostOf(it) }?.let { hostIsOurs(it) } == true
 
 /**
  * Turns a refused handshake into a call to [MtlsHandshakeWatch].

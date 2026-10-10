@@ -1,5 +1,7 @@
 package com.nuvio.app.features.downloads
 
+import com.nuvio.app.core.mtls.urlIsOurs
+import com.nuvio.app.core.mtls.withClientCertificate
 import com.nuvio.app.core.network.IPv4FirstDns
 import com.nuvio.app.core.overlay.withOverlayProxy
 import java.io.File
@@ -25,13 +27,42 @@ internal val downloadHttpClient = OkHttpClient.Builder()
     .followSslRedirects(true)
     .build()
 
+/**
+ * The certificate-bearing twin, for downloads whose source is **ours**.
+ *
+ * A download of one of our own streams pulls from the same hosts the media surface does. That
+ * surface is certificate-exempt permanently — libmpv can never present one — but it is **not**
+ * tunnel-exempt, and a direct download of it still passes through the control plane, which does ask
+ * for a certificate once `requireClientCert` arms. [downloadHttpClient] already rides the overlay
+ * relay; this is the other half.
+ *
+ * ⚠️ Selected by [urlIsOurs], never by a pin: a pin evaporates on the LAN, and a certificate tied to
+ * one disappears exactly at home — the defect already fixed once in `PlayerPlaybackNetworking`.
+ * Third-party CDN downloads keep [downloadHttpClient]; they were never ours to present a
+ * certificate to. `lazy` so that merely loading this file does not force the mTLS registrar into
+ * existence.
+ */
+internal val ownServerDownloadHttpClient: OkHttpClient by lazy {
+    downloadHttpClient.newBuilder().withClientCertificate().build()
+}
+
+/**
+ * The client for [sourceUrl] — the download plane's client-selection rule, in one place.
+ *
+ * Held in a function rather than left to each call site because the scheduling path
+ * (`AndroidDownloadScheduler.execute`) builds a derived client per job from the network binding, and
+ * a second spelling of "is this ours" there would drift from this one.
+ */
+internal fun downloadClientFor(sourceUrl: String?): OkHttpClient =
+    if (urlIsOurs(sourceUrl)) ownServerDownloadHttpClient else downloadHttpClient
+
 internal class DownloadHttpException(val statusCode: Int) : IOException("Download failed: HTTP $statusCode")
 
 internal suspend fun transferAndroidDownload(
     item: DownloadItem,
     directory: File,
     validator: String?,
-    client: OkHttpClient = downloadHttpClient,
+    client: OkHttpClient = downloadClientFor(item.sourceUrl),
     onHeaders: (totalBytes: Long?, validator: String?) -> Unit,
     onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
 ): File = coroutineScope {
