@@ -171,9 +171,12 @@ internal fun hostIsOurs(host: String, serverHosts: Set<String>): Boolean =
  * A URL with no parseable host, or an IP literal, is **not** ours: `hostOf` answers null for the
  * first and `hostIsOurs` for the second. That is the safe default for every caller — an unknown
  * host falls to the third-party client, which is where it belongs.
+ *
+ * The [serverHosts] parameter exists for the same reason [hostIsOurs]'s does: it is the seam that
+ * lets a test state the rule without a configured device. Callers keep the one-argument form.
  */
-internal fun urlIsOurs(url: String?): Boolean =
-    url?.let { hostOf(it) }?.let { hostIsOurs(it) } == true
+internal fun urlIsOurs(url: String?, serverHosts: Set<String> = localServerHosts()): Boolean =
+    url?.let { hostOf(it) }?.let { hostIsOurs(it, serverHosts) } == true
 
 /**
  * Turns a refused handshake into a call to [MtlsHandshakeWatch].

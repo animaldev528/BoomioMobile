@@ -159,6 +159,63 @@ class MtlsHandshakeWatchTest {
         assertTrue(!hostIsOurs("bsc.tracemonkey.org", emptySet()))
     }
 
+    // ── the URL rule ─────────────────────────────────────────────────────────
+
+    @Test
+    fun `a url on one of our hosts is ours`() {
+        assertTrue(urlIsOurs("https://bsc.tracemonkey.org/api/thing", setOf("bsc.tracemonkey.org")))
+    }
+
+    @Test
+    fun `a url on the server's domain is ours even though it is not enumerated`() {
+        assertTrue(urlIsOurs("https://bss-dav.tracemonkey.org/stream/42", setOf("bsc.tracemonkey.org")))
+    }
+
+    @Test
+    fun `a public addon url is not ours`() {
+        // ⚠️ The regression this whole change set exists for. The addon client used to carry the
+        // device certificate unconditionally, so every public Stremio catalog host was offered this
+        // device's key. Identity — not "it is an addon" — is what earns the certificate.
+        assertTrue(
+            !urlIsOurs("https://catalog.nuvio.tv/manifest.json", setOf("bsc.tracemonkey.org")),
+            "a public addon must never be shown the device's certificate",
+        )
+    }
+
+    @Test
+    fun `a url that merely ends with the domain's letters is not ours`() {
+        assertTrue(!urlIsOurs("https://evil-tracemonkey.org/x", setOf("bsc.tracemonkey.org")))
+    }
+
+    @Test
+    fun `a url carrying a port still matches on its host`() {
+        assertTrue(urlIsOurs("https://bsc.tracemonkey.org:8443/api", setOf("bsc.tracemonkey.org")))
+    }
+
+    @Test
+    fun `an ip literal url is not ours`() {
+        // The LAN path dials an address, and an address names no server: it falls to the plain
+        // client, which is where every unknown host belongs.
+        assertTrue(!urlIsOurs("https://192.168.68.65/api", setOf("bsc.tracemonkey.org")))
+    }
+
+    @Test
+    fun `a url with no scheme is not ours`() {
+        // `hostOf` refuses anything without `://` rather than letting Ktor's URLBuilder default the
+        // host to "localhost" — which is how a blank value once matched a blank fallback.
+        assertTrue(!urlIsOurs("bsc.tracemonkey.org/api", setOf("bsc.tracemonkey.org")))
+    }
+
+    @Test
+    fun `a null url is not ours`() {
+        assertTrue(!urlIsOurs(null, setOf("bsc.tracemonkey.org")))
+    }
+
+    @Test
+    fun `with no server hosts configured no url is ours`() {
+        assertTrue(!urlIsOurs("https://bsc.tracemonkey.org/api", emptySet()))
+    }
+
     // ── the interceptor ──────────────────────────────────────────────────────
 
     @Test
