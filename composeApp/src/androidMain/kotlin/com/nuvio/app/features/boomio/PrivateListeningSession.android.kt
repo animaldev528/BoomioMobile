@@ -2,6 +2,7 @@ package com.nuvio.app.features.boomio
 
 import android.content.Context
 import co.touchlab.kermit.Logger
+import com.boomio.opus.OpusCodec
 import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -97,7 +98,9 @@ actual object PrivateListeningSession {
         if (_state.value.status == PrivateListeningStatus.Active) {
             val ip = armedIp
             val port = armedPort
-            if (ip != null && port > 0) CompanionBridge.startAudioFork(ip, port, enabled)
+            if (ip != null && port > 0) {
+                CompanionBridge.startAudioFork(ip, port, enabled, forkCodecForThisDevice())
+            }
         }
     }
 
@@ -124,6 +127,23 @@ actual object PrivateListeningSession {
         CompanionBridge.stopAudioFork()
         _state.value = PrivateListeningUiState()
         refreshForegroundHost()
+    }
+
+    /**
+     * The transport this phone can actually decode.
+     *
+     * `"opus"` only when the shared object loaded. Advertising Opus on a phone whose decoder is
+     * missing leaves the TV forking a format nothing here can play, and before the guard in
+     * [ForkOpusDecoder] it killed the receiver thread outright. `"pcm"` is the original
+     * transport: no native code, no capability to lose, and the TV maps anything it does not
+     * recognise to it anyway — so this asks explicitly rather than relying on that.
+     */
+    private fun forkCodecForThisDevice(): String {
+        val loaded = OpusCodec.available
+        if (!loaded) {
+            log.w { "libboomioopus unusable (${OpusCodec.loadFailure}) -> asking the TV for PCM" }
+        }
+        return if (loaded) CompanionBridge.FORK_CODEC_OPUS else CompanionBridge.FORK_CODEC_PCM
     }
 
     private fun arm() {
@@ -158,7 +178,7 @@ actual object PrivateListeningSession {
         log.i { "Private listening arm -> $ip:$port" }
         armedIp = ip
         armedPort = port
-        CompanionBridge.startAudioFork(ip, port, _tvSpeakersEnabled.value)
+        CompanionBridge.startAudioFork(ip, port, _tvSpeakersEnabled.value, forkCodecForThisDevice())
 
         // Tear down if the companion link dies at any point (the hub already
         // stopped the fork on the TV via its heartbeat timeout by then).

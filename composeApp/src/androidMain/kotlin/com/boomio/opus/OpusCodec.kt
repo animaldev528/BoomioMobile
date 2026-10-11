@@ -19,6 +19,16 @@ package com.boomio.opus
  */
 object OpusCodec {
 
+    private const val TAG = "BoomioOpus"
+
+    /**
+     * Why the load failed, or "none". Kept because `available` below swallows the
+     * exception: without this the dlopen reason never reaches logcat and the only
+     * symptom is a bare "No implementation found" from the first native call.
+     */
+    var loadFailure: String = "none"
+        private set
+
     /**
      * Whether the native library actually loaded.
      *
@@ -30,7 +40,11 @@ object OpusCodec {
     val available: Boolean = runCatching {
         System.loadLibrary("boomioopus")
         true
-    }.getOrElse { false }
+    }.getOrElse { t ->
+        loadFailure = t.toString()
+        android.util.Log.e(TAG, "libboomioopus.so did not load: $t")
+        false
+    }
 
     /** libopus version string, or "unavailable". For the logcat proof line. */
     fun versionOrUnavailable(): String =

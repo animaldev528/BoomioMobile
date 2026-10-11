@@ -76,14 +76,21 @@ internal object ForkOpusWire {
  */
 internal class ForkOpusDecoder(private val channelCount: Int) {
 
-    private var handle: Long = OpusCodec.decoderCreate(ForkOpusWire.SAMPLE_RATE, channelCount)
+    private var handle: Long =
+        if (OpusCodec.available) {
+            OpusCodec.decoderCreate(ForkOpusWire.SAMPLE_RATE, channelCount)
+        } else {
+            0L
+        }
 
     /**
      * False when the native library or the decoder could not be had.
      *
-     * ⚠️ Not a fallback trigger on this side: the TV chooses the transport, so a phone that
-     * cannot decode Opus has nothing to fail over *to* — it can only report it, which is what
-     * the receiver's log line and close summary are for.
+     * ⚠️ Not a fallback trigger *mid-session*: once the TV is forking Opus there is no
+     * in-band way to ask it to stop, because the wire carries no such message. The failover is
+     * therefore decided before the arm, not during it — [PrivateListeningSession] asks for PCM
+     * when this is false, so an unusable library costs this build the Opus transport and never
+     * the feature. This flag is what tells it to.
      */
     val isUsable: Boolean get() = handle != 0L
 

@@ -422,13 +422,13 @@ object CompanionBridge {
      * mid-session change is delivered: the TV sees the endpoint it is already forking to and
      * applies the flag without rebuilding the tee.
      */
-    fun startAudioFork(ip: String, port: Int, keepTvAudio: Boolean) =
+    fun startAudioFork(ip: String, port: Int, keepTvAudio: Boolean, codec: String) =
         sendFrame {
             put("type", "audio_fork_start")
             put("phoneIp", ip)
             put("port", port)
             put("keepTvAudio", keepTvAudio)
-            put("codec", FORK_CODEC)
+            put("codec", codec)
         }
 
     /**
@@ -449,8 +449,14 @@ object CompanionBridge {
      *    old receiver read as a sample rate.
      *  - A phone that predates Opus discards the datagrams rather than playing them as noise,
      *    so a mixed fleet degrades to silence on the old phone, never to static.
+     *  - A phone that *has* this code but whose `libboomioopus` did not load asks for
+     *    [FORK_CODEC_PCM] instead. This is the direction that used to be missed: the old code
+     *    sent a literal `"opus"` regardless, so the TV forked a format the phone could not
+     *    decode — which crashed the receiver outright. The codec is a property of the device,
+     *    not a constant of the protocol, so it is resolved at the call site and passed in.
      */
-    private const val FORK_CODEC = "opus"
+    const val FORK_CODEC_OPUS = "opus"
+    const val FORK_CODEC_PCM = "pcm"
 
     /**
      * Ask the paired TV to stop forking its audio to this phone. */
