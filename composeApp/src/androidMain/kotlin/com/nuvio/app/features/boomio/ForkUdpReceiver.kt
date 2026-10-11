@@ -4,6 +4,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.Build
+import co.touchlab.kermit.Logger
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.nio.ByteBuffer
@@ -23,6 +24,26 @@ private const val MAX_PREFILL_MS = 500      // sync slider ceiling — beyond th
 private const val JITTER_CUSHION_MS = 120   // extra AudioTrack buffer above prefill for network jitter
 
 /**
+ * Socket receive buffer. The kernel drops datagrams when a socket's receive queue
+ * is full (`Udp.RcvbufErrors`), and this socket is drained by the SAME thread that
+ * calls the blocking `AudioTrack.write` — so every time the track buffer is full
+ * the reader stops draining and the queue behind it grows. Measured on the phone
+ * 2026-10-11: 33,214 `RcvbufErrors` accumulated, i.e. real audio was discarded by
+ * the kernel, not lost in the air. The default buffer is ~64 KB, which at 5.1/48 kHz
+ * (576 KB/s) is only ~113 ms of slack; 1 MiB is ~1.7 s of it and costs nothing.
+ * [setReceiveBufferSize] is advisory — the kernel may clamp to net.core.rmem_max,
+ * which is why [getReceiveBufferSize] is logged rather than assumed.
+ */
+private const val RECEIVE_BUFFER_BYTES = 1 shl 20
+
+/**
+ * A seq gap up to this long is repaired with silence, keeping the playout timeline
+ * continuous. A longer gap means the track already drained, so patching it would
+ * add seconds of lag; that case resyncs instead (see [ForkUdpReceiver]).
+ */
+private const val GAP_FILL_MAX_MS = 250
+
+/**
  * Receives the TV's private-listening PCM stream on a bound [DatagramSocket]
  * and plays it through a low-latency [AudioTrack].
  *
@@ -31,7 +52,7 @@ private const val JITTER_CUSHION_MS = 120   // extra AudioTrack buffer above pre
  * mid-stream rate change flows through):
  * ```
  *   bytes 0..3  sampleRate (big-endian int32)
- *   bytes 4..5  sequence   (big-endian uint16 — unused by playback, reserved for diagnostics)
+ *   bytes 4..5  sequence   (big-endian uint16, wraps)
  *   byte   6    channel count (1..8): 2 = stereo; 6/8 = raw multichannel passthrough
  *   bytes 7..   PCM16 signed little-endian interleaved, channel-count channels
  * ```
@@ -49,6 +70,17 @@ private const val JITTER_CUSHION_MS = 120   // extra AudioTrack buffer above pre
  * jitter lands inside the cushion instead of popping the speaker. After play,
  * streaming `write()` blocks when the buffer is full, so the phone is paced by
  * the TV's decode clock and cannot drift (R4 in the spec).
+ *
+ * **Packet loss.** This is UDP: the sender deliberately drops frames under
+ * back-pressure, the kernel drops them when the socket queue overflows, and Wi-Fi
+ * drops them in flight. The sequence number makes the loss visible, and a visible
+ * gap is *repaired* rather than left to slip the timeline: a gap up to
+ * [GAP_FILL_MAX_MS] is written through as silence (playback stays continuous and
+ * in sync; the audio simply has a hole where the audio had one), and a longer one
+ * — meaning the track already ran dry — resyncs by flushing and re-prefilling at
+ * the current prefill target. Both are counted and reported on [close]; before
+ * this, loss was silently played as a time-compressed jump, which is what "the
+ * audio cuts out" sounds like.
  *
  * Audio sync: the phone is structurally a fixed offset behind the TV's decoded
  * moment, dominated by the prefill + OS output latency. The companion remote's
@@ -69,6 +101,17 @@ internal class ForkUdpReceiver(private val socket: DatagramSocket) {
     @Volatile private var syncOffsetMs = 0
 
     private val buffer = ByteArray(MAX_DATAGRAM_BYTES)
+
+    /** Widest silence patch we will ever need, reused so a repair allocates nothing. */
+    private val silence = ByteArray(MAX_DATAGRAM_BYTES)
+
+    // ── Loss accounting (reported once, on close) ─────────────────────────────
+    private var lastSeq = -1
+    private var gapEvents = 0
+    private var gapPackets = 0L
+    private var maxGapPackets = 0
+    private var resyncs = 0
+    private var announcedLoss = false
 
     // AudioTrack state — touched only from the receiver thread (post-join in close()).
     private var track: AudioTrack? = null
@@ -98,9 +141,29 @@ internal class ForkUdpReceiver(private val socket: DatagramSocket) {
             runCatching { current.release() }
             track = null
         }
+        // One line, only when something was actually lost — this is the measurement
+        // that was missing: before it, a fork that dropped a third of its packets
+        // looked identical to a clean one.
+        if (gapEvents > 0) {
+            LOG.w {
+                "fork ended with loss: $gapEvents gaps, $gapPackets datagrams missing, " +
+                    "worst $maxGapPackets, $resyncs resync(s)"
+            }
+        } else {
+            LOG.i { "fork ended clean (no sequence gaps)" }
+        }
     }
 
     private fun runLoop() {
+        // Must be set before the first receive; the effective size is logged because
+        // the kernel clamps to net.core.rmem_max and a silently-tiny buffer is the
+        // whole failure mode this guards against.
+        val effective = runCatching {
+            socket.receiveBufferSize = RECEIVE_BUFFER_BYTES
+            socket.receiveBufferSize
+        }.getOrDefault(-1)
+        LOG.i { "fork socket receive buffer: $effective bytes (asked for $RECEIVE_BUFFER_BYTES)" }
+
         while (running) {
             val packet = DatagramPacket(buffer, buffer.size)
             try {
@@ -119,13 +182,44 @@ internal class ForkUdpReceiver(private val socket: DatagramSocket) {
             val payloadLen = len - PREAMBLE_BYTES
             // Whole frames only — AudioTrack.write must never be handed a partial frame.
             if (payloadLen < frameBytes || payloadLen % frameBytes != 0) continue
-            writePcm(sampleRate, channels, payloadLen)
+            val seq = ((buffer[4].toInt() and 0xFF) shl 8) or (buffer[5].toInt() and 0xFF)
+            writePcm(sampleRate, channels, payloadLen, seq)
         }
     }
 
-    private fun writePcm(sampleRate: Int, channels: Int, payloadLen: Int) {
+    private fun writePcm(sampleRate: Int, channels: Int, payloadLen: Int, seq: Int) {
         ensureTrack(sampleRate, channels)
         val current = track ?: return
+
+        if (lastSeq >= 0) {
+            val delta = (seq - lastSeq) and 0xFFFF
+            if (delta > 1) {
+                val missing = delta - 1
+                val missingMs = missing.toLong() * payloadLen * 1_000L /
+                    (sampleRate.toLong() * frameBytes(channels))
+                gapEvents++
+                gapPackets += missing
+                if (missing > maxGapPackets) maxGapPackets = missing
+                if (!announcedLoss) {
+                    announcedLoss = true
+                    LOG.w {
+                        "fork packet loss: $missing datagram(s) missing (~${missingMs}ms) — " +
+                            "repairing; further loss is counted, not logged"
+                    }
+                }
+                if (missingMs <= GAP_FILL_MAX_MS) {
+                    writeSilence(sampleRate, channels, missingMs.toInt())
+                } else {
+                    // Longer than the track can hold — it has already drained, so
+                    // filling would only add lag. Drop what is buffered and refill.
+                    resyncs++
+                    LOG.i { "fork gap of ~${missingMs}ms exceeds the cushion — resyncing" }
+                    resync(current)
+                }
+            }
+        }
+        lastSeq = seq
+
         val wantPrefill = targetPrefillMs()
         val written = runCatching { current.write(buffer, PREAMBLE_BYTES, payloadLen) }.getOrDefault(0)
         if (written <= 0) return
@@ -136,6 +230,36 @@ internal class ForkUdpReceiver(private val socket: DatagramSocket) {
                 trackPlaying = true
             }
         }
+    }
+
+    /** Write [ms] of silence so a lost span does not slip the playout timeline. */
+    private fun writeSilence(sampleRate: Int, channels: Int, ms: Int) {
+        val current = track ?: return
+        val frameBytes = frameBytes(channels)
+        var remaining = msBytes(sampleRate, channels, ms.coerceAtMost(GAP_FILL_MAX_MS))
+        remaining = remaining / frameBytes * frameBytes
+        while (remaining > 0) {
+            val chunk = minOf(remaining, silence.size / frameBytes * frameBytes)
+            if (chunk <= 0) return
+            val written = runCatching { current.write(silence, 0, chunk) }.getOrDefault(0)
+            if (written <= 0) return
+            remaining -= written
+            if (!trackPlaying) {
+                prefilledBytes += written
+                if (prefilledBytes >= msBytes(sampleRate, channels, targetPrefillMs())) {
+                    runCatching { current.play() }
+                    trackPlaying = true
+                }
+            }
+        }
+    }
+
+    /** Discard buffered audio and re-prefill, so a long stall restarts cleanly. */
+    private fun resync(current: AudioTrack) {
+        runCatching { current.pause() }
+        runCatching { current.flush() }
+        trackPlaying = false
+        prefilledBytes = 0
     }
 
     /** The current prefill target: the 100 ms baseline plus the user's sync offset. */
@@ -178,6 +302,8 @@ internal class ForkUdpReceiver(private val socket: DatagramSocket) {
         trackPlaying = false
         appliedPrefillMs = wantPrefill
         prefilledBytes = 0
+        // A new track starts a new timeline; the old sequence is meaningless against it.
+        lastSeq = -1
 
         val mask = channelMaskFor(channels) ?: return
         val minBuffer = AudioTrack.getMinBufferSize(
@@ -219,4 +345,8 @@ internal class ForkUdpReceiver(private val socket: DatagramSocket) {
 
     private fun msBytes(sampleRate: Int, channels: Int, ms: Int) =
         sampleRate * frameBytes(channels) * ms / 1_000
+
+    private companion object {
+        private val LOG = Logger.withTag("ForkUdpReceiver")
+    }
 }

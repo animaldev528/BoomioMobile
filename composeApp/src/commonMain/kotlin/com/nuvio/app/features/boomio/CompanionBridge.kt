@@ -39,6 +39,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -123,6 +124,8 @@ object CompanionKeyCodes {
  *            media_changed | audio_fork | music_identify_result |
  *            companion:timeout | error not_paired
  *   REST     GET  /api/companion/devices   (Bearer)
+ *            GET  /api/companion/pairing   (Bearer) — authoritative; pulled on
+ *                                          session and on every (re)connect
  *            POST /api/companion/pair      {deviceId}
  *            POST /api/companion/unpair
  *            POST /api/music/library       {title, artist, …} (Bearer)
@@ -209,6 +212,12 @@ object CompanionBridge {
                     if (_pairedDeviceId.value == null) {
                         _pairedDeviceId.value = BoomioSessionStorage.loadPairedDeviceId()
                     }
+                    // The cached pair is only a hint; the hub holds the real
+                    // record for 30 days. Pull it whenever a session appears so
+                    // the link is right on the first frame, before the socket
+                    // has even opened — and so a pair made or broken elsewhere
+                    // lands here without a push.
+                    refreshPairing()
                     if (wsSession == null && connectJob?.isActive != true && reconnectJob?.isActive != true) {
                         connect(session)
                     }
@@ -237,6 +246,55 @@ object CompanionBridge {
             } catch (error: Throwable) {
                 log.w(error) { "refreshDevices failed" }
                 _deviceListError.value = "Could not reach the companion hub."
+            }
+        }
+    }
+
+    /**
+     * Re-reads the pairing from the hub (`GET /api/companion/pairing`).
+     *
+     * The pair lives server-side in Redis for 30 days; the phone's copy is only
+     * a cache. Until now the only ways it was refreshed were local storage at
+     * launch and the `companion:state_restored` **push** the hub sends when the
+     * paired TV re-registers. That push rides `/ws/phone`, so a phone whose
+     * socket was down missed it and rendered "Not connected" while the server
+     * still held a perfectly good pair — measured 2026-10-11: the hub dropped
+     * that push 3× ("Phone push dropped — no live companion socket") and the
+     * phone showed the unlinked card while `companion:pair:<phoneId>` was
+     * intact. Pulling costs one request and removes the socket from the
+     * correctness path entirely.
+     *
+     * Authoritative in both directions: a `paired:false` answer clears the
+     * local copy, so an unpair that happened on another device also lands here.
+     */
+    fun refreshPairing() {
+        val token = BoomioSessionRepository.bearerToken() ?: return
+        scope.launch {
+            try {
+                val response = http.get("${BoomioConfig.companionRestBaseUrl}/api/companion/pairing") {
+                    header(HttpHeaders.Authorization, "Bearer $token")
+                }
+                if (!response.status.isSuccess()) return@launch
+                val body = json.parseToJsonElement(response.bodyAsText()).jsonObject
+                val paired = body["paired"]?.jsonPrimitive?.booleanOrNull == true
+                val tvDeviceId = body["tvDeviceId"]?.jsonPrimitive?.contentOrNull
+                if (paired && tvDeviceId != null) {
+                    if (_pairedDeviceId.value != tvDeviceId) {
+                        log.i { "pairing restored from the hub: $tvDeviceId" }
+                    }
+                    _pairedDeviceId.value = tvDeviceId
+                    BoomioSessionStorage.savePairedDeviceId(tvDeviceId)
+                } else {
+                    // Only clear what we own. A failed *request* left the cached
+                    // pair alone above; an authoritative `paired:false` is the
+                    // one answer that means the pair is genuinely gone.
+                    _pairedDeviceId.value = null
+                    BoomioSessionStorage.clearPairedDeviceId()
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                log.w(error) { "refreshPairing failed" }
             }
         }
     }
@@ -466,6 +524,11 @@ object CompanionBridge {
                     wsSession = this
                     reconnectAttempts = 0
                     _connected.value = true
+                    // A reconnect is exactly when the `state_restored` push was
+                    // most likely missed — it is sent once, to whatever socket
+                    // is live at that instant. Re-read the server's record so
+                    // the UI does not depend on having caught it.
+                    refreshPairing()
                     startHeartbeat()
                     try {
                         for (frame in incoming) {
