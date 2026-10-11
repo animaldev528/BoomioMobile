@@ -24,6 +24,7 @@ import com.nuvio.app.features.boomio.BoomioSessionRepository
 import com.nuvio.app.features.boomio.BoomioSessionStorage
 import com.nuvio.app.features.boomio.PrivateListeningSession
 import com.nuvio.app.core.diagnostics.SentryInitializer
+import com.nuvio.app.core.device.DeviceCapabilityReporter
 import com.nuvio.app.core.deeplink.handleAppUrl
 import com.nuvio.app.core.storage.PlatformLocalAccountDataCleaner
 import com.nuvio.app.core.sync.SyncClientIdentityStorage
@@ -102,6 +103,11 @@ open class MainActivity : AppCompatActivity() {
         pipRemoteActionReceiver = PipRemoteActionReceiver.register(this)
         SyncClientIdentityStorage.initialize(applicationContext)
         AddonHttpClientProvider.initialize(applicationContext)
+        // ⚠️ Strictly *after* the line above, and not merely for tidiness: the report carries
+        // `SyncClientIdentity.currentClientId()`, and with storage uninitialized a fresh id would be
+        // minted that `saveClientId` could not persist — a new one on every launch, and therefore a
+        // new device row per launch on the bsm Devices page. Idempotent; inert without a bsm url.
+        DeviceCapabilityReporter.start(applicationContext)
         AddonStorage.initialize(applicationContext)
         AuthStorage.initialize(applicationContext)
         BoomioSessionStorage.initialize(applicationContext)
