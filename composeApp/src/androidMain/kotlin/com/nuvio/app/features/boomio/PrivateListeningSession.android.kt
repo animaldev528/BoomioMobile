@@ -118,6 +118,7 @@ actual object PrivateListeningSession {
         linkWatchJob?.cancel(); linkWatchJob = null
         receiver?.close(); receiver = null
         armedIp = null; armedPort = 0
+        WifiHold.release()
         _state.value = PrivateListeningUiState(status = PrivateListeningStatus.Stopping)
         // Harmless when nothing armed; clears a partial arm / unwinds a live fork.
         CompanionBridge.stopAudioFork()
@@ -145,6 +146,10 @@ actual object PrivateListeningSession {
         val recv = ForkUdpReceiver(socket)
         recv.setSyncOffsetMs(_syncOffsetMs.value)
         receiver = recv
+        // Arm the radio BEFORE the TV starts sending. With no lock held the phone's Wi-Fi
+        // power-saves, the AP buffers frames for it, and the fork's ~200 KB/s overflows that
+        // buffer - which is where the fork's multi-hundred-ms sequence gaps came from.
+        WifiHold.acquire(appContext)
         recv.start()
 
         // Register the ack completer BEFORE sending so the TV's reply can never
@@ -206,6 +211,7 @@ actual object PrivateListeningSession {
         linkWatchJob?.cancel(); linkWatchJob = null
         receiver?.close(); receiver = null
         armedIp = null; armedPort = 0
+        WifiHold.release()
     }
 
     /** Promote the foreground service while Active; drop it otherwise. */

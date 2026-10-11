@@ -428,9 +428,32 @@ object CompanionBridge {
             put("phoneIp", ip)
             put("port", port)
             put("keepTvAudio", keepTvAudio)
+            put("codec", FORK_CODEC)
         }
 
-    /** Ask the paired TV to stop forking its audio to this phone. */
+    /**
+     * The transport this phone asks the TV to fork in.
+     *
+     * `"opus"`, because the measured loss on this link tracks datagram *rate* and not signal
+     * strength — 0% at 20 datagrams/s, ~2.5% at 161 — and raw PCM16 stereo at 48 kHz is 161
+     * datagrams of 1192 bytes a second, with nothing redundant in them. Opus at 128 kbit/s and
+     * 20 ms frames is ~322-byte packets 50 times a second: **11.9x less airtime through the
+     * same access point**, and the codec can rebuild a lost frame from its own state or
+     * conceal it convincingly, which raw PCM cannot do at all.
+     *
+     * This is a request, not a demand, and it is safe in every direction:
+     *  - The TV forks PCM by itself for anything Opus cannot carry (its codec path is 48 kHz
+     *    mono/stereo; a 5.1 track falls back), so a surround title still plays.
+     *  - A TV that predates Opus ignores this key entirely and forks PCM, which this build
+     *    still plays: the two formats share one header and differ only in the four bytes the
+     *    old receiver read as a sample rate.
+     *  - A phone that predates Opus discards the datagrams rather than playing them as noise,
+     *    so a mixed fleet degrades to silence on the old phone, never to static.
+     */
+    private const val FORK_CODEC = "opus"
+
+    /**
+     * Ask the paired TV to stop forking its audio to this phone. */
     fun stopAudioFork() =
         sendFrame { put("type", "audio_fork_stop") }
 

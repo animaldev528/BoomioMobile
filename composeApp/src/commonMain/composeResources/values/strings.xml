@@ -624,8 +624,18 @@
     <string name="companion_music_fail_no_link_hint">Pick a TV on this screen first.</string>
     <string name="companion_music_fail_timeout">The TV didn’t answer</string>
     <string name="companion_music_fail_timeout_hint">Check the TV is on and connected, then try again.</string>
-    <string name="companion_music_fail_not_linked">This phone isn’t linked to a profile</string>
-    <string name="companion_music_fail_not_linked_hint">Link the phone from the Boomio dashboard, then ask again.</string>
+    <!--
+      ⚠️ These name the TV, not the phone, and that is deliberate. The only two
+      producers of CompanionMusicFailure.NotLinked are the TV's own relayed
+      reasons `not_linked` and `session_expired` (CompanionMusic.kt:282,287) —
+      a phone-local failure is NoLink, which already says "Pick a TV on this
+      screen first". So the old copy sent the viewer to fix the one device that
+      was not wrong. Point it at the TV, and at the TV's own Link button rather
+      than the dashboard: the dashboard is where a code is approved, not where
+      one is started. Keep this in step with the TV's `music_not_linked` pair.
+    -->
+    <string name="companion_music_fail_not_linked">The TV isn’t linked to your account</string>
+    <string name="companion_music_fail_not_linked_hint">On the TV, use Link on the This TV row in Settings, then ask again.</string>
     <string name="companion_music_fail_network">Couldn’t reach the music service</string>
     <string name="companion_music_fail_network_hint">Check the connection and try again.</string>
     <string name="companion_music_mismatch">The TV played a different audio track than the one selected — this may name music you aren’t hearing.</string>

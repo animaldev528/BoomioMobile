@@ -280,6 +280,11 @@ internal fun parseMusicIdentifyAnswer(msg: JsonObject): CompanionMusicAnswer {
             when (reason) {
                 "not_playing" -> CompanionMusicFailure.NoPlayer
                 "not_linked" -> CompanionMusicFailure.NotLinked
+                // The TV is linked and its session was rejected. Same errand for
+                // the viewer as `not_linked` — link the TV again — so it reuses
+                // that copy rather than falling through to "no TV connected",
+                // which is the one thing that is definitely not wrong here.
+                "session_expired" -> CompanionMusicFailure.NotLinked
                 "network" -> CompanionMusicFailure.Network
                 // `not_paired` / `not_configured` both mean this phone has no
                 // usable link to a TV that can answer.

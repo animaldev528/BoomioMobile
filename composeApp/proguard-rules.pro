@@ -62,3 +62,11 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+
+# ── Private-listening Opus fork (libboomioopus) ──────────────────────────────
+# JNI resolves a native method from its Java class name, so the symbol is
+# Java_com_boomio_opus_OpusCodec_<method>. Renaming the class or a native method
+# turns the fork into an UnsatisfiedLinkError on-device -- a failure the build
+# cannot see. The TV app and the phone app declare this class with the SAME
+# package, class and method names on purpose: one shared .so serves both.
+-keep class com.boomio.opus.** { *; }
