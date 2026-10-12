@@ -37,3 +37,7 @@ iosApp/Configuration/DeviceSigning.local.json
 
 # Local MPVKit iOS build environment (sparse APFS image, see MPVKit docs)
 .mpvkit-build.sparseimage
+
+# Local build output / agent scratch — signed APKs and app bundles are not source.
+dist/
+.claude/
