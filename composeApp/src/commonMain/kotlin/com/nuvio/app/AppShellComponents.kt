@@ -105,6 +105,8 @@ internal data class AppTabActions(
     val onCompanionSettingsClick: () -> Unit = {},
     val onAddTvSettingsClick: () -> Unit = {},
     val onEnrollTvSettingsClick: () -> Unit = {},
+    /** Null unless the active profile is a bsm administrator, which is what hides the row. */
+    val onAdminSettingsClick: (() -> Unit)? = null,
     val onAccountSettingsClick: () -> Unit = {},
     val onSupportersContributorsSettingsClick: () -> Unit = {},
     val onLicensesAttributionsSettingsClick: () -> Unit = {},
@@ -192,6 +194,7 @@ internal fun AppTabHost(
                     onCompanionClick = actions.onCompanionSettingsClick,
                     onAddTvClick = actions.onAddTvSettingsClick,
                     onEnrollTvClick = actions.onEnrollTvSettingsClick,
+                    onAdminClick = actions.onAdminSettingsClick,
                     onAccountClick = actions.onAccountSettingsClick,
                     onSupportersContributorsClick = actions.onSupportersContributorsSettingsClick,
                     onLicensesAttributionsClick = actions.onLicensesAttributionsSettingsClick,

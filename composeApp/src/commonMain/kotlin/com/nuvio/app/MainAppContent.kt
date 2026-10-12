@@ -90,6 +90,8 @@ import com.nuvio.app.features.catalog.CatalogTarget
 import com.nuvio.app.features.cloud.CloudLibraryContentType
 import com.nuvio.app.features.cloud.CloudLibraryFile
 import com.nuvio.app.features.boomio.AddTvScreen
+import com.nuvio.app.features.boomio.AdminScreen
+import com.nuvio.app.features.boomio.BsmAdminRepository
 import com.nuvio.app.features.boomio.EnrollTvScreen
 import com.nuvio.app.features.boomio.CompanionScreen
 import com.nuvio.app.features.boomio.IptvChannelsScreen
@@ -358,12 +360,18 @@ internal fun MainAppContent(
     val companionTitle = stringResource(Res.string.compose_settings_page_companion)
     val addTvTitle = stringResource(Res.string.compose_settings_page_add_tv)
     val enrollTvTitle = stringResource(Res.string.compose_settings_page_enroll_tv)
+    val adminTitle = stringResource(Res.string.compose_settings_page_admin)
     val accountSettingsTitle = stringResource(Res.string.compose_settings_page_account)
     val supportersSettingsTitle = stringResource(Res.string.compose_settings_page_supporters_contributors)
     val licensesSettingsTitle = stringResource(Res.string.compose_settings_page_licenses_attributions)
     val collectionsTitle = stringResource(Res.string.collections_header)
     val newCollectionTitle = stringResource(Res.string.collections_new)
     val detailsFallbackTitle = stringResource(Res.string.meta_section_details_title)
+    // Null until bsm has answered for the profile that is signed in now. The row is gated on
+    // `== true` rather than on a Boolean so that "not known yet" and "not an administrator" both
+    // hide it — an administrator briefly losing a row while a request is in flight is a much
+    // smaller problem than a row that promises a screen this profile cannot open.
+    val isAdmin by BsmAdminRepository.isAdmin.collectAsStateWithLifecycle()
     val isRemoteLibrarySource = libraryUiState.sourceMode != LibrarySourceMode.LOCAL
     val appContentGeneration = if (ownsAppRuntime && appGateController != null) {
         val generation by appGateController.contentGeneration.collectAsStateWithLifecycle()
@@ -665,6 +673,20 @@ internal fun MainAppContent(
             }
         } finally {
             SyncManager.stopPeriodicNuvioSyncPull()
+        }
+    }
+    // A role bsm owns, not Supabase — Nuvio has no admin concept at all — and it is granted per
+    // signed-in profile. So the answer has to be re-asked whenever the profile changes and thrown
+    // away on sign-out. Kept in its own effect rather than folded into the one above, which
+    // collects the foreground monitor and therefore never returns.
+    LaunchedEffect(authState, profileState.activeProfile?.profileIndex) {
+        if (!ownsAppRuntime) return@LaunchedEffect
+        val authenticatedState = authState as? AuthState.Authenticated
+        // Forget the previous profile's answer before asking about this one: if the request fails,
+        // a stale `true` would leave an administrator's row up while a non-admin is signed in.
+        BsmAdminRepository.clear()
+        if (authenticatedState != null && !authenticatedState.isAnonymous) {
+            BsmAdminRepository.refresh()
         }
     }
     var resumePromptItem by remember { mutableStateOf<ContinueWatchingItem?>(null) }
@@ -1379,6 +1401,11 @@ internal fun MainAppContent(
                                 onCompanionSettingsClick = { navController.navigate(CompanionRoute(companionTitle)) },
                                 onAddTvSettingsClick = { navController.navigate(AddTvRoute(addTvTitle)) },
                                 onEnrollTvSettingsClick = { navController.navigate(EnrollTvRoute(enrollTvTitle)) },
+                                onAdminSettingsClick = if (isAdmin == true) {
+                                    { navController.navigate(AdminSettingsRoute(adminTitle)) }
+                                } else {
+                                    null
+                                },
                                 onAccountSettingsClick = { navController.navigate(AccountSettingsRoute(accountSettingsTitle)) },
                                 onSupportersContributorsSettingsClick = {
                                     if (AppFeaturePolicy.supportersContributorsPageEnabled) {
@@ -1583,6 +1610,11 @@ internal fun MainAppContent(
                 entry<EnrollTvRoute> { route ->
                     SettingsDestination(route, navController) { onBack ->
                         EnrollTvScreen(onBack = onBack)
+                    }
+                }
+                entry<AdminSettingsRoute> { route ->
+                    SettingsDestination(route, navController) { onBack ->
+                        AdminScreen(onBack = onBack)
                     }
                 }
                 entry<IptvChannelsRoute> { route ->

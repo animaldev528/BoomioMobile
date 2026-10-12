@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.rounded.AccountCircle
+import androidx.compose.material.icons.rounded.AdminPanelSettings
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.CloudDownload
@@ -35,6 +36,7 @@ import nuvio.composeapp.generated.resources.compose_about_version_format
 import nuvio.composeapp.generated.resources.compose_settings_page_account
 import nuvio.composeapp.generated.resources.compose_settings_page_advanced
 import nuvio.composeapp.generated.resources.compose_settings_page_add_tv
+import nuvio.composeapp.generated.resources.compose_settings_page_admin
 import nuvio.composeapp.generated.resources.compose_settings_page_enroll_tv
 import nuvio.composeapp.generated.resources.compose_settings_page_companion
 import nuvio.composeapp.generated.resources.compose_settings_page_appearance
@@ -46,6 +48,7 @@ import nuvio.composeapp.generated.resources.compose_settings_page_privacy_policy
 import nuvio.composeapp.generated.resources.compose_settings_page_supporters_contributors
 import nuvio.composeapp.generated.resources.compose_settings_root_account_description
 import nuvio.composeapp.generated.resources.compose_settings_root_add_tv_description
+import nuvio.composeapp.generated.resources.compose_settings_root_admin_description
 import nuvio.composeapp.generated.resources.compose_settings_root_enroll_tv_description
 import nuvio.composeapp.generated.resources.compose_settings_root_appearance_description
 import nuvio.composeapp.generated.resources.compose_settings_root_check_updates_description
@@ -85,6 +88,7 @@ internal fun LazyListScope.settingsRootContent(
     onCompanionClick: () -> Unit = {},
     onAddTvClick: () -> Unit = {},
     onEnrollTvClick: () -> Unit = {},
+    onAdminClick: (() -> Unit)? = null,
     onTrackingClick: () -> Unit,
     onSupportersContributorsClick: () -> Unit,
     onLicensesAttributionsClick: () -> Unit,
@@ -142,6 +146,21 @@ internal fun LazyListScope.settingsRootContent(
                         isTablet = isTablet,
                         onClick = onAddTvClick,
                     )
+                    // Gated on the callback being present, exactly as the check-for-updates row is —
+                    // and here the null is load-bearing rather than cosmetic: admin is a role that
+                    // exists only in bsm, so a profile that does not hold it has no such screen to
+                    // open. A Boolean would read as "the feature is off"; a null callback says "this
+                    // person is not an administrator", which is the actual fact.
+                    if (onAdminClick != null) {
+                        SettingsGroupDivider(isTablet = isTablet)
+                        SettingsNavigationRow(
+                            title = stringResource(Res.string.compose_settings_page_admin),
+                            description = stringResource(Res.string.compose_settings_root_admin_description),
+                            icon = Icons.Rounded.AdminPanelSettings,
+                            isTablet = isTablet,
+                            onClick = onAdminClick,
+                        )
+                    }
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsNavigationRow(
                         title = stringResource(Res.string.compose_settings_page_tracking),

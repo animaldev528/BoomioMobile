@@ -114,6 +114,18 @@ data class AddTvRoute(override val title: String = "") : SettingsDestinationRout
 data class EnrollTvRoute(override val title: String = "") : SettingsDestinationRoute
 
 /**
+ * Administrator controls: every account, TV and playback limit on the box.
+ *
+ * A route rather than a `SettingsPage` entry for the same reason [EnrollTvRoute] is, and it carries
+ * its own weight: it reaches bsm on the `/tvpair` prefix, it is GLOBAL rather than scoped to the
+ * signed-in account, and it is the only destination in the app that is refused outright to most
+ * profiles. The settings row that opens it is hidden for a non-admin, but the route is not a secret
+ * — the refusal is server-side, and this screen renders it.
+ */
+@Serializable
+data class AdminSettingsRoute(override val title: String = "") : SettingsDestinationRoute
+
+/**
  * P5 live-TV channel picker. Reached from the companion screen rather than the
  * settings root, because sending a tune needs an ACTIVE companion session — a
  * root-level entry could be opened unpaired and would silently do nothing.
