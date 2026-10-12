@@ -20,6 +20,7 @@ import androidx.compose.material.icons.rounded.People
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Policy
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
@@ -33,6 +34,7 @@ import nuvio.composeapp.generated.resources.compose_about_made_with
 import nuvio.composeapp.generated.resources.compose_about_version_format
 import nuvio.composeapp.generated.resources.compose_settings_page_account
 import nuvio.composeapp.generated.resources.compose_settings_page_advanced
+import nuvio.composeapp.generated.resources.compose_settings_page_add_tv
 import nuvio.composeapp.generated.resources.compose_settings_page_companion
 import nuvio.composeapp.generated.resources.compose_settings_page_appearance
 import nuvio.composeapp.generated.resources.compose_settings_page_integrations
@@ -42,6 +44,7 @@ import nuvio.composeapp.generated.resources.compose_settings_page_playback
 import nuvio.composeapp.generated.resources.compose_settings_page_privacy_policy
 import nuvio.composeapp.generated.resources.compose_settings_page_supporters_contributors
 import nuvio.composeapp.generated.resources.compose_settings_root_account_description
+import nuvio.composeapp.generated.resources.compose_settings_root_add_tv_description
 import nuvio.composeapp.generated.resources.compose_settings_root_appearance_description
 import nuvio.composeapp.generated.resources.compose_settings_root_check_updates_description
 import nuvio.composeapp.generated.resources.compose_settings_root_check_updates_title
@@ -78,6 +81,7 @@ internal fun LazyListScope.settingsRootContent(
     onContentDiscoveryClick: () -> Unit,
     onIntegrationsClick: () -> Unit,
     onCompanionClick: () -> Unit = {},
+    onAddTvClick: () -> Unit = {},
     onTrackingClick: () -> Unit,
     onSupportersContributorsClick: () -> Unit,
     onLicensesAttributionsClick: () -> Unit,
@@ -114,6 +118,14 @@ internal fun LazyListScope.settingsRootContent(
                         icon = Icons.Rounded.AccountCircle,
                         isTablet = isTablet,
                         onClick = onAccountClick,
+                    )
+                    SettingsGroupDivider(isTablet = isTablet)
+                    SettingsNavigationRow(
+                        title = stringResource(Res.string.compose_settings_page_add_tv),
+                        description = stringResource(Res.string.compose_settings_root_add_tv_description),
+                        icon = Icons.Rounded.Tv,
+                        isTablet = isTablet,
+                        onClick = onAddTvClick,
                     )
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsNavigationRow(

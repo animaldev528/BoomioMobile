@@ -45,6 +45,7 @@ internal val navigationSavedStateConfiguration = SavedStateConfiguration {
             subclass(CollectionEditorPageRoute::class, CollectionEditorPageRoute.serializer())
             subclass(FolderDetailRoute::class, FolderDetailRoute.serializer())
             subclass(CompanionRoute::class, CompanionRoute.serializer())
+            subclass(AddTvRoute::class, AddTvRoute.serializer())
             subclass(IptvChannelsRoute::class, IptvChannelsRoute.serializer())
             subclass(WatchPartyRoute::class, WatchPartyRoute.serializer())
             subclass(StreamRoute::class, StreamRoute.serializer())

@@ -196,8 +196,17 @@ object DeviceLinkAuthRepository {
         if (isCustom) "${backendUrl.trimEnd('/')}/link" else officialLinkUrl
 }
 
+/**
+ * Upper-cases and drops everything that is not alphanumeric. The server applies
+ * the same rule (`upper(regexp_replace(code, '[^A-Za-z0-9]', '', 'g'))`) because
+ * the television displays the code as `ABC-DEF` and people type it back with the
+ * dash, in lower case, or pasted out of a QR url.
+ */
+internal fun normalizeDeviceLinkCode(value: String): String =
+    value.uppercase().filter { it.isLetterOrDigit() }
+
 internal fun formatDeviceLinkCode(value: String): String {
-    val normalized = value.uppercase().filter { it.isLetterOrDigit() }.take(6)
+    val normalized = normalizeDeviceLinkCode(value).take(6)
     return if (normalized.length <= 3) normalized else "${normalized.take(3)}-${normalized.drop(3)}"
 }
 

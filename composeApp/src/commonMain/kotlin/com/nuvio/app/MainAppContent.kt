@@ -89,6 +89,7 @@ import com.nuvio.app.features.addons.isWaitingForFirstEnabledManifest
 import com.nuvio.app.features.catalog.CatalogTarget
 import com.nuvio.app.features.cloud.CloudLibraryContentType
 import com.nuvio.app.features.cloud.CloudLibraryFile
+import com.nuvio.app.features.boomio.AddTvScreen
 import com.nuvio.app.features.boomio.CompanionScreen
 import com.nuvio.app.features.boomio.IptvChannelsScreen
 import com.nuvio.app.features.boomio.WatchPartyScreen
@@ -354,6 +355,7 @@ internal fun MainAppContent(
     val addonsSettingsTitle = stringResource(Res.string.compose_settings_page_addons)
     val pluginsSettingsTitle = stringResource(Res.string.compose_settings_page_plugins)
     val companionTitle = stringResource(Res.string.compose_settings_page_companion)
+    val addTvTitle = stringResource(Res.string.compose_settings_page_add_tv)
     val iptvTitle = stringResource(Res.string.iptv_title)
     val accountSettingsTitle = stringResource(Res.string.compose_settings_page_account)
     val supportersSettingsTitle = stringResource(Res.string.compose_settings_page_supporters_contributors)
@@ -1374,6 +1376,7 @@ internal fun MainAppContent(
                                     }
                                 },
                                 onCompanionSettingsClick = { navController.navigate(CompanionRoute(companionTitle)) },
+                                onAddTvSettingsClick = { navController.navigate(AddTvRoute(addTvTitle)) },
                                 onAccountSettingsClick = { navController.navigate(AccountSettingsRoute(accountSettingsTitle)) },
                                 onSupportersContributorsSettingsClick = {
                                     if (AppFeaturePolicy.supportersContributorsPageEnabled) {
@@ -1571,6 +1574,11 @@ internal fun MainAppContent(
                             onBack = onBack,
                             onOpenLiveTv = { navController.navigate(IptvChannelsRoute(iptvTitle)) },
                         )
+                    }
+                }
+                entry<AddTvRoute> { route ->
+                    SettingsDestination(route, navController) { onBack ->
+                        AddTvScreen(onBack = onBack)
                     }
                 }
                 entry<IptvChannelsRoute> { route ->
