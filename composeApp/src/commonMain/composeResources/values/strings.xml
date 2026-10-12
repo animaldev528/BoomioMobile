@@ -585,6 +585,28 @@
     <string name="add_tv_need_account_title">Sign in to Nuvio first</string>
     <string name="add_tv_need_account_description">A TV signs in as you, so this needs your Nuvio account. This device is using a guest session — sign out from Account settings, then sign in and come back.</string>
     <string name="add_tv_request_failed">Couldn’t reach Nuvio. Check your connection and try again.</string>
+    <!-- The other half of the pair above. "Sign in to TV" signs an already-known TV in; THIS row
+         gives a TV its device identity — the WireGuard peer and the mTLS certificate — from the
+         pairing code the TV displays on its enrolment screen. The two codes are the same shape
+         (6 characters, no vowels) and are shown by different screens on the TV, which is why the
+         labels have to carry the difference the codes cannot. -->
+    <string name="compose_settings_page_enroll_tv">Enroll TV</string>
+    <string name="compose_settings_root_enroll_tv_description">Set up a TV’s certificate and tunnel</string>
+    <string name="enroll_tv_intro">On the TV, open the setup screen and read the 6-character code, then type it here. This gives the TV its own certificate and tunnel — it is separate from signing in.</string>
+    <string name="enroll_tv_code_label">TV setup code</string>
+    <string name="enroll_tv_submit">Enroll TV</string>
+    <string name="enroll_tv_enrolling">Enrolling…</string>
+    <string name="enroll_tv_success">TV enrolled. It will finish setting itself up in a moment.</string>
+    <string name="enroll_tv_need_account_title">Sign in to Nuvio first</string>
+    <string name="enroll_tv_need_account_description">A TV is enrolled onto your Nuvio account, so this needs your Nuvio account. This device is using a guest session — sign out from Account settings, then sign in and come back.</string>
+    <string name="enroll_tv_request_failed">Couldn’t reach the enrollment service. Check your connection and try again.</string>
+    <string name="enroll_tv_devices_title">Your TVs</string>
+    <string name="enroll_tv_devices_empty">No TVs enrolled on this account yet.</string>
+    <string name="enroll_tv_limit_reached">You’ve reached your limit of %1$d TVs. Remove one below to enroll another.</string>
+    <string name="enroll_tv_revoke">Remove</string>
+    <string name="enroll_tv_revoking">Removing…</string>
+    <string name="enroll_tv_last_seen">Last seen %1$s</string>
+    <string name="enroll_tv_last_seen_never">Never connected</string>
     <string name="companion_unlinked_title">Not connected</string>
     <string name="companion_unlinked_description">Connect to a TV running the Nuvio companion hub to control playback from this phone.</string>
     <string name="companion_connect">Connect</string>

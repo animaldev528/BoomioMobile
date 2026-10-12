@@ -35,6 +35,7 @@ import nuvio.composeapp.generated.resources.compose_about_version_format
 import nuvio.composeapp.generated.resources.compose_settings_page_account
 import nuvio.composeapp.generated.resources.compose_settings_page_advanced
 import nuvio.composeapp.generated.resources.compose_settings_page_add_tv
+import nuvio.composeapp.generated.resources.compose_settings_page_enroll_tv
 import nuvio.composeapp.generated.resources.compose_settings_page_companion
 import nuvio.composeapp.generated.resources.compose_settings_page_appearance
 import nuvio.composeapp.generated.resources.compose_settings_page_integrations
@@ -45,6 +46,7 @@ import nuvio.composeapp.generated.resources.compose_settings_page_privacy_policy
 import nuvio.composeapp.generated.resources.compose_settings_page_supporters_contributors
 import nuvio.composeapp.generated.resources.compose_settings_root_account_description
 import nuvio.composeapp.generated.resources.compose_settings_root_add_tv_description
+import nuvio.composeapp.generated.resources.compose_settings_root_enroll_tv_description
 import nuvio.composeapp.generated.resources.compose_settings_root_appearance_description
 import nuvio.composeapp.generated.resources.compose_settings_root_check_updates_description
 import nuvio.composeapp.generated.resources.compose_settings_root_check_updates_title
@@ -82,6 +84,7 @@ internal fun LazyListScope.settingsRootContent(
     onIntegrationsClick: () -> Unit,
     onCompanionClick: () -> Unit = {},
     onAddTvClick: () -> Unit = {},
+    onEnrollTvClick: () -> Unit = {},
     onTrackingClick: () -> Unit,
     onSupportersContributorsClick: () -> Unit,
     onLicensesAttributionsClick: () -> Unit,
@@ -126,6 +129,18 @@ internal fun LazyListScope.settingsRootContent(
                         icon = Icons.Rounded.Tv,
                         isTablet = isTablet,
                         onClick = onAddTvClick,
+                    )
+                    SettingsGroupDivider(isTablet = isTablet)
+                    // Directly beneath "Sign in to TV", because they are the two halves of one
+                    // job and are told apart only by their words: signing in gives a TV a user
+                    // session, and this gives it a device identity. Same icon on purpose — the
+                    // subject is the same TV; the description is what differs.
+                    SettingsNavigationRow(
+                        title = stringResource(Res.string.compose_settings_page_enroll_tv),
+                        description = stringResource(Res.string.compose_settings_root_enroll_tv_description),
+                        icon = Icons.Rounded.Tv,
+                        isTablet = isTablet,
+                        onClick = onEnrollTvClick,
                     )
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsNavigationRow(

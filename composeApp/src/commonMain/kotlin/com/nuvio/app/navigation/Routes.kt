@@ -102,6 +102,18 @@ data class CompanionRoute(override val title: String = "") : SettingsDestination
 data class AddTvRoute(override val title: String = "") : SettingsDestinationRoute
 
 /**
+ * Enrols a TV — gives it its own certificate and tunnel — by approving the 6-character code on
+ * its setup screen.
+ *
+ * A separate destination from [AddTvRoute] deliberately, and not merely a second page in the
+ * settings tree: it reaches a different service (bsm, not Supabase) and it is the enrolment
+ * plane rather than the sign-in one. It is a route for the same reason the other flows that talk
+ * to a backend are routes rather than `SettingsPage` entries.
+ */
+@Serializable
+data class EnrollTvRoute(override val title: String = "") : SettingsDestinationRoute
+
+/**
  * P5 live-TV channel picker. Reached from the companion screen rather than the
  * settings root, because sending a tune needs an ACTIVE companion session — a
  * root-level entry could be opened unpaired and would silently do nothing.
