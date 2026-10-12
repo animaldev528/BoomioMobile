@@ -174,6 +174,23 @@ internal fun AppGate(
     var deviceSetupSkipped by rememberSaveable { mutableStateOf(false) }
 
     val needsDeviceSetup = boomioSession == null && !deviceSetupSkipped
+
+    /**
+     * A paired device signs in through nuvio's own page rather than a password typed here.
+     *
+     * Pairing is what makes this a boomio deployment's device, and on one of those the account
+     * sign-in is a nuvio account sign-in — Google, or nuvio's email & password form — which is
+     * the whole reason pairing exists. So the sign-in screen is told to hand over by itself.
+     *
+     * Read from the session rather than latched at the moment pairing completes, so it also
+     * holds for a device that paired on an earlier launch: signing out of nuvio does not
+     * un-enrol the device, and the next sign-in must not silently fall back to a local password.
+     *
+     * A device that took the Skip button has no session and keeps the ordinary form — the same
+     * escape hatch `needsDeviceSetup` honours, for the same reason.
+     */
+    val signInThroughNuvio = boomioSession != null
+
     var editingProfile by remember { mutableStateOf<NuvioProfile?>(null) }
     var autoSkipProfileSelection by rememberSaveable { mutableStateOf(false) }
     var profileSelectionLoading by rememberSaveable { mutableStateOf(false) }
@@ -479,7 +496,11 @@ internal fun AppGate(
                     }
                 }
                 AppGateScreen.Auth.name -> {
-                    AuthScreen(modifier = Modifier.fillMaxSize())
+                    AuthScreen(
+                        modifier = Modifier.fillMaxSize(),
+                        // Hand the sign-in to nuvio on a paired device; see `signInThroughNuvio`.
+                        autoStartDeviceLink = signInThroughNuvio,
+                    )
                 }
                 AppGateScreen.DeviceSetup.name -> {
                     // No success callback: the step ends by the session appearing, which the gate

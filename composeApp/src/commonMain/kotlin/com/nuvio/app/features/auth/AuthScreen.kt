@@ -187,6 +187,18 @@ private fun largeAuthFormMetrics(scale: Float): AuthFormMetrics = LargeAuthFormM
 @Composable
 fun AuthScreen(
     modifier: Modifier = Modifier,
+    /**
+     * Hand the sign-in over to nuvio instead of asking for it here.
+     *
+     * Set by the gate for a *paired* device — one that has been through the pairing step, whose
+     * operator approved it at bsm /tv. The device-login code is then minted and nuvio's own page
+     * opened without waiting for a tap, so the person signs in with Google (or nuvio's email &
+     * password form) and never needs a password typed into this app.
+     *
+     * A parameter rather than a constant because the sign-in screen is also reachable from a
+     * device that skipped pairing, which by definition has no nuvio page to be sent to.
+     */
+    autoStartDeviceLink: Boolean = false,
 ) {
     val authError by AuthRepository.error.collectAsStateWithLifecycle()
     val deviceLinkAuthState by DeviceLinkAuthRepository.state.collectAsStateWithLifecycle()
@@ -235,6 +247,45 @@ fun AuthScreen(
         if (!serverConnectionState.activeServer.isCustom) {
             showOfficialServerDialog = false
         }
+    }
+
+    // ── The passwordless hand-off ──
+    // On a paired device this screen is reached only when nuvio itself has no session, and the
+    // point of having paired is that the account sign-in happens on nuvio's page: the code is
+    // minted and that page opened without a tap. The form stays on screen underneath, so a
+    // password remains possible — it just stops being the only way in.
+    val uriHandler = LocalUriHandler.current
+    val deviceLinkEnabled = serverConnectionState.activeServer.capabilities.tvLogin
+    // Latched when the start below is issued, so the open still happens for the state that
+    // arrives asynchronously afterwards, whatever the caller's flag does in the meantime.
+    var handoffArmed by remember { mutableStateOf(false) }
+    var handoffOpenedUrl by remember { mutableStateOf<String?>(null) }
+
+    // ⚠️ Declared AFTER the backendUrl effect above on purpose. That one cancels any in-flight
+    // device link, and it fires on the first composition of this screen just as this does;
+    // effects run in declaration order, so cancelling must be given the chance to go first or
+    // it would abort the start issued here.
+    //
+    // Once per composition of this screen, not per recomposition: leaving it and coming back
+    // (a sign-out) is a new sign-in and should hand over again, while a recomposition is not.
+    LaunchedEffect(autoStartDeviceLink, deviceLinkEnabled) {
+        if (!autoStartDeviceLink || !deviceLinkEnabled) return@LaunchedEffect
+        handoffArmed = true
+        if (DeviceLinkAuthRepository.state.value is DeviceLinkAuthState.Idle) {
+            startDeviceLink()
+        }
+    }
+
+    LaunchedEffect(handoffArmed, deviceLinkAuthState) {
+        if (!handoffArmed) return@LaunchedEffect
+        val waiting = deviceLinkAuthState as? DeviceLinkAuthState.Waiting ?: return@LaunchedEffect
+        // Once per minted URL: returning from the browser must not relaunch it, but a
+        // "try again" that mints a new code should.
+        if (handoffOpenedUrl == waiting.verificationUrl) return@LaunchedEffect
+        handoffOpenedUrl = waiting.verificationUrl
+        // A failure here is already reported by the card's own Open button (`openFailed`), which
+        // the person can tap; nothing useful can be said from here that it does not say better.
+        runCatching { uriHandler.openUri(waiting.verificationUrl) }
     }
 
     DisposableEffect(Unit) {
