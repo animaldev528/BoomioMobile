@@ -3,6 +3,7 @@ package com.nuvio.app.core.auth
 import co.touchlab.kermit.Logger
 import com.nuvio.app.core.network.ServerConfiguration
 import com.nuvio.app.core.network.ServerConfigurationRepository
+import com.nuvio.app.core.network.SupabaseConfig
 import com.nuvio.app.core.network.SupabaseProvider
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.user.UserInfo
@@ -52,7 +53,19 @@ enum class DeviceLinkAuthFailure {
 object DeviceLinkAuthRepository {
     private const val maxConsecutivePollFailures = 3
     private const val maxPollAttempts = 120
-    private const val officialLinkUrl = "https://nuvio.tv/link"
+    /**
+     * Where the code is confirmed when this build ships no custom server.
+     *
+     * The server mints the code's URL from whatever base the client hands it, so this page has
+     * to live on the backend this build is actually pointed at. A hardcoded nuvio.tv sends a
+     * device enrolled with a self-hosted server to the public site carrying a code that server
+     * has never seen, and the sign-in then simply never happens.
+     *
+     * Derived rather than fixed because rebasing the app on a self-hosted backend rebases this
+     * page with it; a build that bakes no URL keeps the public one.
+     */
+    private val officialLinkUrl =
+        SupabaseConfig.URL.trim().trimEnd('/').ifBlank { "https://nuvio.tv" } + "/link"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val log = Logger.withTag("DeviceLinkAuthRepository")
     private val json = Json { ignoreUnknownKeys = true }
