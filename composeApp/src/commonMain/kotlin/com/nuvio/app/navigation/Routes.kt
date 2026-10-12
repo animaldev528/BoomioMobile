@@ -97,6 +97,10 @@ data class AddonsSettingsRoute(override val title: String = "") : SettingsDestin
 @Serializable
 data class CompanionRoute(override val title: String = "") : SettingsDestinationRoute
 
+/** Signs a TV in by approving the 6-character code it is showing. */
+@Serializable
+data class AddTvRoute(override val title: String = "") : SettingsDestinationRoute
+
 /**
  * P5 live-TV channel picker. Reached from the companion screen rather than the
  * settings root, because sending a tune needs an ACTIVE companion session — a
