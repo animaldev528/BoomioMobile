@@ -569,7 +569,13 @@
     <string name="compose_settings_root_general_section">GENERAL</string>
     <string name="compose_settings_root_integrations_description">Manage available integrations</string>
     <string name="compose_settings_root_companion_description">Control a TV from your phone</string>
-    <string name="compose_settings_page_add_tv">Add a TV</string>
+    <!-- Renamed 2026-10-12 from "Add a TV". This row does not add a device — it signs an
+         already-known TV in. The device-identity flow (WireGuard peer + mTLS certificate, the
+         pairing code the TV shows) is a separate row, "Enroll TV". The two codes look alike
+         (same 6-character, vowel-free alphabet) and the old label made them indistinguishable.
+         The key keeps its add_tv_* name deliberately: it is the same screen and the same
+         identifiers, only the words a person reads changed. -->
+    <string name="compose_settings_page_add_tv">Sign in to TV</string>
     <string name="compose_settings_root_add_tv_description">Sign in a TV with a 6-character code</string>
     <string name="add_tv_intro">On the TV, open the sign-in screen and read the 6-character code, then type it here. The TV signs itself in within a few seconds.</string>
     <string name="add_tv_code_label">TV code</string>
