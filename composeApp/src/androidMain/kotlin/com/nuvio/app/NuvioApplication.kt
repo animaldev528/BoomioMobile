@@ -43,6 +43,10 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
         // cold start off-network is already correct. The network half is `onAppForegrounded`, which
         // cannot run before there is a service origin to dial — see the store.
         TrackerCredentialsStore.initialize(this)
+        // Also synchronous, and also ordering-critical: enrolment sends this to bsm so a
+        // re-enrolling device lands back on its existing row, and a pairing request can be built
+        // before any activity has run. Reads ANDROID_ID — cheap, no I/O.
+        com.nuvio.app.core.device.DeviceHardwareFingerprint.initialize(this)
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {

@@ -2,6 +2,7 @@ package com.nuvio.app.core.overlay
 
 import android.content.Context
 import android.util.Log
+import com.nuvio.app.core.device.DeviceHardwareFingerprint
 import com.nuvio.app.features.boomio.BoomioPairingResult
 import com.nuvio.app.features.boomio.BoomioPairingTransport
 import com.nuvio.app.features.boomio.BoomioSessionRepository
@@ -316,7 +317,13 @@ internal class ChannelPairingTransport(
         val keypair = keypair() ?: return BoomioPairingResult.Unavailable
 
         val started = try {
-            begin(target, keypair, deviceId, platform, name)
+            // Read here rather than through the commonMain interface: this class is androidMain,
+            // so it can reach the fingerprint directly, and the pairing payload stays the same
+            // shape for a device that has none.
+            begin(
+                target, keypair, deviceId, platform, name,
+                hwFingerprint = DeviceHardwareFingerprint.value().ifBlank { null },
+            )
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -354,6 +361,7 @@ internal class ChannelPairingTransport(
         deviceId: String,
         platform: String?,
         name: String?,
+        hwFingerprint: String? = null,
     ): Pair<OverlayProvisionConnection, ProvisionMessage.PairCode>? {
         var opened: OverlayProvisionConnection? = null
         return try {
@@ -367,7 +375,7 @@ internal class ChannelPairingTransport(
                 connectTimeoutMs = OverlayProvisioning.PAIR_CONNECT_BUDGET_MS,
             )
             opened = connection
-            val reply = connection.pairRequest(deviceId, platform, name)
+            val reply = connection.pairRequest(deviceId, platform, name, hwFingerprint)
             val code = reply as? ProvisionMessage.PairCode
                 ?: throw OverlayProvisionException.ProtocolFault(
                     "pair.request answered '${reply::class.simpleName}'",

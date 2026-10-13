@@ -103,6 +103,19 @@ internal object DeviceCapabilityProbe {
         ""
     }
 
+    /**
+     * [hardwareFingerprint], for callers outside a capability report — the pairing request.
+     *
+     * ⚠️ **It has to be this same value.** bsm looks the device's row up by fingerprint *first*
+     * when a device enrols, so a pairing request that carried anything else (an install id, say)
+     * could never match the row this device's capability reports write to — and every reinstall
+     * then minted one more row for the same box. That is the duplicate-rows defect this closes.
+     *
+     * Returns "" when the platform will not supply an ANDROID_ID; callers omit the field then,
+     * which leaves bsm falling back to the install id exactly as it did before.
+     */
+    fun fingerprint(context: Context): String = hardwareFingerprint(context)
+
     fun buildReport(
         context: Context,
         installId: String,
