@@ -1,5 +1,6 @@
 package com.nuvio.app.core.deeplink
 
+import com.nuvio.app.core.auth.GoogleSignInRepository
 import com.nuvio.app.core.tracking.ensureTrackingProvidersRegistered
 import com.nuvio.app.features.player.infusePlaybackCallbacks
 import com.nuvio.app.features.tracking.TrackingProviderRegistry
@@ -43,6 +44,9 @@ fun handleAppUrl(url: String) {
     val normalizedUrl = url.trim()
     if (normalizedUrl.isBlank()) return
     if (infusePlaybackCallbacks.handleUrl(normalizedUrl)) return
+    // The app's own account sign-in, ahead of the trackers: `nuvio://auth/…` is shared with
+    // theirs (simkl, trakt), and this one answers only for `nuvio://auth/google`.
+    if (GoogleSignInRepository.handleCallback(normalizedUrl)) return
 
     ensureTrackingProvidersRegistered()
     TrackingProviderRegistry.handleAuthCallback(normalizedUrl)

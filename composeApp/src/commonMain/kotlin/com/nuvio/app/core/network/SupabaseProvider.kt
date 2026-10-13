@@ -1,9 +1,11 @@
 package com.nuvio.app.core.network
 
+import com.nuvio.app.core.auth.AuthCodeVerifierCache
 import com.nuvio.app.core.build.AppVersionConfig
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.annotations.SupabaseInternal
 import io.github.jan.supabase.auth.Auth
+import io.github.jan.supabase.auth.FlowType
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.functions.Functions
 import io.github.jan.supabase.postgrest.Postgrest
@@ -106,7 +108,16 @@ object SupabaseProvider {
                     headers.append(HttpHeaders.UserAgent, userAgent)
                 }
             }
-            install(Auth)
+            install(Auth) {
+                // The app signs in with Google through the browser, and that flow hands the
+                // answer back as a `?code=`: PKCE is what binds that code to this app, since
+                // the verifier it was minted against never leaves the device. Left at the
+                // SDK's default (implicit) the authorize URL carries no challenge and
+                // `exchangeCodeForSession` has nothing to present.
+                flowType = FlowType.PKCE
+                // Kept on disk, not in the SDK's in-memory default: see AuthCodeVerifierCache.
+                codeVerifierCache = AuthCodeVerifierCache
+            }
             install(Postgrest)
             install(Functions)
             install(Storage)
