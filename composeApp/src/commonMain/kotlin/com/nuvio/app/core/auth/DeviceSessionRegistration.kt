@@ -22,6 +22,14 @@ private val REGISTRATION_INTERVAL = 15.minutes
 internal data class DeviceClientMetadata(
     val deviceName: String,
     val platform: String,
+    /**
+     * The device's hardware fingerprint — the value bsm keys a device row on. Blank where the
+     * platform will not supply one, and blank on iOS until it grows an equivalent; callers must
+     * treat blank as "unknown" and omit it rather than send an empty string.
+     *
+     * Defaulted so every existing construction (and the iOS actual) stays valid.
+     */
+    val hwFingerprint: String = "",
 )
 
 internal expect fun currentDeviceClientMetadata(): DeviceClientMetadata

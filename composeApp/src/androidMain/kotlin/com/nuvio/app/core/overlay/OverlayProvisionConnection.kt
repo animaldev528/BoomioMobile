@@ -89,14 +89,25 @@ internal class OverlayProvisionConnection private constructor(
         }
     }
 
-    /** `pair.request` — asks for a user code for the owner to approve at [ProvisionMessage.PairCode]. */
-    suspend fun pairRequest(deviceId: String, platform: String?, name: String?): ProvisionMessage =
+    /**
+     * `pair.request` — asks for a user code for the owner to approve at [ProvisionMessage.PairCode].
+     *
+     * [hwFingerprint] rides along so this door enrols onto the same bsm row the capability report
+     * uses; omitted when unknown, which is the shape this message has always had.
+     */
+    suspend fun pairRequest(
+        deviceId: String,
+        platform: String?,
+        name: String?,
+        hwFingerprint: String? = null,
+    ): ProvisionMessage =
         request(
             buildJsonObject {
                 put("t", JsonPrimitive("pair.request"))
                 put("device_id", JsonPrimitive(deviceId))
                 if (platform != null) put("platform", JsonPrimitive(platform))
                 if (name != null) put("name", JsonPrimitive(name))
+                if (!hwFingerprint.isNullOrBlank()) put("hw_fingerprint", JsonPrimitive(hwFingerprint))
             }
         )
 

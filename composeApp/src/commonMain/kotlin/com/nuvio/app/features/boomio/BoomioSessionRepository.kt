@@ -449,6 +449,7 @@ object BoomioSessionRepository {
                         device_id = SyncClientIdentity.currentClientId(),
                         platform = metadata.platform,
                         name = metadata.deviceName,
+                        hw_fingerprint = metadata.hwFingerprint,
                     ),
                 ),
             )
@@ -558,6 +559,15 @@ private data class DeviceRequestPayload(
     @SerialName("device_id") val device_id: String,
     @SerialName("platform") val platform: String,
     @SerialName("name") val name: String,
+    /**
+     * The device's hardware fingerprint, so bsm can join this enrolment to the row the device's
+     * capability reports already write to instead of inserting a second row for one box.
+     *
+     * Defaulted to "" and omitted when blank (`encodeDefaults` is off): a device that cannot
+     * produce one sends the same payload it always did, and bsm keeps falling back to the
+     * install id. bsc stores it in the pairing record and bsm's approve doors read it there.
+     */
+    @SerialName("hw_fingerprint") val hw_fingerprint: String = "",
 )
 
 @Serializable
