@@ -168,18 +168,27 @@ internal object BsmAdminRepository {
     /**
      * Ask bsm whether the active profile is an administrator.
      *
-     * ⚠️ ONLY A DEFINITIVE ANSWER WRITES THE FLAG. A 200 is one, and a 401 is one — a dead session
-     * administers nothing. A transport error or a 5xx is NOT, and leaves the previous answer alone:
-     * flipping the row off because the network blipped would look exactly like being demoted, and
-     * would hide the Admin entry from someone who is standing in front of a box that is briefly
-     * unreachable.
+     * ⚠️ ONLY A DEFINITIVE ANSWER WRITES THE FLAG. A 200 is one, and a 401 *from the server* is one —
+     * a dead session administers nothing. A transport error or a 5xx is NOT, and leaves the previous
+     * answer alone: flipping the row off because the network blipped would look exactly like being
+     * demoted, and would hide the Admin entry from someone who is standing in front of a box that is
+     * briefly unreachable.
+     *
+     * ⚠️ **A token this process has not got yet is the third case, and it used to be miscounted as
+     * the second.** [request] reports a missing token as 401 so the *calls* can say "sign in again",
+     * but no question was asked, so there is no answer to believe. Counting it as a demotion was a
+     * real bug with a nasty shape: the answer is only ever re-asked when `authState` or the profile
+     * index changes (see `MainAppContent`), so one cold start that raced the session — the effect
+     * runs before the token is restorable — latched `false` for the rest of the session, and the
+     * Admin row stayed gone with nothing in it to retry. That is why [Response.refusedByServer]
+     * exists, and why the row is also re-asked on every return to the foreground.
      */
     suspend fun refresh() {
         val response = request("GET", WHOAMI_PATH)
         when {
             response.status == 200 -> _isAdmin.value = response.payload?.isAdmin == true
-            response.status == 401 -> _isAdmin.value = false
-            else -> Unit // transport error or an outage — keep what we last knew
+            response.status == 401 && response.refusedByServer -> _isAdmin.value = false
+            else -> Unit // no token yet, a transport error, or an outage — keep what we last knew
         }
     }
 
@@ -338,6 +347,16 @@ internal object BsmAdminRepository {
         val payload: AdminResponse?,
         val transportError: String?,
         val signIn: Boolean,
+        /**
+         * ⚠️ **True only when an HTTP answer actually arrived and was a 401.**
+         *
+         * A token this process does not have yet is *also* reported as 401, because "sign in again"
+         * is the right thing to say to someone who tapped a row — but it is not evidence about
+         * anyone's role, and [refresh] must never read it as one. The two states look identical in
+         * [status] and mean opposite things: one is a server saying no, the other is this app never
+         * having asked.
+         */
+        val refusedByServer: Boolean = false,
     )
 
     private suspend fun request(method: String, path: String, body: String? = null): Response {
@@ -367,6 +386,7 @@ internal object BsmAdminRepository {
                 payload = runCatching { json.decodeFromString<AdminResponse>(raw.body) }.getOrNull(),
                 transportError = null,
                 signIn = raw.status == 401,
+                refusedByServer = raw.status == 401,
             )
         } catch (error: CancellationException) {
             throw error

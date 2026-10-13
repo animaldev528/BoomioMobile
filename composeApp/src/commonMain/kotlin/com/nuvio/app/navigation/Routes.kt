@@ -126,6 +126,18 @@ data class EnrollTvRoute(override val title: String = "") : SettingsDestinationR
 data class AdminSettingsRoute(override val title: String = "") : SettingsDestinationRoute
 
 /**
+ * The WireGuard details this device is using — read-only, and the same for every profile.
+ *
+ * A route rather than a `SettingsPage` entry, for the same reason [EnrollTvRoute] is one: it
+ * describes a seam that exists only against a live deployment, and the values it shows are written
+ * by enrollment rather than read from Settings. Unlike [AdminSettingsRoute] it is not gated — the
+ * tunnel is this device's own, so a profile that cannot administer the box can still be told how its
+ * own traffic reaches it.
+ */
+@Serializable
+data class VpnSettingsRoute(override val title: String = "") : SettingsDestinationRoute
+
+/**
  * P5 live-TV channel picker. Reached from the companion screen rather than the
  * settings root, because sending a tune needs an ACTIVE companion session — a
  * root-level entry could be opened unpaired and would silently do nothing.
