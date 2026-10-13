@@ -5,13 +5,13 @@ import com.nuvio.app.features.addons.httpGetTextWithHeaders
 import com.nuvio.app.features.addons.httpPostJsonWithHeaders
 import com.nuvio.app.features.addons.httpRequestRaw
 import com.nuvio.app.features.profiles.ProfileRepository
+import com.nuvio.app.features.tracking.TrackerCredentials
 import com.nuvio.app.features.tracking.TrackingAuthProvider
 import com.nuvio.app.features.tracking.TrackingCapability
 import com.nuvio.app.features.tracking.TrackingProviderDescriptor
 import com.nuvio.app.features.tracking.TrackingProviderId
 import com.nuvio.app.features.tracking.TrackingProviderRegistry
 import io.ktor.http.Url
-import io.ktor.http.encodeURLParameter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +27,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlin.random.Random
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.getString
@@ -35,7 +38,6 @@ import kotlinx.coroutines.runBlocking
 
 object TraktAuthRepository : TrackingAuthProvider {
     private const val BASE_URL = "https://api.trakt.tv"
-    private const val AUTHORIZE_URL = "https://trakt.tv/oauth/authorize"
     private const val API_VERSION = "2"
 
     private val log = Logger.withTag("TraktAuth")
@@ -113,8 +115,18 @@ object TraktAuthRepository : TrackingAuthProvider {
         return _uiState.value
     }
 
+    /**
+     * Whether the Trakt flow can run at all.
+     *
+     * ⚠️ **The secret is required only when the id is ours.** The baked app is a *pair* — it was
+     * registered with a secret and Trakt expects both at the token exchange. An id served by the
+     * deployment is not a pair from this app's point of view: its secret belongs to the admin and
+     * deliberately never leaves the server, so the exchange runs on PKCE instead. Requiring a secret
+     * there would refuse a deployment that is configured *correctly*.
+     */
     fun hasRequiredCredentials(): Boolean =
-        TraktConfig.CLIENT_ID.isNotBlank() && TraktConfig.CLIENT_SECRET.isNotBlank()
+        TraktConfig.CLIENT_ID.isNotBlank() &&
+            (TraktConfig.CLIENT_SECRET.isNotBlank() || TrackerCredentials.usesPkce)
 
     fun onConnectRequested(profileId: Int = ProfileRepository.activeProfileId): String? {
         ensureLoaded(profileId)
@@ -124,9 +136,13 @@ object TraktAuthRepository : TrackingAuthProvider {
         }
 
         val oauthState = generateOauthState()
+        // Only the deployment's app needs PKCE — see TraktPkce for why, and why the baked flow is
+        // left alone. The verifier is stored with the state because the URL is re-derived from it.
+        val pkce = if (TrackerCredentials.usesPkce) generateTraktPkceMaterial() else null
         authState = authState.copy(
             pendingAuthorizationState = oauthState,
             pendingAuthorizationStartedAtMillis = TraktPlatformClock.nowEpochMs(),
+            pendingPkceVerifier = pkce?.verifier,
         )
         persist(profileId)
         publish(
@@ -134,13 +150,17 @@ object TraktAuthRepository : TrackingAuthProvider {
             errorMessage = null,
         )
 
-        return buildAuthorizationUrl(oauthState)
+        return buildAuthorizationUrl(oauthState, pkce?.challenge)
     }
 
     fun pendingAuthorizationUrl(profileId: Int = ProfileRepository.activeProfileId): String? {
         ensureLoaded(profileId)
         val oauthState = authState.pendingAuthorizationState ?: return null
-        return buildAuthorizationUrl(oauthState)
+        // Re-derived from the stored verifier rather than remembered: a cold start rebuilds this URL,
+        // and a challenge that no longer matches the verifier is a sign-in that fails with no
+        // visible cause at the very last step.
+        val challenge = authState.pendingPkceVerifier?.let { traktPkceChallenge(it) }
+        return buildAuthorizationUrl(oauthState, challenge)
     }
 
     fun onCancelAuthorization(profileId: Int = ProfileRepository.activeProfileId) {
@@ -290,14 +310,16 @@ object TraktAuthRepository : TrackingAuthProvider {
     }
 
     private suspend fun exchangeAuthorizationCode(code: String, profileId: Int = currentProfileId) {
-        val body = json.encodeToString(
-            TraktAuthorizationCodeRequest(
-                code = code,
-                clientId = TraktConfig.CLIENT_ID,
-                clientSecret = TraktConfig.CLIENT_SECRET,
-                redirectUri = TraktConfig.REDIRECT_URI,
-            ),
-        )
+        // The verifier is consumed with the code — it is the other half of the challenge the user's
+        // browser carried — so it is read here rather than regenerated.
+        val codeVerifier = authState.pendingPkceVerifier
+        val body = buildJsonObject {
+            put("code", code)
+            putClientCredentials()
+            put("redirect_uri", TraktConfig.REDIRECT_URI)
+            put("grant_type", "authorization_code")
+            codeVerifier?.let { put("code_verifier", it) }
+        }.toString()
 
         val response = runCatching {
             httpPostJsonWithHeaders(
@@ -336,6 +358,7 @@ object TraktAuthRepository : TrackingAuthProvider {
             expiresIn = parsed.expiresIn,
             pendingAuthorizationState = null,
             pendingAuthorizationStartedAtMillis = null,
+            pendingPkceVerifier = null,
         )
         persist(profileId)
         refreshUserSettings(profileId)
@@ -351,13 +374,10 @@ object TraktAuthRepository : TrackingAuthProvider {
 
         val token = authState.accessToken?.takeIf { it.isNotBlank() }
         if (!token.isNullOrBlank() && hasRequiredCredentials()) {
-            val body = json.encodeToString(
-                TraktRevokeRequest(
-                    token = token,
-                    clientId = TraktConfig.CLIENT_ID,
-                    clientSecret = TraktConfig.CLIENT_SECRET,
-                ),
-            )
+            val body = buildJsonObject {
+                put("token", token)
+                putClientCredentials()
+            }.toString()
             runCatching {
                 httpPostJsonWithHeaders(
                     url = "$BASE_URL/oauth/revoke",
@@ -388,14 +408,12 @@ object TraktAuthRepository : TrackingAuthProvider {
             return@withLock true
         }
 
-        val body = json.encodeToString(
-            TraktRefreshTokenRequest(
-                refreshToken = refreshToken,
-                clientId = TraktConfig.CLIENT_ID,
-                clientSecret = TraktConfig.CLIENT_SECRET,
-                redirectUri = TraktConfig.REDIRECT_URI,
-            ),
-        )
+        val body = buildJsonObject {
+            put("refresh_token", refreshToken)
+            putClientCredentials()
+            put("redirect_uri", TraktConfig.REDIRECT_URI)
+            put("grant_type", "refresh_token")
+        }.toString()
 
         val response = runCatching {
             httpRequestRaw(
@@ -478,6 +496,11 @@ object TraktAuthRepository : TrackingAuthProvider {
         authState = authState.copy(
             pendingAuthorizationState = null,
             pendingAuthorizationStartedAtMillis = null,
+            // ⚠️ The verifier dies with the attempt. A stale one left behind would be replayed against
+            // the *next* authorization's challenge, which is a mismatched pair of its own — and
+            // `pendingAuthorizationUrl` reads it, so it would also emit a challenge for an attempt the
+            // user already abandoned.
+            pendingPkceVerifier = null,
         )
     }
 
@@ -516,13 +539,22 @@ object TraktAuthRepository : TrackingAuthProvider {
         TraktAuthStorage.savePayload(profileId, json.encodeToString(authState))
     }
 
-    private fun buildAuthorizationUrl(state: String): String {
-        val responseType = "code"
-        val encodedClientId = TraktConfig.CLIENT_ID.encodeURLParameter()
-        val encodedRedirectUri = TraktConfig.REDIRECT_URI.encodeURLParameter()
-        val encodedState = state.encodeURLParameter()
-        return "$AUTHORIZE_URL?response_type=$responseType&client_id=$encodedClientId&redirect_uri=$encodedRedirectUri&state=$encodedState"
-    }
+    /**
+     * The browser URL the user is sent to, for this build's configured client id.
+     *
+     * ⚠️ **[codeChallenge] is null exactly when the flow is not PKCE, and the two must not drift.**
+     * The challenge is what binds the code that comes back to the verifier this app holds; sending it
+     * without a verifier at the exchange, or a verifier without a challenge here, fails the sign-in at
+     * the last step with nothing visible to explain it. The shape itself lives in
+     * [buildTraktAuthorizationUrl], where it can be asserted without a Trakt account and a browser.
+     */
+    private fun buildAuthorizationUrl(state: String, codeChallenge: String?): String =
+        buildTraktAuthorizationUrl(
+            clientId = TraktConfig.CLIENT_ID,
+            redirectUri = TraktConfig.REDIRECT_URI,
+            state = state,
+            codeChallenge = codeChallenge,
+        )
 
     private fun generateOauthState(): String {
         val nowPart = TraktPlatformClock.nowEpochMs().toString(16)
@@ -553,30 +585,26 @@ internal fun traktTokenRefreshResponseAction(status: Int): TraktTokenRefreshResp
     else -> TraktTokenRefreshResponseAction.TRANSIENT_FAILURE
 }
 
-@Serializable
-private data class TraktAuthorizationCodeRequest(
-    @SerialName("code") val code: String,
-    @SerialName("client_id") val clientId: String,
-    @SerialName("client_secret") val clientSecret: String,
-    @SerialName("redirect_uri") val redirectUri: String,
-    @SerialName("grant_type") val grantType: String = "authorization_code",
-)
-
-@Serializable
-private data class TraktRefreshTokenRequest(
-    @SerialName("refresh_token") val refreshToken: String,
-    @SerialName("client_id") val clientId: String,
-    @SerialName("client_secret") val clientSecret: String,
-    @SerialName("redirect_uri") val redirectUri: String,
-    @SerialName("grant_type") val grantType: String = "refresh_token",
-)
-
-@Serializable
-private data class TraktRevokeRequest(
-    @SerialName("token") val token: String,
-    @SerialName("client_id") val clientId: String,
-    @SerialName("client_secret") val clientSecret: String,
-)
+/**
+ * The client half of a token-endpoint body.
+ *
+ * ⚠️ **The pair travels together or not at all, and this is the one place that decides.** Trakt
+ * matches the id against the secret; sending the deployment's id with the build's secret is the
+ * mismatch that answers `invalid_client`, and the failure lands on the user as "sign-in failed" with
+ * nothing to explain it. So: while the id is ours the secret goes out, and once it is the
+ * deployment's it does not — the exchange is on PKCE instead, which is why [putClientCredentials]
+ * and a `code_verifier` are written by the same call sites.
+ *
+ * A builder rather than a `@Serializable` request class because the omission has to be a real
+ * omission: `explicitNulls` defaults to true, so a nullable `client_secret` would serialize as
+ * `"client_secret": null` and be rejected — which is the bug this shape exists to avoid.
+ */
+private fun JsonObjectBuilder.putClientCredentials() {
+    put("client_id", TraktConfig.CLIENT_ID)
+    if (!TrackerCredentials.usesPkce) {
+        put("client_secret", TraktConfig.CLIENT_SECRET)
+    }
+}
 
 @Serializable
 private data class TraktTokenResponse(

@@ -12,6 +12,7 @@ import coil3.request.CachePolicy
 import coil3.request.crossfade
 import coil3.svg.SvgDecoder
 import com.nuvio.app.core.poster.CustomPosterFallbackInterceptor
+import com.nuvio.app.features.tracking.TrackerCredentialsStore
 
 /**
  * Custom Application class that implements [SingletonImageLoader.Factory] to guarantee
@@ -20,6 +21,29 @@ import com.nuvio.app.core.poster.CustomPosterFallbackInterceptor
  * before MainActivity.onCreate, and interceptors registered later are ignored.
  */
 class NuvioApplication : Application(), SingletonImageLoader.Factory {
+
+    /**
+     * ⚠️ **The earliest hook in the process, and the tracker ids need one this early.**
+     *
+     * [TrackerCredentialsStore] overwrites the generated `TraktConfig.CLIENT_ID` and friends, and the
+     * first read of those can happen at *object initialization* rather than at a call site:
+     * `MdbListTracker` builds its configuration from `MdbListConfig.CLIENT_ID` the moment the object is
+     * touched, and it is touched from `ensureTrackingProvidersRegistered()`, which is reachable from
+     * several repositories. An `onCreate` in the activity would be early enough for every caller that
+     * exists today, but "enough today" is not a property to rely on for a value that has to be right
+     * before the first read — this runs before any activity, any deep link and any composition, so the
+     * ordering is true by construction.
+     *
+     * Every other `initialize` in the app lives in `MainActivity.onCreate`; this one is the exception,
+     * and the note there says so.
+     */
+    override fun onCreate() {
+        super.onCreate()
+        // Synchronous, and it must stay that way: it applies the ids a previous launch cached, so a
+        // cold start off-network is already correct. The network half is `onAppForegrounded`, which
+        // cannot run before there is a service origin to dial — see the store.
+        TrackerCredentialsStore.initialize(this)
+    }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {
         return ImageLoader.Builder(context)

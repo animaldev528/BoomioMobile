@@ -13,6 +13,17 @@ data class TraktAuthState(
     val userSlug: String? = null,
     val pendingAuthorizationState: String? = null,
     val pendingAuthorizationStartedAtMillis: Long? = null,
+    /**
+     * The PKCE verifier for the pending authorization, when this deployment's Trakt app is the one
+     * the flow is running against.
+     *
+     * ⚠️ **Stored with the state, not held in memory, because the URL is re-derived.** A cold start,
+     * or any later `pendingAuthorizationUrl`, rebuilds the authorize URL from this record — and a
+     * `code_challenge` that no longer matches the verifier is a sign-in that fails at the token
+     * exchange with no visible cause. Null means "no PKCE", which is the baked-app flow and must stay
+     * byte-for-byte what it was.
+     */
+    val pendingPkceVerifier: String? = null,
 ) {
     val isAuthenticated: Boolean
         get() = !accessToken.isNullOrBlank() && !refreshToken.isNullOrBlank()

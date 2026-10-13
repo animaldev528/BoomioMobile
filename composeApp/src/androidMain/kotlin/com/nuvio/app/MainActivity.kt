@@ -71,6 +71,7 @@ import com.nuvio.app.features.mdblist.PlatformMdbListSyncStorage
 import com.nuvio.app.features.simkl.SimklAuthStorage
 import com.nuvio.app.features.simkl.SimklSyncStorage
 import com.nuvio.app.features.tmdb.TmdbSettingsStorage
+import com.nuvio.app.features.tracking.TrackerCredentialsStore
 import com.nuvio.app.features.updater.AndroidAppUpdaterPlatform
 import com.nuvio.app.core.ui.CardDepthStyleStorage
 import com.nuvio.app.core.ui.PosterCardStyleStorage
@@ -114,6 +115,10 @@ open class MainActivity : AppCompatActivity() {
         BoomioSessionRepository.initialize()
         PrivateListeningSession.initialize(applicationContext)
         ServerConfigurationStorage.initialize(applicationContext)
+        // The deployment's own Trakt/Simkl/MDBList app ids are applied in `NuvioApplication.onCreate`
+        // instead of here — the one `initialize` in the app that is not on this list, because it has to
+        // precede the first read of a generated `*Config.CLIENT_ID`, which can be at object
+        // initialization. See the note there; `onResume` below runs its network half.
         // Beside the server configuration because the browse reads the host list from
         // it. This only stores the context; the browse itself is foreground-triggered.
         OverlayLocalDiscovery.initialize(applicationContext)
@@ -249,6 +254,10 @@ open class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         SecurityPolicyRefresh.onAppForegrounded()
+        // The same trigger for the tracker ids, and throttled the same way. It sits here rather than
+        // in `onCreate` because the service origin may still be the baked floor at cold start —
+        // discovery lands a moment later, and by the first resume the right host is in force.
+        TrackerCredentialsStore.onAppForegrounded()
     }
 
     override fun onUserLeaveHint() {
