@@ -239,9 +239,13 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |package com.nuvio.app.features.trakt
                 |
                 |object TraktConfig {
-                |    const val CLIENT_ID = "${props.getProperty("TRAKT_CLIENT_ID", "")}" 
-                |    const val CLIENT_SECRET = "${props.getProperty("TRAKT_CLIENT_SECRET", "")}" 
-                |    const val REDIRECT_URI = "${props.getProperty("TRAKT_REDIRECT_URI", "nuvio://auth/trakt")}" 
+                |    // Mutable on purpose: a self-hosted deployment registers its OWN Trakt
+                |    // application and serves its client id from bsc's GET /api/config, which the
+                |    // app applies at startup (TrackerCredentials). The baked value is the floor —
+                |    // it is what an unconfigured deployment keeps using, unchanged.
+                |    var CLIENT_ID = "${props.getProperty("TRAKT_CLIENT_ID", "")}"
+                |    const val CLIENT_SECRET = "${props.getProperty("TRAKT_CLIENT_SECRET", "")}"
+                |    const val REDIRECT_URI = "${props.getProperty("TRAKT_REDIRECT_URI", "nuvio://auth/trakt")}"
                 |}
                 """.trimMargin()
             )
@@ -254,7 +258,8 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |package com.nuvio.app.features.simkl
                 |
                 |object SimklConfig {
-                |    const val CLIENT_ID = "${props.getProperty("SIMKL_CLIENT_ID", "")}"
+                |    // Mutable for the same reason as TraktConfig.CLIENT_ID — see the note there.
+                |    var CLIENT_ID = "${props.getProperty("SIMKL_CLIENT_ID", "")}"
                 |    const val REDIRECT_URI = "${props.getProperty("SIMKL_REDIRECT_URI", "nuvio://auth/simkl")}"
                 |    const val APP_NAME = "${props.getProperty("SIMKL_APP_NAME", "nuvio")}"
                 |}
@@ -269,7 +274,8 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |package com.nuvio.app.features.mdblist
                 |
                 |object MdbListConfig {
-                |    const val CLIENT_ID = "${props.getProperty("MDBLIST_CLIENT_ID", "")}"
+                |    // Mutable for the same reason as TraktConfig.CLIENT_ID — see the note there.
+                |    var CLIENT_ID = "${props.getProperty("MDBLIST_CLIENT_ID", "")}"
                 |}
                 """.trimMargin()
             )
