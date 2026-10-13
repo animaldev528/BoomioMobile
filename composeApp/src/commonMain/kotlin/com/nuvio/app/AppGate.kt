@@ -174,6 +174,7 @@ internal fun AppGate(
     var deviceSetupSkipped by rememberSaveable { mutableStateOf(false) }
 
     val needsDeviceSetup = boomioSession == null && !deviceSetupSkipped
+
     var editingProfile by remember { mutableStateOf<NuvioProfile?>(null) }
     var autoSkipProfileSelection by rememberSaveable { mutableStateOf(false) }
     var profileSelectionLoading by rememberSaveable { mutableStateOf(false) }
@@ -479,7 +480,9 @@ internal fun AppGate(
                     }
                 }
                 AppGateScreen.Auth.name -> {
-                    AuthScreen(modifier = Modifier.fillMaxSize())
+                    AuthScreen(
+                        modifier = Modifier.fillMaxSize(),
+                    )
                 }
                 AppGateScreen.DeviceSetup.name -> {
                     // No success callback: the step ends by the session appearing, which the gate

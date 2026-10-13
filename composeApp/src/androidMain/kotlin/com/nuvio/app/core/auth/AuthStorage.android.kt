@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 actual object AuthStorage {
     private const val PREFS_NAME = "nuvio_auth"
     private const val KEY_ANONYMOUS_USER_ID = "anonymous_user_id"
+    private const val KEY_AUTH_CODE_VERIFIER = "pkce_code_verifier"
 
     private var preferences: SharedPreferences? = null
 
@@ -22,5 +23,16 @@ actual object AuthStorage {
 
     actual fun clearAnonymousUserId() {
         preferences?.edit()?.remove(KEY_ANONYMOUS_USER_ID)?.apply()
+    }
+
+    actual fun loadAuthCodeVerifier(): String? =
+        preferences?.getString(KEY_AUTH_CODE_VERIFIER, null)
+
+    actual fun saveAuthCodeVerifier(value: String) {
+        preferences?.edit()?.putString(KEY_AUTH_CODE_VERIFIER, value)?.apply()
+    }
+
+    actual fun clearAuthCodeVerifier() {
+        preferences?.edit()?.remove(KEY_AUTH_CODE_VERIFIER)?.apply()
     }
 }

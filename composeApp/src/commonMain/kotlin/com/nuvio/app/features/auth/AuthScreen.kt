@@ -82,10 +82,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.currentStateAsState
 import com.nuvio.app.core.auth.AuthRepository
 import com.nuvio.app.core.auth.DeviceLinkAuthRepository
 import com.nuvio.app.core.auth.DeviceLinkAuthState
+import com.nuvio.app.core.auth.GoogleSignInRepository
 import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.features.settings.AppBrandWordmark
 import kotlin.math.abs
@@ -95,10 +99,12 @@ import kotlin.math.sin
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.compose_auth_already_have_account
+import nuvio.composeapp.generated.resources.compose_auth_continue_with_google
 import nuvio.composeapp.generated.resources.compose_auth_continue_without_account
 import nuvio.composeapp.generated.resources.compose_auth_create_account
 import nuvio.composeapp.generated.resources.compose_auth_dont_have_account
 import nuvio.composeapp.generated.resources.compose_auth_email
+import nuvio.composeapp.generated.resources.compose_auth_google_failed
 import nuvio.composeapp.generated.resources.compose_auth_or_separator
 import nuvio.composeapp.generated.resources.compose_auth_password
 import nuvio.composeapp.generated.resources.compose_auth_sign_in
@@ -190,6 +196,8 @@ fun AuthScreen(
 ) {
     val authError by AuthRepository.error.collectAsStateWithLifecycle()
     val deviceLinkAuthState by DeviceLinkAuthRepository.state.collectAsStateWithLifecycle()
+    val googleError by GoogleSignInRepository.error.collectAsStateWithLifecycle()
+    val googleAwaitingBrowser by GoogleSignInRepository.isAwaitingBrowser.collectAsStateWithLifecycle()
     val serverConnectionState by ServerConnectionController.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
@@ -206,6 +214,7 @@ fun AuthScreen(
     fun submitAuth() {
         if (email.isBlank() || password.length < 6 || isLoading) return
         DeviceLinkAuthRepository.cancel()
+        GoogleSignInRepository.clearError()
         isLoading = true
         focusManager.clearFocus(force = true)
         scope.launch {
@@ -219,6 +228,7 @@ fun AuthScreen(
         DeviceLinkAuthRepository.cancel()
         isSignUp = !isSignUp
         AuthRepository.clearError()
+        GoogleSignInRepository.clearError()
     }
 
     fun startDeviceLink() {
@@ -234,6 +244,48 @@ fun AuthScreen(
         DeviceLinkAuthRepository.cancel()
         if (!serverConnectionState.activeServer.isCustom) {
             showOfficialServerDialog = false
+        }
+    }
+
+    val uriHandler = LocalUriHandler.current
+    val deviceLinkEnabled = serverConnectionState.activeServer.capabilities.tvLogin
+
+    // ── Signing in with Google, from here ──
+    // The account chooser itself cannot be framed, so the app hands the person out to it and
+    // takes the answer back as a deep link — but the *sign-in* stays on this screen: nothing
+    // here sends anyone to a page of ours, which is what a paired device used to do. The open
+    // is fire-and-forget, so the only thing worth tracking is that an answer is outstanding:
+    // that keeps the button honest while the person is looking at the browser, not at this.
+    var googleLaunchFailed by remember { mutableStateOf(false) }
+
+    fun startGoogleSignIn() {
+        if (isLoading) return
+        focusManager.clearFocus(force = true)
+        DeviceLinkAuthRepository.cancel()
+        googleLaunchFailed = false
+        val authorizationUrl = GoogleSignInRepository.beginAuthorization()
+        val opened = authorizationUrl != null &&
+            runCatching { uriHandler.openUri(authorizationUrl) }.isSuccess
+        if (!opened) {
+            googleLaunchFailed = true
+            GoogleSignInRepository.stopWaiting()
+        }
+    }
+
+    // `takeIf` on the string, not on the flag, so nothing is read from the resources for a
+    // failure that never happened.
+    val googleSignInError = googleError
+        ?: stringResource(Res.string.compose_auth_google_failed).takeIf { googleLaunchFailed }
+
+    // Coming back here without an answer is the common case — the person closed the account
+    // chooser — and the button must not go on saying that something is in flight. An answer that
+    // did arrive clears this itself; this covers the return that carries nothing, including a
+    // server that never sends one. It deliberately cancels nothing: a code already on its way
+    // must still be exchanged.
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    LaunchedEffect(lifecycleState) {
+        if (lifecycleState == Lifecycle.State.RESUMED) {
+            GoogleSignInRepository.stopWaiting()
         }
     }
 
@@ -285,7 +337,8 @@ fun AuthScreen(
                         password = password,
                         passwordVisible = passwordVisible,
                         isLoading = isLoading,
-                        authError = authError,
+                        googleAwaitingBrowser = googleAwaitingBrowser,
+                        authError = authError ?: googleSignInError,
                         deviceLinkAuthState = deviceLinkAuthState,
                         deviceLinkEnabled = serverConnectionState.activeServer.capabilities.tvLogin,
                         formPaneWidth = if (compactLargeScreen) 460.dp else formPaneWidth,
@@ -303,6 +356,7 @@ fun AuthScreen(
                         },
                         onPasswordVisibilityToggle = { passwordVisible = !passwordVisible },
                         onSubmit = ::submitAuth,
+                        onGoogleSignIn = ::startGoogleSignIn,
                         onToggleAuthMode = ::toggleAuthMode,
                         onContinueWithoutAccount = {
                             focusManager.clearFocus(force = true)
@@ -321,7 +375,8 @@ fun AuthScreen(
                         password = password,
                         passwordVisible = passwordVisible,
                         isLoading = isLoading,
-                        authError = authError,
+                        googleAwaitingBrowser = googleAwaitingBrowser,
+                        authError = authError ?: googleSignInError,
                         deviceLinkAuthState = deviceLinkAuthState,
                         deviceLinkEnabled = serverConnectionState.activeServer.capabilities.tvLogin,
                         statusBarTop = statusBarTop,
@@ -335,6 +390,7 @@ fun AuthScreen(
                         },
                         onPasswordVisibilityToggle = { passwordVisible = !passwordVisible },
                         onSubmit = ::submitAuth,
+                        onGoogleSignIn = ::startGoogleSignIn,
                         onToggleAuthMode = ::toggleAuthMode,
                         onContinueWithoutAccount = {
                             focusManager.clearFocus(force = true)
@@ -418,6 +474,7 @@ private fun AuthMobileLayout(
     password: String,
     passwordVisible: Boolean,
     isLoading: Boolean,
+    googleAwaitingBrowser: Boolean,
     authError: String?,
     deviceLinkAuthState: DeviceLinkAuthState,
     deviceLinkEnabled: Boolean,
@@ -426,6 +483,7 @@ private fun AuthMobileLayout(
     onPasswordChange: (String) -> Unit,
     onPasswordVisibilityToggle: () -> Unit,
     onSubmit: () -> Unit,
+    onGoogleSignIn: () -> Unit,
     onToggleAuthMode: () -> Unit,
     onContinueWithoutAccount: () -> Unit,
     onStartDeviceLink: () -> Unit,
@@ -479,6 +537,7 @@ private fun AuthMobileLayout(
                 password = password,
                 passwordVisible = passwordVisible,
                 isLoading = isLoading,
+                googleAwaitingBrowser = googleAwaitingBrowser,
                 authError = authError,
                 deviceLinkAuthState = deviceLinkAuthState,
                 deviceLinkEnabled = deviceLinkEnabled,
@@ -487,6 +546,7 @@ private fun AuthMobileLayout(
                 onPasswordChange = onPasswordChange,
                 onPasswordVisibilityToggle = onPasswordVisibilityToggle,
                 onSubmit = onSubmit,
+                onGoogleSignIn = onGoogleSignIn,
                 onToggleAuthMode = onToggleAuthMode,
                 onContinueWithoutAccount = onContinueWithoutAccount,
                 onStartDeviceLink = onStartDeviceLink,
@@ -506,6 +566,7 @@ private fun AuthLargeLayout(
     password: String,
     passwordVisible: Boolean,
     isLoading: Boolean,
+    googleAwaitingBrowser: Boolean,
     authError: String?,
     deviceLinkAuthState: DeviceLinkAuthState,
     deviceLinkEnabled: Boolean,
@@ -518,6 +579,7 @@ private fun AuthLargeLayout(
     onPasswordChange: (String) -> Unit,
     onPasswordVisibilityToggle: () -> Unit,
     onSubmit: () -> Unit,
+    onGoogleSignIn: () -> Unit,
     onToggleAuthMode: () -> Unit,
     onContinueWithoutAccount: () -> Unit,
     onStartDeviceLink: () -> Unit,
@@ -608,6 +670,7 @@ private fun AuthLargeLayout(
                     password = password,
                     passwordVisible = passwordVisible,
                     isLoading = isLoading,
+                    googleAwaitingBrowser = googleAwaitingBrowser,
                     authError = authError,
                     deviceLinkAuthState = deviceLinkAuthState,
                     deviceLinkEnabled = deviceLinkEnabled,
@@ -617,6 +680,7 @@ private fun AuthLargeLayout(
                     onPasswordChange = onPasswordChange,
                     onPasswordVisibilityToggle = onPasswordVisibilityToggle,
                     onSubmit = onSubmit,
+                    onGoogleSignIn = onGoogleSignIn,
                     onToggleAuthMode = onToggleAuthMode,
                     onContinueWithoutAccount = onContinueWithoutAccount,
                     onStartDeviceLink = onStartDeviceLink,
@@ -697,6 +761,7 @@ private fun AuthForm(
     password: String,
     passwordVisible: Boolean,
     isLoading: Boolean,
+    googleAwaitingBrowser: Boolean,
     authError: String?,
     deviceLinkAuthState: DeviceLinkAuthState,
     deviceLinkEnabled: Boolean,
@@ -706,6 +771,7 @@ private fun AuthForm(
     onPasswordChange: (String) -> Unit,
     onPasswordVisibilityToggle: () -> Unit,
     onSubmit: () -> Unit,
+    onGoogleSignIn: () -> Unit,
     onToggleAuthMode: () -> Unit,
     onContinueWithoutAccount: () -> Unit,
     onStartDeviceLink: () -> Unit,
@@ -717,6 +783,24 @@ private fun AuthForm(
     Column(
         modifier = Modifier.fillMaxWidth(),
     ) {
+        // The account route first, then the password route, so the screen leads with the one
+        // that asks the person for nothing they have to have been given. It is not the primary
+        // button of the screen — that stays the one completed entirely in here — so it wears
+        // the outlined treatment rather than the filled one.
+        AuthGoogleButton(
+            isAwaitingBrowser = googleAwaitingBrowser,
+            enabled = !isLoading,
+            height = metrics.primaryHeight,
+            scale = scale,
+            onClick = onGoogleSignIn,
+        )
+
+        Spacer(modifier = Modifier.height(metrics.secondaryTop))
+
+        AuthDivider(scale = scale)
+
+        Spacer(modifier = Modifier.height(metrics.toggleTop))
+
         AuthTextField(
             value = email,
             onValueChange = onEmailChange,
@@ -963,6 +1047,59 @@ private fun AuthTextField(
                     tint = AuthTextSecondary,
                 )
             }
+        }
+    }
+}
+
+/**
+ * "Continue with Google", the account route into nuvio.
+ *
+ * Shown in both modes — signing in with an account that does not exist yet creates it, which is
+ * the same promise the email form makes — and styled as the outlined secondary treatment: the
+ * primary action of this screen is the one that finishes inside it.
+ */
+@Composable
+internal fun AuthGoogleButton(
+    isAwaitingBrowser: Boolean,
+    enabled: Boolean,
+    height: Dp,
+    scale: Float,
+    onClick: () -> Unit,
+) {
+    Button(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(height),
+        enabled = enabled,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, AuthSecondaryButtonBorder),
+        contentPadding = PaddingValues(0.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = AuthSecondaryButtonBackground,
+            contentColor = AuthTextPrimary,
+            disabledContainerColor = AuthSecondaryButtonBackground.copy(alpha = 0.45f),
+            disabledContentColor = AuthTextPrimary.copy(alpha = 0.55f),
+        ),
+    ) {
+        if (isAwaitingBrowser) {
+            // The person is in the browser choosing an account, so the button has to say that an
+            // answer is outstanding — otherwise a screen they return to looks like one where
+            // nothing happened and the tap is simply repeated.
+            NuvioLoadingIndicator(
+                modifier = Modifier.size(20.dp * scale),
+                color = AuthTextPrimary,
+            )
+        } else {
+            Text(
+                text = stringResource(Res.string.compose_auth_continue_with_google),
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontSize = (15f * scale).sp,
+                    lineHeight = (21f * scale).sp,
+                    fontWeight = FontWeight.Medium,
+                ),
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }

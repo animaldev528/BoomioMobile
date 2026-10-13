@@ -346,10 +346,12 @@
     <string name="player_seek_position">Playback position</string>
     <string name="compose_action_reload">Reload</string>
     <string name="compose_auth_already_have_account">Already have an account? </string>
+    <string name="compose_auth_continue_with_google">Continue with Google</string>
     <string name="compose_auth_continue_without_account">Continue Without Account</string>
     <string name="compose_auth_create_account">Create Account</string>
     <string name="compose_auth_dont_have_account">Don't have an account? </string>
     <string name="compose_auth_email">Email</string>
+    <string name="compose_auth_google_failed">Couldn't sign in with Google.</string>
     <string name="compose_auth_link_cancel">Cancel</string>
     <string name="compose_auth_link_code_expired">This code expired.</string>
     <string name="compose_auth_link_creating_code">Creating code…</string>
