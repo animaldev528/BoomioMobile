@@ -7,9 +7,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.nuvio.app.core.overlay.OverlayEndpointState
+import com.nuvio.app.core.overlay.OverlayEndpointStatus
+import com.nuvio.app.core.overlay.OverlayEndpointStatusRow
 import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioSurfaceCard
@@ -18,12 +23,13 @@ import nuvio.composeapp.generated.resources.compose_settings_page_vpn
 import nuvio.composeapp.generated.resources.vpn_intro
 import nuvio.composeapp.generated.resources.vpn_label_address
 import nuvio.composeapp.generated.resources.vpn_label_device_name
-import nuvio.composeapp.generated.resources.vpn_label_dns
 import nuvio.composeapp.generated.resources.vpn_label_endpoint
+import nuvio.composeapp.generated.resources.vpn_label_overlay_address
 import nuvio.composeapp.generated.resources.vpn_label_server_key
 import nuvio.composeapp.generated.resources.vpn_not_enrolled_body
 import nuvio.composeapp.generated.resources.vpn_not_enrolled_title
 import nuvio.composeapp.generated.resources.vpn_private_key_note
+import nuvio.composeapp.generated.resources.vpn_section_endpoint
 import nuvio.composeapp.generated.resources.vpn_section_interface
 import nuvio.composeapp.generated.resources.vpn_section_peer
 import nuvio.composeapp.generated.resources.vpn_value_unset
@@ -32,13 +38,25 @@ import org.jetbrains.compose.resources.stringResource
 /**
  * The WireGuard details this device is using to reach the box.
  *
- * Read-only on purpose. Everything here is *learned*, not configured: [BoomioConfig.overlayEndpoint],
- * [BoomioConfig.overlayLocalCidr] and [BoomioConfig.overlayServerPubKey] are written by enrollment
- * from what the server assigned, and the overlay CIDR's first host is derived rather than sent. A
- * screen that let someone type over them would be offering an edit that the next enrollment silently
- * reverts — and, worse, an address the server never agreed to, which comes up as a handshake that
- * succeeds and then drops every return packet. So this screen reports; the things that change these
- * values are pairing a device and the endpoint ladder, and both live elsewhere.
+ * Read-only on purpose. What it reports is *learned*, not configured: the device name, the tunnel
+ * address and the server's public key are written by enrollment from what the server assigned, and
+ * the overlay's own address is derived rather than sent. A screen that let someone type over them
+ * would be offering an edit that the next enrollment silently reverts — and, worse, an address the
+ * server never agreed to, which comes up as a handshake that succeeds and then drops every return
+ * packet. So this screen reports; the things that change these values are pairing a device and the
+ * endpoint ladder, and both live elsewhere.
+ *
+ * ⚠️ **The endpoint is shown twice, and the two are not the same fact.** [vpn_section_endpoint]
+ * renders [OverlayEndpointStatusRow] — the *ladder's* answer to "where is the box", which is
+ * discovered (mDNS, then the DuckDNS record, then an address a person types) and is the value that
+ * can actually bring a tunnel up. [vpn_label_endpoint] is [BoomioConfig.overlayEndpoint], what this
+ * *build* was compiled with, which on most builds is blank and inert. Reading one for the other is
+ * the mistake this layout exists to prevent, so neither is labelled "Endpoint" alone.
+ *
+ * ⚠️ **Enrolment is [BoomioConfig.overlayDeviceName] being non-blank, not the endpoint.** The name
+ * is the one field the server only ever writes through an enrollment, so it is the honest signal; a
+ * build with a baked endpoint and no enrollment would otherwise claim to be enrolled, and the
+ * address and key below would be build defaults rather than this device's.
  *
  * ⚠️ **The private key is deliberately absent, and its absence is the one thing here worth stating
  * out loud.** It is generated on the device and never leaves it — the server is handed the public
@@ -47,8 +65,8 @@ import org.jetbrains.compose.resources.stringResource
  * that lists everything *except* the key otherwise reads as one that is hiding something.
  *
  * ⚠️ **Blank is a real state, not an error.** A build with no deployment baked in and no enrollment
- * yet has every field empty ([overlayEndpoint] blank is exactly what "the tunnel is inert" means
- * downstream), so the screen says "not enrolled" and still renders the table — an empty card would
+ * yet has every field empty (`overlayEndpoint` blank is exactly what "the tunnel is inert" means
+ * downstream), so the screen says "not enrolled" and still renders the tables — an empty card would
  * be indistinguishable from a broken one.
  */
 @Composable
@@ -56,8 +74,8 @@ fun VpnScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val endpoint = BoomioConfig.overlayEndpoint.trim()
-    val enrolled = endpoint.isNotEmpty()
+    val enrolled = BoomioConfig.overlayDeviceName.trim().isNotEmpty()
+    val status by OverlayEndpointState.status.collectAsState()
 
     NuvioScreen(modifier = modifier) {
         stickyHeader {
@@ -96,12 +114,22 @@ fun VpnScreen(
                     }
                 }
 
+                // The ladder's own row, not a copy of it: `NeedsManual` is the one state that
+                // carries an action, and that row is the only thing that renders the field which
+                // performs it. Hidden while the ladder is `Idle` — a platform that never started it
+                // has nothing to say, and an empty card would read as a broken one.
+                if (status != OverlayEndpointStatus.Idle) {
+                    VpnCard(title = stringResource(Res.string.vpn_section_endpoint)) {
+                        OverlayEndpointStatusRow(showUnavailable = true)
+                    }
+                }
+
                 VpnDetailCard(
                     title = stringResource(Res.string.vpn_section_interface),
                     rows = listOf(
                         stringResource(Res.string.vpn_label_device_name) to BoomioConfig.overlayDeviceName,
                         stringResource(Res.string.vpn_label_address) to BoomioConfig.overlayLocalCidr,
-                        stringResource(Res.string.vpn_label_dns) to BoomioConfig.overlayServerAddress,
+                        stringResource(Res.string.vpn_label_overlay_address) to BoomioConfig.overlayServerAddress,
                     ),
                 )
 
@@ -123,6 +151,26 @@ fun VpnScreen(
     }
 }
 
+/** A titled card whose body is arbitrary — the endpoint row brings its own layout. */
+@Composable
+private fun VpnCard(
+    title: String,
+    content: @Composable () -> Unit,
+) {
+    NuvioSurfaceCard {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            content()
+        }
+    }
+}
+
 /**
  * One titled group of label/value pairs.
  *
@@ -140,31 +188,22 @@ private fun VpnDetailCard(
     // inside a lambda that is not.
     val unset = stringResource(Res.string.vpn_value_unset)
 
-    NuvioSurfaceCard {
-        Column(
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-            )
-            rows.forEach { (label, value) ->
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        text = label,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        text = value.trim().ifEmpty { unset },
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = FontFamily.Monospace,
-                    )
-                }
+    VpnCard(title = title) {
+        rows.forEach { (label, value) ->
+            Column(
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = value.trim().ifEmpty { unset },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                )
             }
         }
     }

@@ -625,7 +625,8 @@
     <string name="vpn_section_peer">Peer — the box</string>
     <string name="vpn_label_device_name">Device name</string>
     <string name="vpn_label_address">Tunnel address</string>
-    <string name="vpn_label_dns">DNS</string>
+    <string name="vpn_section_endpoint">Endpoint — as discovered</string>
+    <string name="vpn_label_overlay_address">Address on the overlay</string>
     <string name="vpn_label_endpoint">Endpoint</string>
     <string name="vpn_label_server_key">Server public key</string>
     <string name="vpn_value_unset">Not assigned</string>
