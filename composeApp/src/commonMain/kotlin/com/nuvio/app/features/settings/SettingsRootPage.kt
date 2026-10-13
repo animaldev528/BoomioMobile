@@ -22,6 +22,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Policy
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Tv
+import androidx.compose.material.icons.rounded.VpnKey
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
@@ -37,6 +38,7 @@ import nuvio.composeapp.generated.resources.compose_settings_page_account
 import nuvio.composeapp.generated.resources.compose_settings_page_advanced
 import nuvio.composeapp.generated.resources.compose_settings_page_add_tv
 import nuvio.composeapp.generated.resources.compose_settings_page_admin
+import nuvio.composeapp.generated.resources.compose_settings_page_vpn
 import nuvio.composeapp.generated.resources.compose_settings_page_enroll_tv
 import nuvio.composeapp.generated.resources.compose_settings_page_companion
 import nuvio.composeapp.generated.resources.compose_settings_page_appearance
@@ -49,6 +51,7 @@ import nuvio.composeapp.generated.resources.compose_settings_page_supporters_con
 import nuvio.composeapp.generated.resources.compose_settings_root_account_description
 import nuvio.composeapp.generated.resources.compose_settings_root_add_tv_description
 import nuvio.composeapp.generated.resources.compose_settings_root_admin_description
+import nuvio.composeapp.generated.resources.compose_settings_root_vpn_description
 import nuvio.composeapp.generated.resources.compose_settings_root_enroll_tv_description
 import nuvio.composeapp.generated.resources.compose_settings_root_appearance_description
 import nuvio.composeapp.generated.resources.compose_settings_root_check_updates_description
@@ -89,6 +92,7 @@ internal fun LazyListScope.settingsRootContent(
     onAddTvClick: () -> Unit = {},
     onEnrollTvClick: () -> Unit = {},
     onAdminClick: (() -> Unit)? = null,
+    onVpnClick: () -> Unit = {},
     onTrackingClick: () -> Unit,
     onSupportersContributorsClick: () -> Unit,
     onLicensesAttributionsClick: () -> Unit,
@@ -145,6 +149,18 @@ internal fun LazyListScope.settingsRootContent(
                         icon = Icons.Rounded.Tv,
                         isTablet = isTablet,
                         onClick = onAddTvClick,
+                    )
+                    SettingsGroupDivider(isTablet = isTablet)
+                    // Sits with the TV rows rather than in General, because it answers the same kind
+                    // of question they do: *how this device reaches the box*. Unlike them it is not
+                    // gated — the tunnel is this device's own, so a profile that cannot administer
+                    // anything can still be told what its own traffic is doing.
+                    SettingsNavigationRow(
+                        title = stringResource(Res.string.compose_settings_page_vpn),
+                        description = stringResource(Res.string.compose_settings_root_vpn_description),
+                        icon = Icons.Rounded.VpnKey,
+                        isTablet = isTablet,
+                        onClick = onVpnClick,
                     )
                     // Gated on the callback being present, exactly as the check-for-updates row is —
                     // and here the null is load-bearing rather than cosmetic: admin is a role that

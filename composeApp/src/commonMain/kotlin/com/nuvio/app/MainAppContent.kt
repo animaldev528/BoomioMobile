@@ -93,6 +93,7 @@ import com.nuvio.app.features.boomio.AddTvScreen
 import com.nuvio.app.features.boomio.AdminScreen
 import com.nuvio.app.features.boomio.BsmAdminRepository
 import com.nuvio.app.features.boomio.EnrollTvScreen
+import com.nuvio.app.features.boomio.VpnScreen
 import com.nuvio.app.features.boomio.CompanionScreen
 import com.nuvio.app.features.boomio.IptvChannelsScreen
 import com.nuvio.app.features.boomio.WatchPartyScreen
@@ -361,6 +362,7 @@ internal fun MainAppContent(
     val addTvTitle = stringResource(Res.string.compose_settings_page_add_tv)
     val enrollTvTitle = stringResource(Res.string.compose_settings_page_enroll_tv)
     val adminTitle = stringResource(Res.string.compose_settings_page_admin)
+    val vpnTitle = stringResource(Res.string.compose_settings_page_vpn)
     val accountSettingsTitle = stringResource(Res.string.compose_settings_page_account)
     val supportersSettingsTitle = stringResource(Res.string.compose_settings_page_supporters_contributors)
     val licensesSettingsTitle = stringResource(Res.string.compose_settings_page_licenses_attributions)
@@ -664,6 +666,13 @@ internal fun MainAppContent(
                         if (syncProfileId != null) {
                             SyncManager.startPeriodicNuvioSyncPull(syncProfileId)
                             SyncManager.requestForegroundPull(syncProfileId)
+                            // Cheap, idempotent, and the only retry the Admin row gets: the ask above
+                            // is keyed on authState and the profile index, so a session that was not
+                            // ready when it ran would otherwise never be re-asked — and a profile
+                            // that IS an administrator would keep a missing row until they switched
+                            // profiles and back. One request per foreground, next to the two other
+                            // refresh-on-foreground calls, is the whole cost.
+                            BsmAdminRepository.refresh()
                         } else {
                             SyncManager.stopPeriodicNuvioSyncPull()
                         }
@@ -1406,6 +1415,7 @@ internal fun MainAppContent(
                                 } else {
                                     null
                                 },
+                                onVpnSettingsClick = { navController.navigate(VpnSettingsRoute(vpnTitle)) },
                                 onAccountSettingsClick = { navController.navigate(AccountSettingsRoute(accountSettingsTitle)) },
                                 onSupportersContributorsSettingsClick = {
                                     if (AppFeaturePolicy.supportersContributorsPageEnabled) {
@@ -1615,6 +1625,11 @@ internal fun MainAppContent(
                 entry<AdminSettingsRoute> { route ->
                     SettingsDestination(route, navController) { onBack ->
                         AdminScreen(onBack = onBack)
+                    }
+                }
+                entry<VpnSettingsRoute> { route ->
+                    SettingsDestination(route, navController) { onBack ->
+                        VpnScreen(onBack = onBack)
                     }
                 }
                 entry<IptvChannelsRoute> { route ->

@@ -615,6 +615,24 @@
          DEFAULT LOCALE ONLY, matching the Enroll TV precedent. -->
     <string name="compose_settings_page_admin">Admin</string>
     <string name="compose_settings_root_admin_description">Manage accounts, TVs and playback limits</string>
+    <!-- The WireGuard details screen. Read-only, and the DEFAULT LOCALE ONLY — matching the Admin
+         and Enroll TV precedent above, both of which also describe a seam that only exists against
+         a deployment. -->
+    <string name="compose_settings_page_vpn">VPN</string>
+    <string name="compose_settings_root_vpn_description">This device’s WireGuard tunnel</string>
+    <string name="vpn_intro">This device reaches the box over a WireGuard tunnel. These are the details it is using.</string>
+    <string name="vpn_section_interface">Interface — this device</string>
+    <string name="vpn_section_peer">Peer — the box</string>
+    <string name="vpn_label_device_name">Device name</string>
+    <string name="vpn_label_address">Tunnel address</string>
+    <string name="vpn_section_endpoint">Endpoint — as discovered</string>
+    <string name="vpn_label_overlay_address">Address on the overlay</string>
+    <string name="vpn_label_endpoint">Endpoint</string>
+    <string name="vpn_label_server_key">Server public key</string>
+    <string name="vpn_value_unset">Not assigned</string>
+    <string name="vpn_not_enrolled_title">Not enrolled yet</string>
+    <string name="vpn_not_enrolled_body">This device has no tunnel assignment yet. Its details appear here once it has enrolled with the box.</string>
+    <string name="vpn_private_key_note">This device’s private key is never shown here and never sent — it stays in this app’s own storage, and only its public half leaves the device.</string>
     <string name="admin_request_failed">Couldn’t reach the server. Check your connection and try again.</string>
     <string name="admin_not_admin_title">Not an administrator</string>
     <string name="admin_not_admin_description">This profile doesn’t have administrator rights on this box. Switch to the profile that does.</string>
