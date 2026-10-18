@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -15,6 +16,8 @@ import androidx.compose.ui.unit.dp
 import com.nuvio.app.core.overlay.OverlayEndpointState
 import com.nuvio.app.core.overlay.OverlayEndpointStatus
 import com.nuvio.app.core.overlay.OverlayEndpointStatusRow
+import com.nuvio.app.core.overlay.OverlayTunnelControl
+import com.nuvio.app.core.overlay.OverlayTunnelUiState
 import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioSurfaceCard
@@ -32,6 +35,14 @@ import nuvio.composeapp.generated.resources.vpn_private_key_note
 import nuvio.composeapp.generated.resources.vpn_section_endpoint
 import nuvio.composeapp.generated.resources.vpn_section_interface
 import nuvio.composeapp.generated.resources.vpn_section_peer
+import nuvio.composeapp.generated.resources.vpn_tunnel_connected
+import nuvio.composeapp.generated.resources.vpn_tunnel_disconnect
+import nuvio.composeapp.generated.resources.vpn_tunnel_disconnected
+import nuvio.composeapp.generated.resources.vpn_tunnel_down
+import nuvio.composeapp.generated.resources.vpn_tunnel_failed
+import nuvio.composeapp.generated.resources.vpn_tunnel_reconnect
+import nuvio.composeapp.generated.resources.vpn_tunnel_title
+import nuvio.composeapp.generated.resources.vpn_tunnel_unsupported
 import nuvio.composeapp.generated.resources.vpn_value_unset
 import org.jetbrains.compose.resources.stringResource
 
@@ -76,6 +87,7 @@ fun VpnScreen(
 ) {
     val enrolled = BoomioConfig.overlayDeviceName.trim().isNotEmpty()
     val status by OverlayEndpointState.status.collectAsState()
+    val tunnel by OverlayTunnelControl.state.collectAsState()
 
     NuvioScreen(modifier = modifier) {
         stickyHeader {
@@ -109,6 +121,48 @@ fun VpnScreen(
                                 text = stringResource(Res.string.vpn_not_enrolled_body),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                // Above the endpoint card on purpose: this is the control, and the cards
+                // below are the facts it acts on. Leading with the diagnosis would leave the
+                // one thing the screen can *do* below the fold on a phone.
+                //
+                // Hidden entirely on a platform with no tunnel. A card saying "unsupported"
+                // above a working endpoint is noise; there is nothing here for that user.
+                if (tunnel != OverlayTunnelUiState.Unsupported) {
+                    VpnCard(title = stringResource(Res.string.vpn_tunnel_title)) {
+                        Text(
+                            text = overlayTunnelText(tunnel),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Button(
+                            onClick = {
+                                // Real teardown, remembered across restarts -- see
+                                // OverlaySession. The projection above is what comes back.
+                                if (tunnel is OverlayTunnelUiState.Connected) {
+                                    OverlayTunnelControl.disconnect()
+                                } else {
+                                    OverlayTunnelControl.reconnect()
+                                }
+                            },
+                            // Nothing to reconnect to before the ladder has any answer at all.
+                            // Once the user disconnected by hand it stays live even from
+                            // `Idle`: Reconnect re-walks the ladders, so it is their retry.
+                            enabled = tunnel !is OverlayTunnelUiState.Down ||
+                                status != OverlayEndpointStatus.Idle,
+                        ) {
+                            Text(
+                                // The label is the action, not the state: a button reading
+                                // "Connected" is one you press to find out what happens.
+                                text = if (tunnel is OverlayTunnelUiState.Connected) {
+                                    stringResource(Res.string.vpn_tunnel_disconnect)
+                                } else {
+                                    stringResource(Res.string.vpn_tunnel_reconnect)
+                                },
                             )
                         }
                     }
@@ -149,6 +203,28 @@ fun VpnScreen(
             }
         }
     }
+}
+
+/**
+ * What the Private tunnel card says about the tunnel.
+ *
+ * ⚠️ **`Disconnected` and `Down` are different sentences on purpose.** `Down` is the app's
+ * answer before anything has happened — a cold start, or enrollment that has not supplied an
+ * address — and telling someone "you disconnected" when they did not would send them looking
+ * for a switch they never touched. Only [OverlayTunnelUiState.Disconnected] means a person
+ * asked for this, and only that one promises the state will hold.
+ *
+ * ⚠️ **The failure reason is shown verbatim.** It is the AAR's own words for why `up()`
+ * refused; paraphrasing it would make it unsearchable in a log or an issue.
+ */
+@Composable
+private fun overlayTunnelText(state: OverlayTunnelUiState): String = when (state) {
+    OverlayTunnelUiState.Connected -> stringResource(Res.string.vpn_tunnel_connected)
+    OverlayTunnelUiState.Disconnected -> stringResource(Res.string.vpn_tunnel_disconnected)
+    OverlayTunnelUiState.Down -> stringResource(Res.string.vpn_tunnel_down)
+    OverlayTunnelUiState.Unsupported -> stringResource(Res.string.vpn_tunnel_unsupported)
+    is OverlayTunnelUiState.Failed ->
+        stringResource(Res.string.vpn_tunnel_failed, state.reason)
 }
 
 /** A titled card whose body is arbitrary — the endpoint row brings its own layout. */
