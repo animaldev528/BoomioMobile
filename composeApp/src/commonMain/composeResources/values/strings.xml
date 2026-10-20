@@ -620,6 +620,14 @@
          a deployment. -->
     <string name="compose_settings_page_vpn">VPN</string>
     <string name="compose_settings_root_vpn_description">This device’s WireGuard tunnel</string>
+    <string name="vpn_tunnel_title">Private tunnel</string>
+    <string name="vpn_tunnel_disconnect">Disconnect</string>
+    <string name="vpn_tunnel_reconnect">Reconnect</string>
+    <string name="vpn_tunnel_connected">Connected — traffic is taking the WireGuard overlay.</string>
+    <string name="vpn_tunnel_disconnected">Disconnected — the tunnel stays down until you reconnect.</string>
+    <string name="vpn_tunnel_down">Not connected yet.</string>
+    <string name="vpn_tunnel_failed">Could not connect: %1$s</string>
+    <string name="vpn_tunnel_unsupported">This platform has no private tunnel.</string>
     <string name="vpn_intro">This device reaches the box over a WireGuard tunnel. These are the details it is using.</string>
     <string name="vpn_section_interface">Interface — this device</string>
     <string name="vpn_section_peer">Peer — the box</string>
