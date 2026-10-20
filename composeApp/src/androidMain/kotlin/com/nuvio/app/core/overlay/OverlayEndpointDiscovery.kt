@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.SystemClock
 import android.util.Log
+import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
 import com.nuvio.app.features.boomio.BOOMIO_SERVICE_HOST
@@ -663,7 +664,14 @@ internal object OverlayEndpointDiscovery {
         // in the session. The service name is added explicitly because it is the one host the
         // record itself names, and at a cold start it is the only one that matters.
         val svc = targets.svcName
-        if (svc != null) BoomioConfig.serviceOrigin = "https://$svc"
+        if (svc != null) {
+            BoomioConfig.serviceOrigin = "https://$svc"
+            // [BoomioConfig.serviceOrigin] is also the **auth** backend's origin, and that client
+            // caches itself on first use — so a publication naming a different host has to reach
+            // the network layer, not only the media plane. It is a no-op when the record names the
+            // host the build already floored on, which is the ordinary cold start.
+            scope.launch { ServerConfigurationRepository.onServiceOriginChanged() }
+        }
         val hosts = localServerHosts() + listOfNotNull(svc)
         if (hosts.isEmpty()) return
         for (plane in targets.inOrder()) {

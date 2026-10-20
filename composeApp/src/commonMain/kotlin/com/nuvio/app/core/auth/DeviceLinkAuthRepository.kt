@@ -5,6 +5,8 @@ import com.nuvio.app.core.network.ServerConfiguration
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.network.SupabaseConfig
 import com.nuvio.app.core.network.SupabaseProvider
+import com.nuvio.app.core.network.resolveBackendUrl
+import com.nuvio.app.features.boomio.BoomioConfig
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.user.UserInfo
 import io.github.jan.supabase.auth.user.UserSession
@@ -64,8 +66,8 @@ object DeviceLinkAuthRepository {
      * Derived rather than fixed because rebasing the app on a self-hosted backend rebases this
      * page with it; a build that bakes no URL keeps the public one.
      */
-    private val officialLinkUrl =
-        SupabaseConfig.URL.trim().trimEnd('/').ifBlank { "https://nuvio.tv" } + "/link"
+    private val officialLinkUrl: String
+        get() = resolveBackendUrl(SupabaseConfig.URL, BoomioConfig.serviceOrigin).ifBlank { "https://nuvio.tv" } + "/link"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val log = Logger.withTag("DeviceLinkAuthRepository")
     private val json = Json { ignoreUnknownKeys = true }
