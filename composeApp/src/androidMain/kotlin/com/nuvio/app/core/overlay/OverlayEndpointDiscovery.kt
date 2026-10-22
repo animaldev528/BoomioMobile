@@ -141,6 +141,24 @@ internal object OverlayEndpointDiscovery {
     private var recordInUse: String? = null
 
     /**
+     * What a person typed into the "Server address" field, or null when nobody ever has.
+     *
+     * ⚠️ **This is the one thing in the ladder that is persisted, and it is persisted because the
+     * alternative is a client that forgets its own server.** [BoomioConfig.overlayEndpoint] is
+     * runtime state: [accept] overwrites it with the literal it found, and the next process death
+     * takes that with it. A deployment entered by hand therefore survived exactly until Android
+     * reclaimed the process — after which the ladder fell back to [PROV_RECORD], which is the
+     * *reference* deployment's name. A client that had been pointed at its own box then silently
+     * began talking to somebody else's, and wiping the app "fixed" nothing because the typed value
+     * had never been app data.
+     *
+     * Only a value a human supplied is written here. What [accept] learns is a property of the
+     * network the client happened to be on, and must not outlive it.
+     */
+    @Volatile
+    private var configuredEndpoint: String? = null
+
+    /**
      * The name rung 2 asks about, and the reason it is not simply [PROV_RECORD].
      *
      * ⚠️ **[PROV_RECORD] is the BOOTSTRAP name, not this deployment's name.** It is compiled into
@@ -161,13 +179,37 @@ internal object OverlayEndpointDiscovery {
     internal val discoveryRecordName: String
         get() = configuredRecordName() ?: recordInUse ?: PROV_RECORD
 
-    /** [BoomioConfig.overlayEndpoint] as a name, or null when it is blank or a literal. */
+    /** The address this client was told to use: a person's entry first, the configuration second. */
+    private fun configuredAuthority(): String =
+        configuredEndpoint?.trim()?.takeIf { it.isNotEmpty() }
+            ?: BoomioConfig.overlayEndpoint.trim()
+
+    /** [configuredAuthority] as a name, or null when it is blank or a literal. */
     private fun configuredRecordName(): String? {
-        val configured = BoomioConfig.overlayEndpoint.trim()
+        val configured = configuredAuthority()
         if (configured.isEmpty()) return null
         val host = parseEndpointAuthority(configured, DEFAULT_WG_PORT)?.first ?: return null
         return if (literalOrNull(host) == null) host else null
     }
+
+    /** Reads the persisted entry back, before anything can walk the ladder against the default. */
+    private fun restoreConfiguredEndpoint(context: Context) {
+        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_CONFIGURED_ENDPOINT, null)?.trim().orEmpty()
+        if (stored.isEmpty()) return
+        configuredEndpoint = stored
+        BoomioConfig.overlayEndpoint = stored
+    }
+
+    private fun persistConfiguredEndpoint(context: Context, raw: String) {
+        configuredEndpoint = raw
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_CONFIGURED_ENDPOINT, raw)
+            .apply()
+    }
+
+    private const val PREFS = "boomio_overlay_discovery"
+    private const val KEY_CONFIGURED_ENDPOINT = "configured_endpoint"
 
     /** The WireGuard port, when nothing published one. */
     private const val DEFAULT_WG_PORT = OverlayAdvertTuple.DEFAULT_PORT
@@ -314,6 +356,11 @@ internal object OverlayEndpointDiscovery {
 
     fun initialize(context: Context) {
         appContext = context.applicationContext
+        // ⚠️ **Before anything can walk.** Rung 2 and rung 3 both read the configured authority, and
+        // a walk that starts from the compiled bootstrap name has already asked the wrong
+        // deployment by the time the UI could correct it — which is exactly the first-run race this
+        // restore exists to lose.
+        restoreConfiguredEndpoint(context.applicationContext)
         // ⚠️ Called **above** the once-per-process guard, and that ordering is deliberate. The
         // guard makes everything after it a no-op on a second call, which is right for observers
         // — but the UI's uplink is not an observer. Assigning a captured lambda twice costs
@@ -459,11 +506,40 @@ internal object OverlayEndpointDiscovery {
             scope.launch { ServerConfigurationRepository.onServiceOriginChanged() }
         }
 
-        val candidates = raceRungs(
-            { rung1Mdns() },
-            { rung2DiscoveryRecord(context) },
-        ).toMutableList()
-        rung3Manual(context)?.let(candidates::add)
+        // ⚠️ **An explicit answer replaces the ladder rather than joining it.** When a person has
+        // named a server, "is there one on this LAN?" is not a question worth asking: the only
+        // deployment whose answer is wanted is theirs, and every other candidate is a different
+        // account, a different library and a different auth backend. Rung 2 still runs — it reads
+        // the *configured* name's TXT (see [discoveryRecordName]), which is the same server
+        // publishing both of its planes — but rung 1's browse is skipped outright, so a neighbouring
+        // box on the same network can never be accepted as the tunnel endpoint either.
+        //
+        // Falling back to a stranger is not graceful degradation here; it is what "I typed my
+        // server and Google signed me into someone else's house" looks like.
+        val candidates = if (configuredEndpoint != null) {
+            mutableListOf<OverlayEndpoint>().apply {
+                rung3Manual(context)?.let { add(it) }
+                rung2DiscoveryRecord(context)?.let { add(it) }
+            }
+        } else {
+            raceRungs(
+                { rung1Mdns() },
+                { rung2DiscoveryRecord(context) },
+            ).toMutableList()
+        }
+        // ⚠️ **A server a person named goes to the FRONT.** The gate only decides *order* — it never
+        // rejects a candidate — so the first reachable one wins, and appending rung 3 last meant a
+        // client standing on a network that happens to have a boomio server on it could never be
+        // pointed anywhere else: the local advert was reachable, so it was always chosen, and the
+        // typed address was evaluated only as a candidate that had already lost. "The client was
+        // told which deployment this is" is a stronger fact than "there is one on this LAN".
+        //
+        // A compiled bootstrap default is *not* a person's answer, so it keeps the old last place;
+        // only [configuredEndpoint] — what somebody typed and what [offerManual] persisted — moves.
+        // The configured case has already put rung 3 first, above, and skipped rung 1 with it.
+        if (configuredEndpoint == null) {
+            rung3Manual(context)?.let { candidates.add(it) }
+        }
 
         // ⚠️ **The gate is a blocking connect, so it is pinned to IO explicitly.** `resolve()` is
         // reachable from `offerManual`, which a settings screen calls from the main thread — and
@@ -635,13 +711,9 @@ internal object OverlayEndpointDiscovery {
      * keeps the endpoint this rung hands the tunnel identical to the one rung 2 would have.
      */
     private suspend fun rung3Manual(context: Context): OverlayEndpoint? {
-        val raw = BoomioConfig.overlayEndpoint.trim()
+        val raw = configuredAuthority()
         if (raw.isEmpty()) return null
-        val key = validServerKeyOrNull(BoomioConfig.overlayServerPubKey)
-        if (key == null) {
-            Log.d(TAG, "Rung 3: an endpoint is configured but no usable server key is")
-            return null
-        }
+        val configuredKey = validServerKeyOrNull(BoomioConfig.overlayServerPubKey)
         val authority = parseEndpointAuthority(raw, DEFAULT_WG_PORT) ?: return null
         val (typedHost, typedPort) = authority
 
@@ -652,6 +724,14 @@ internal object OverlayEndpointDiscovery {
             OverlayDnsClient.resolve(context, typedHost, MANUAL_RESOLVE_BUDGET_MS)?.let { resolved ->
                 rememberTargets(resolved.tuple.targets)
                 val literal = resolved.address.hostAddress ?: return@let
+                // ⚠️ **The record's own key wins, and it is the only key a wiped client can have.**
+                // A name carries `pk` in its tuple, so a fresh install pointed at a deployment can
+                // build a working endpoint without ever having discovered anything first. Falling
+                // back to the configured key keeps the older shape for a record that publishes none
+                // — and that fallback is where a wrong box's key would come from, so it is second.
+                val key = validServerKeyOrNull(resolved.tuple.serverPublicKeyBase64)
+                    ?: configuredKey
+                    ?: return@let
                 return OverlayEndpoint(
                     host = literal,
                     port = resolved.tuple.port ?: typedPort,
@@ -661,6 +741,7 @@ internal object OverlayEndpointDiscovery {
             }
         }
 
+        val key = configuredKey ?: return null
         val address = resolveHost(typedHost, MANUAL_RESOLVE_BUDGET_MS) ?: return null
         return OverlayEndpoint(
             host = address.hostAddress ?: return null,
@@ -696,10 +777,44 @@ internal object OverlayEndpointDiscovery {
     private fun rememberTargets(targets: OverlayDiscoveryTargets) {
         if (targets.isEmpty) return
         if (targets == discoveryTargets) return
+        if (!publicationBelongsToConfiguredServer(targets)) {
+            Log.i(TAG, "Ignoring publication from ${targets.svcName ?: targets.inOrder().firstOrNull()?.host}: " +
+                "the configured server '$configuredEndpoint' is in charge")
+            return
+        }
         Log.i(TAG, "Discovery targets learned: svc=${targets.svcName ?: "-"} " +
             targets.inOrder().joinToString { "${it.host}:${it.tunnelPort}" })
         discoveryTargets = targets
         applyServicePins(targets)
+    }
+
+    /**
+     * Whether a publication may steer this client, given a server a person typed.
+     *
+     * ⚠️ **The tunnel endpoint is only half of what a publication moves, and the quieter half is
+     * the one that hurts.** [applyServicePins] rewrites [BoomioConfig.serviceOrigin] from the
+     * publication's `svc`, and that origin is the **auth** backend as well as the API — so on a
+     * network with two deployments, the other one's five-minute mDNS publication keeps flipping
+     * sign-in, config and playback back to itself. The symptom is not "the wrong tunnel": it is
+     * "I typed my server, and Google sent me to somebody else's account".
+     *
+     * An explicit choice therefore owns discovery outright: a publication is honoured only when it
+     * names the configured host, or — for a typed literal, which no record can name — carries that
+     * literal as one of its own dial addresses. No configured endpoint means the ordinary
+     * single-deployment case, where every publication is the server's own.
+     *
+     * ⚠️ Keyed on [configuredEndpoint], never on [BoomioConfig.overlayEndpoint]: that field is
+     * overwritten by [accept] with whatever literal discovery just won with, so keying on it would
+     * let an automatic choice silently lock out the other box's record.
+     */
+    private fun publicationBelongsToConfiguredServer(targets: OverlayDiscoveryTargets): Boolean {
+        val configured = configuredEndpoint?.trim().orEmpty()
+        if (configured.isEmpty()) return true
+        val host = parseEndpointAuthority(configured, DEFAULT_WG_PORT)?.first ?: return true
+        if (literalOrNull(host) != null) {
+            return targets.inOrder().any { it.host == host }
+        }
+        return targets.svcName.equals(host, ignoreCase = true)
     }
 
     /**
@@ -998,9 +1113,16 @@ internal object OverlayEndpointDiscovery {
                 ),
             )
         }
+        val (host, _) = authority
         val key = validServerKeyOrNull(serverPublicKeyBase64)
             ?: validServerKeyOrNull(BoomioConfig.overlayServerPubKey)
-        if (key == null) {
+        // ⚠️ **A NAME does not need the key up front; a LITERAL does.** A name's TXT tuple carries
+        // the server's public key and rung 3 reads it, so demanding one here made the single flow a
+        // fresh client depends on impossible: after a wipe there is no key to fall back on, and the
+        // address the person typed was thrown away with a message telling them to go and fetch a
+        // value the app was about to read for itself. An address has no record to read, so there
+        // the old rule stands.
+        if (key == null && literalOrNull(host) != null) {
             // The server's key is public and is published by both channels; it is the one field
             // a user cannot invent, so its absence is named rather than guessed at.
             return publish(
@@ -1010,8 +1132,9 @@ internal object OverlayEndpointDiscovery {
                 ),
             )
         }
+        appContext?.let { persistConfiguredEndpoint(it, rawAuthority.trim()) }
         BoomioConfig.overlayEndpoint = rawAuthority.trim()
-        BoomioConfig.overlayServerPubKey = key
+        key?.let { BoomioConfig.overlayServerPubKey = it }
         // A typed NAME becomes this client's record even after [accept] replaces the configured
         // address with the literal it found; see [discoveryRecordName]. A typed LITERAL leaves the
         // record alone — there is nothing to read for an address, and a client configured with one
