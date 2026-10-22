@@ -506,10 +506,27 @@ internal object OverlayEndpointDiscovery {
             scope.launch { ServerConfigurationRepository.onServiceOriginChanged() }
         }
 
-        val candidates = raceRungs(
-            { rung1Mdns() },
-            { rung2DiscoveryRecord(context) },
-        ).toMutableList()
+        // ⚠️ **An explicit answer replaces the ladder rather than joining it.** When a person has
+        // named a server, "is there one on this LAN?" is not a question worth asking: the only
+        // deployment whose answer is wanted is theirs, and every other candidate is a different
+        // account, a different library and a different auth backend. Rung 2 still runs — it reads
+        // the *configured* name's TXT (see [discoveryRecordName]), which is the same server
+        // publishing both of its planes — but rung 1's browse is skipped outright, so a neighbouring
+        // box on the same network can never be accepted as the tunnel endpoint either.
+        //
+        // Falling back to a stranger is not graceful degradation here; it is what "I typed my
+        // server and Google signed me into someone else's house" looks like.
+        val candidates = if (configuredEndpoint != null) {
+            mutableListOf<OverlayEndpoint>().apply {
+                rung3Manual(context)?.let { add(it) }
+                rung2DiscoveryRecord(context)?.let { add(it) }
+            }
+        } else {
+            raceRungs(
+                { rung1Mdns() },
+                { rung2DiscoveryRecord(context) },
+            ).toMutableList()
+        }
         // ⚠️ **A server a person named goes to the FRONT.** The gate only decides *order* — it never
         // rejects a candidate — so the first reachable one wins, and appending rung 3 last meant a
         // client standing on a network that happens to have a boomio server on it could never be
@@ -519,8 +536,9 @@ internal object OverlayEndpointDiscovery {
         //
         // A compiled bootstrap default is *not* a person's answer, so it keeps the old last place;
         // only [configuredEndpoint] — what somebody typed and what [offerManual] persisted — moves.
-        rung3Manual(context)?.let { manual ->
-            if (configuredEndpoint != null) candidates.add(0, manual) else candidates.add(manual)
+        // The configured case has already put rung 3 first, above, and skipped rung 1 with it.
+        if (configuredEndpoint == null) {
+            rung3Manual(context)?.let { candidates.add(it) }
         }
 
         // ⚠️ **The gate is a blocking connect, so it is pinned to IO explicitly.** `resolve()` is
@@ -759,10 +777,44 @@ internal object OverlayEndpointDiscovery {
     private fun rememberTargets(targets: OverlayDiscoveryTargets) {
         if (targets.isEmpty) return
         if (targets == discoveryTargets) return
+        if (!publicationBelongsToConfiguredServer(targets)) {
+            Log.i(TAG, "Ignoring publication from ${targets.svcName ?: targets.inOrder().firstOrNull()?.host}: " +
+                "the configured server '$configuredEndpoint' is in charge")
+            return
+        }
         Log.i(TAG, "Discovery targets learned: svc=${targets.svcName ?: "-"} " +
             targets.inOrder().joinToString { "${it.host}:${it.tunnelPort}" })
         discoveryTargets = targets
         applyServicePins(targets)
+    }
+
+    /**
+     * Whether a publication may steer this client, given a server a person typed.
+     *
+     * ⚠️ **The tunnel endpoint is only half of what a publication moves, and the quieter half is
+     * the one that hurts.** [applyServicePins] rewrites [BoomioConfig.serviceOrigin] from the
+     * publication's `svc`, and that origin is the **auth** backend as well as the API — so on a
+     * network with two deployments, the other one's five-minute mDNS publication keeps flipping
+     * sign-in, config and playback back to itself. The symptom is not "the wrong tunnel": it is
+     * "I typed my server, and Google sent me to somebody else's account".
+     *
+     * An explicit choice therefore owns discovery outright: a publication is honoured only when it
+     * names the configured host, or — for a typed literal, which no record can name — carries that
+     * literal as one of its own dial addresses. No configured endpoint means the ordinary
+     * single-deployment case, where every publication is the server's own.
+     *
+     * ⚠️ Keyed on [configuredEndpoint], never on [BoomioConfig.overlayEndpoint]: that field is
+     * overwritten by [accept] with whatever literal discovery just won with, so keying on it would
+     * let an automatic choice silently lock out the other box's record.
+     */
+    private fun publicationBelongsToConfiguredServer(targets: OverlayDiscoveryTargets): Boolean {
+        val configured = configuredEndpoint?.trim().orEmpty()
+        if (configured.isEmpty()) return true
+        val host = parseEndpointAuthority(configured, DEFAULT_WG_PORT)?.first ?: return true
+        if (literalOrNull(host) != null) {
+            return targets.inOrder().any { it.host == host }
+        }
+        return targets.svcName.equals(host, ignoreCase = true)
     }
 
     /**
