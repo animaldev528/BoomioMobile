@@ -6,7 +6,6 @@ import com.nuvio.app.core.device.DeviceHardwareFingerprint
 import com.nuvio.app.features.boomio.BoomioPairingResult
 import com.nuvio.app.features.boomio.BoomioPairingTransport
 import com.nuvio.app.features.boomio.BoomioSessionRepository
-import com.nuvio.app.core.overlay.OverlayEndpointDiscovery.PROV_RECORD
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -177,12 +176,13 @@ internal object OverlayProvisioning {
         // segment. Nothing on this path needs system DNS at all.
         //
         // ⚠️ **One record, two addresses, and off-LAN the second is the one that routes.** The v2
-        // record names `lan=` and `wan=` itself, so a single lookup of [PROV_RECORD] supplies the
-        // whole walk. That is why a rejection below means "try the next address" and never "give
-        // up", and why only a set that all fails ends the search — the LAN literal is readable
-        // everywhere but routable in one place, and stopping at it would hand the dialler an
-        // address nothing off-LAN can reach, which is precisely the failure this channel exists to
-        // remove.
+        // record names `lan=` and `wan=` itself, so a single lookup of *this client's* record
+        // (`discoveryRecordName` — the bootstrap name unless this client was given a server of its
+        // own) supplies the whole walk. That is why a rejection below means "try the next address"
+        // and never "give up", and why only a set that all fails ends the search — the LAN literal
+        // is readable everywhere but routable in one place, and stopping at it would hand the
+        // dialler an address nothing off-LAN can reach, which is precisely the failure this
+        // channel exists to remove.
         //
         // ⚠️ **"Resolves" is not the test — "answers" is.** The record is public, so it resolves
         // from *any* network; only the socket probe distinguishes the segment the box is on from
@@ -191,8 +191,12 @@ internal object OverlayProvisioning {
         // dials the target it is handed, once, and falls back to HTTPS rather than retrying), so
         // the probe is the only thing standing between a roam and a spent attempt.
 
-        val resolved = OverlayDnsClient.resolve(context, PROV_RECORD, RESOLVE_BUDGET_MS) ?: run {
-            Log.i(TAG, "'$PROV_RECORD' did not resolve")
+        // The record for THIS client's server, not the compiled bootstrap name: on a deployment
+        // whose host was entered by hand, [PROV_RECORD] names somebody else's box and would hand
+        // the dialler a stranger's targets. See [OverlayEndpointDiscovery.discoveryRecordName].
+        val record = OverlayEndpointDiscovery.discoveryRecordName
+        val resolved = OverlayDnsClient.resolve(context, record, RESOLVE_BUDGET_MS) ?: run {
+            Log.i(TAG, "'$record' did not resolve")
             return null
         }
         val tuple = resolved.tuple
@@ -200,12 +204,12 @@ internal object OverlayProvisioning {
         // ⚠️ Only an explicit `prov=1` opens the door — the same fail-closed reading the server
         // applies to its own flag, so a silent record and a closed server agree.
         if (!tuple.offersProvisioning) {
-            Log.i(TAG, "'$PROV_RECORD' does not offer provisioning (`prov` is not 1)")
+            Log.i(TAG, "'$record' does not offer provisioning (`prov` is not 1)")
             return null
         }
         val ppk = tuple.provisioningPublicKeyBase64
         if (ppk == null) {
-            Log.w(TAG, "'$PROV_RECORD' offers provisioning but publishes no usable ppk; declining")
+            Log.w(TAG, "'$record' offers provisioning but publishes no usable ppk; declining")
             return null
         }
 
@@ -223,7 +227,7 @@ internal object OverlayProvisioning {
             })
         }
         if (candidates.isEmpty()) {
-            Log.w(TAG, "'$PROV_RECORD' published no usable address to dial")
+            Log.w(TAG, "'$record' published no usable address to dial")
             return null
         }
 
@@ -248,11 +252,11 @@ internal object OverlayProvisioning {
                 Log.i(TAG, "$host:$port did not answer; trying the next published address")
                 continue
             }
-            Log.i(TAG, "Provisioning target from '$PROV_RECORD': $host:$port")
+            Log.i(TAG, "Provisioning target from '$record': $host:$port")
             return ProvisionTarget(host, port, ppk, tuple.serverPublicKeyBase64)
         }
 
-        Log.i(TAG, "No address published by '$PROV_RECORD' answered; pairing falls back to HTTPS")
+        Log.i(TAG, "No address published by '$record' answered; pairing falls back to HTTPS")
         return null
     }
 

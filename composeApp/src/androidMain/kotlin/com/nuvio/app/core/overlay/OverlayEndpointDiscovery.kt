@@ -45,7 +45,7 @@ private const val TAG = "OverlayEndpointDiscovery"
 private const val GATE_TIMEOUT_MS = 900
 
 /**
- * The endpoint ladder: mDNS → [PROV_RECORD] → a person.
+ * The endpoint ladder: mDNS → the discovery record ([discoveryRecordName]) → a person.
  *
  * ### Why this is not a convenience
  *
@@ -60,7 +60,7 @@ private const val GATE_TIMEOUT_MS = 900
  * | # | Rung | Yields |
  * |---|---|---|
  * | 1 | the mDNS advert `_boomio-overlay._udp` | TXT `pubkey`/`port` + the SRV target's `A` |
- * | 2 | the [PROV_RECORD] record | an `A` + the same TXT tuple |
+ * | 2 | the discovery record: [discoveryRecordName] | an `A` + the same TXT tuple |
  * | 3 | a person | whatever they typed, plus the server's public key |
  *
  * ⚠️ **"Working" means it passed the gate, not that it resolved.** A rung that returns a record
@@ -123,6 +123,51 @@ internal object OverlayEndpointDiscovery {
      * *not* part of that cut: it is still the mTLS plane.
      */
     internal const val PROV_RECORD = BOOMIO_SERVICE_HOST
+
+    /**
+     * The record name this process has settled on, when it is no longer in [BoomioConfig].
+     *
+     * ⚠️ **The ladder overwrites the configured address with whatever it finds** — [accept] writes
+     * `BoomioConfig.overlayEndpoint = endpoint.authority`, which is a literal. Reading the record
+     * name back out of the configuration therefore works only until the first successful discovery,
+     * so a name a person entered is remembered here as well, and rung 2 remembers the name it read.
+     * One accepted answer must not silence the record for the rest of the process:
+     * [OverlayProvisioning.target] reads it long after the ladder has run.
+     *
+     * Runtime state, like everything [accept] writes — nothing here survives a process death, and a
+     * fresh process starts from the configuration.
+     */
+    @Volatile
+    private var recordInUse: String? = null
+
+    /**
+     * The name rung 2 asks about, and the reason it is not simply [PROV_RECORD].
+     *
+     * ⚠️ **[PROV_RECORD] is the BOOTSTRAP name, not this deployment's name.** It is compiled into
+     * every build and it is the reference deployment's. Rung 2 used to resolve it unconditionally,
+     * which made a configured server unreachable in a way that looks like a server bug: a client
+     * whose person had entered their own host still asked DNS about the compiled one, accepted the
+     * tuple it found there, and `applyServicePins` then rewrote the origin from that tuple's `svc`.
+     * The typed server lost to a constant, on every launch, and wiping the app changed nothing
+     * because the constant is not app data.
+     *
+     * A bootstrap default is only correct until the client has been told something. After that the
+     * best answer to "which deployment is this?" is the name in [BoomioConfig.overlayEndpoint], or
+     * — once the ladder has replaced that with the literal it found — [recordInUse].
+     *
+     * A **literal** never becomes a record name: there is no TXT record to read for an address, and
+     * the deployment that owns [PROV_RECORD] is somebody else's.
+     */
+    internal val discoveryRecordName: String
+        get() = configuredRecordName() ?: recordInUse ?: PROV_RECORD
+
+    /** [BoomioConfig.overlayEndpoint] as a name, or null when it is blank or a literal. */
+    private fun configuredRecordName(): String? {
+        val configured = BoomioConfig.overlayEndpoint.trim()
+        if (configured.isEmpty()) return null
+        val host = parseEndpointAuthority(configured, DEFAULT_WG_PORT)?.first ?: return null
+        return if (literalOrNull(host) == null) host else null
+    }
 
     /** The WireGuard port, when nothing published one. */
     private const val DEFAULT_WG_PORT = OverlayAdvertTuple.DEFAULT_PORT
@@ -394,6 +439,26 @@ internal object OverlayEndpointDiscovery {
         // stamping that same TTL on entry rather than on success — so a walk that found nothing
         // was silenced for five minutes. The stamp now lives in [accept] and a miss retries; the
         // TTL is only ever armed over an answer worth keeping.
+        //
+        // ⚠️ A configured server is the HTTPS origin from the first walk, not from the first
+        // record. `serviceOrigin` otherwise stays on the compiled bootstrap name until a tuple's
+        // `svc` rewrites it, so a client that HAS been given the right host still sends its REST,
+        // auth and addon calls to the bootstrap deployment until discovery succeeds — and on a
+        // first-ever launch, or on a server whose publisher is not yet running, that is forever.
+        //
+        // Only while the origin is still the bootstrap floor: once a record's `svc` has been
+        // applied it is authoritative, because that name is what the certificate is issued for.
+        // Rewriting it back to a typed alias afterwards would fail SNI for the right reason, at
+        // the wrong time. The bootstrap name itself makes this a no-op.
+        if (BoomioConfig.serviceOrigin.trimEnd('/') == "https://$PROV_RECORD") {
+            BoomioConfig.serviceOrigin = "https://${discoveryRecordName}"
+            // The auth plane holds a *snapshot* of the origin ([ServerConfigurationRepository]), so
+            // moving the origin without telling it only moves the media plane. Same hand-off
+            // [applyServicePins] makes for a record's `svc`, and equally a no-op on a cold start
+            // that names the bootstrap host.
+            scope.launch { ServerConfigurationRepository.onServiceOriginChanged() }
+        }
+
         val candidates = raceRungs(
             { rung1Mdns() },
             { rung2DiscoveryRecord(context) },
@@ -433,7 +498,7 @@ internal object OverlayEndpointDiscovery {
             scheduleMissRetry()
             return@withLock publish(
                 OverlayEndpointStatus.NeedsManual(
-                    "No boomio server was found — tried mDNS, $PROV_RECORD and any saved " +
+                    "No boomio server was found — tried mDNS, ${discoveryRecordName} and any saved " +
                         "address. Enter the server's address to continue.",
                 ),
             )
@@ -500,7 +565,8 @@ internal object OverlayEndpointDiscovery {
     }
 
     /**
-     * Rung 2 — the discovery record, [PROV_RECORD].
+     * Rung 2 — the discovery record, [discoveryRecordName] (the bootstrap [PROV_RECORD]
+     * unless this client was given a server of its own).
      *
      * ⚠️ **A record with no `TXT` is not an endpoint, and is not treated as one.** An address
      * without the server's public key cannot produce a handshake, so accepting it would stop the
@@ -517,13 +583,17 @@ internal object OverlayEndpointDiscovery {
      * the private address to fall back to.
      */
     private suspend fun rung2DiscoveryRecord(context: Context): OverlayEndpoint? {
-        val resolved = OverlayDnsClient.resolve(context, PROV_RECORD, RUNG2_BUDGET_MS) ?: return null
+        // The name this client owns when there is one; see [discoveryRecordName]. Remembered here
+        // as well, because [accept] is about to overwrite the configuration with a literal.
+        val record = discoveryRecordName
+        recordInUse = record
+        val resolved = OverlayDnsClient.resolve(context, record, RUNG2_BUDGET_MS) ?: return null
         // Same reasoning as rung 1: recorded whether or not this record's key is usable, because
         // the targets are a fact about the server rather than about this particular answer.
         rememberTargets(resolved.tuple.targets)
         val key = validServerKeyOrNull(resolved.tuple.serverPublicKeyBase64)
         if (key == null) {
-            Log.d(TAG, "Rung 2: '$PROV_RECORD' resolved but published no usable key")
+            Log.d(TAG, "Rung 2: '$record' resolved but published no usable key")
             return null
         }
         return endpointOf(
@@ -942,6 +1012,11 @@ internal object OverlayEndpointDiscovery {
         }
         BoomioConfig.overlayEndpoint = rawAuthority.trim()
         BoomioConfig.overlayServerPubKey = key
+        // A typed NAME becomes this client's record even after [accept] replaces the configured
+        // address with the literal it found; see [discoveryRecordName]. A typed LITERAL leaves the
+        // record alone — there is nothing to read for an address, and a client configured with one
+        // walked the bootstrap record before this ladder existed, so nothing is given up here.
+        configuredRecordName()?.let { recordInUse = it }
         return resolve()
     }
 }
