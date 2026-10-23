@@ -664,7 +664,8 @@ internal object OverlayEndpointDiscovery {
         }
         return endpointOf(
             address = advert.address,
-            port = advert.tuple.port ?: DEFAULT_WG_PORT,
+            // The advert's address is always the one on *this* wire, so it takes the plane port.
+            port = advert.tuple.tunnelPortFor(advert.address) ?: DEFAULT_WG_PORT,
             key = key,
             source = OverlayEndpointSource.MDNS,
         )
@@ -704,7 +705,12 @@ internal object OverlayEndpointDiscovery {
         }
         return endpointOf(
             address = resolved.address,
-            port = resolved.tuple.port ?: DEFAULT_WG_PORT,
+            // ⚠️ **The port of the plane this address is on, not the generic `port=`.** At home
+            // the `A` resolves to the record's own `lan=` literal, and `port=` is what the router
+            // forwards from outside — a box that remaps WAN 51821 to a local 51820 answers HTTPS
+            // on the LAN and listens for WireGuard on neither 51821. See
+            // [OverlayAdvertTuple.tunnelPortFor].
+            port = resolved.tuple.tunnelPortFor(resolved.address) ?: DEFAULT_WG_PORT,
             key = key,
             source = OverlayEndpointSource.LOCAL_DNS,
         )
@@ -994,7 +1000,11 @@ internal object OverlayEndpointDiscovery {
                     val address = literalOrNull(plane.host) ?: continue
                     val candidate = endpointOf(
                         address = address,
-                        port = known.port,
+                        // ⚠️ **The plane's own port, not the seed's.** This tier walks `lan=`
+                        // and `wan=` precisely because the two routes use different numbers on a
+                        // box that remaps the external port; reusing the seed's would send the
+                        // WAN plane to the LAN port (and back) the moment they differ.
+                        port = plane.tunnelPort,
                         key = key,
                         source = OverlayEndpointSource.DISCOVERY_RECORD,
                     ) ?: continue
