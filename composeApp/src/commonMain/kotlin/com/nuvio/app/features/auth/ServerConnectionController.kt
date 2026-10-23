@@ -2,12 +2,14 @@ package com.nuvio.app.features.auth
 
 import com.nuvio.app.core.auth.AuthRepository
 import com.nuvio.app.core.network.NetworkStatusRepository
+import com.nuvio.app.core.network.ServerAliases
 import com.nuvio.app.core.network.ServerConfiguration
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.network.ServerDiscoveryException
 import com.nuvio.app.core.network.ServerDiscoveryFailure
 import com.nuvio.app.core.network.ServerDiscoveryService
 import com.nuvio.app.core.network.SupabaseProvider
+import com.nuvio.app.features.boomio.BoomioConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -97,6 +99,22 @@ object ServerConnectionController {
         }
     }
 
+    /**
+     * Points every boomio base at the server that is now saved, or back at the build's floor.
+     *
+     * ⚠️ **Canonicalised, because the saved URL may be an address.** A person can type the box's
+     * private literal, and the edge has no certificate for it — `ServerAliases` rewrites it to the
+     * name the box publishes under, which is routable on the LAN and off it.
+     */
+    private fun applyActiveServiceOrigin() {
+        val active = ServerConfigurationRepository.active.value
+        if (active.isCustom && active.backendUrl.isNotBlank()) {
+            BoomioConfig.serviceOrigin = ServerAliases.canonicalInput(active.backendUrl)
+        } else {
+            BoomioConfig.resetServiceOrigin()
+        }
+    }
+
     private fun switchServer(save: () -> Boolean) {
         if (_state.value.isSwitching) return
         scope.launch {
@@ -114,6 +132,14 @@ object ServerConnectionController {
                 }
                 SupabaseProvider.reset()
                 AuthRepository.reinitialize()
+                // ⚠️ **The choice has to reach the boomio plane, not only auth.** [save] writes the
+                // Supabase configuration, but `/bsm` (TV pairing), `/bsc` (overlay enrolment) and
+                // `/bsf` are all derived from [BoomioConfig.serviceOrigin] — which, until this
+                // line, only discovery ever wrote. A phone switched to the second box therefore
+                // signed in there and then enrolled its VPN against the first one, and the next
+                // cold start was back on the compile-time name. Applied before the restart so a
+                // failed restart cannot leave the two halves on different servers.
+                applyActiveServiceOrigin()
                 NetworkStatusRepository.requestRefresh(force = true)
                 _state.value = ServerConnectionUiState(
                     activeServer = ServerConfigurationRepository.active.value,

@@ -249,6 +249,17 @@ object BoomioConfig {
     }
 
     /**
+     * Puts every boomio base back on the build's own floor, undoing a manual server.
+     *
+     * Needed because "Use official server" clears the *stored* configuration; a process that
+     * survives the switch would otherwise keep deriving `/bsm`, `/bsc` and `/bsf` from the server
+     * the person just left.
+     */
+    fun resetServiceOrigin() {
+        serviceOrigin = DEFAULT_SERVICE_ORIGIN
+    }
+
+    /**
      * Establishes the one-name floor, then lets a build override each base individually.
      *
      * ⚠️ **This block exists because assigning [serviceOrigin]'s initializer does not run its

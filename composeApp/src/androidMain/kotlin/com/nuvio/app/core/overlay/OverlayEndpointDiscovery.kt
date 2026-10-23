@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.SystemClock
 import android.util.Log
+import com.nuvio.app.core.network.ServerAliases
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
@@ -177,20 +178,49 @@ internal object OverlayEndpointDiscovery {
      * the deployment that owns [PROV_RECORD] is somebody else's.
      */
     internal val discoveryRecordName: String
-        get() = configuredRecordName() ?: recordInUse ?: PROV_RECORD
+        get() = configuredRecordName() ?: configuredServerRecordName() ?: recordInUse ?: PROV_RECORD
 
     /** The address this client was told to use: a person's entry first, the configuration second. */
     private fun configuredAuthority(): String =
         configuredEndpoint?.trim()?.takeIf { it.isNotEmpty() }
             ?: BoomioConfig.overlayEndpoint.trim()
 
-    /** [configuredAuthority] as a name, or null when it is blank or a literal. */
+    /** [configuredAuthority] as a name, or null when it is blank. */
     private fun configuredRecordName(): String? {
         val configured = configuredAuthority()
         if (configured.isEmpty()) return null
         val host = parseEndpointAuthority(configured, DEFAULT_WG_PORT)?.first ?: return null
+        // ⚠️ **A known literal is not "no record" — it is the same box in its other spelling.**
+        // A person who typed `192.168.1.65` into the manual field named a deployment that
+        // publishes under `boomiopi.duckdns.org`; refusing the record because the input parsed as
+        // an address would leave rung 2 resolving the compiled name, i.e. the other box.
+        val canonical = ServerAliases.canonicalHost(host)
+        if (canonical != host.trim().lowercase()) return canonical
         return if (literalOrNull(host) == null) host else null
     }
+
+    /**
+     * The record name implied by the **server picked in the connection sheet**, if any.
+     *
+     * The screen that chooses a server writes a Supabase configuration, not an overlay endpoint —
+     * but on this deployment they are the same box, and the box publishes one tuple under one
+     * name. Without this, a phone told to use the second box still asked DNS about the compile-time
+     * name and minted/paired/enrolled against the reference deployment: the "VPN came up on the
+     * box I never enrolled to" failure, and the reason a Pi code never appeared on the Pi's page.
+     */
+    private fun configuredServerRecordName(): String? {
+        val host = customServerHost() ?: return null
+        val canonical = ServerAliases.canonicalHost(host)
+        return canonical.takeIf { literalOrNull(it) == null }
+    }
+
+    /** The host of the saved custom server, or null when the build's own server is active. */
+    private fun customServerHost(): String? =
+        ServerConfigurationRepository.active.value
+            .takeIf { it.isCustom }
+            ?.backendUrl
+            ?.let { hostOf(it) }
+            ?.takeIf { it.isNotBlank() }
 
     /** Reads the persisted entry back, before anything can walk the ladder against the default. */
     private fun restoreConfiguredEndpoint(context: Context) {
@@ -808,13 +838,22 @@ internal object OverlayEndpointDiscovery {
      * let an automatic choice silently lock out the other box's record.
      */
     private fun publicationBelongsToConfiguredServer(targets: OverlayDiscoveryTargets): Boolean {
+        // Either explicit choice counts: the overlay field (`configuredEndpoint`) and the server
+        // picked in the connection sheet are the same box on this deployment, just different
+        // screens. Whichever is present names the deployment; neither means the ordinary case.
         val configured = configuredEndpoint?.trim().orEmpty()
-        if (configured.isEmpty()) return true
-        val host = parseEndpointAuthority(configured, DEFAULT_WG_PORT)?.first ?: return true
-        if (literalOrNull(host) != null) {
-            return targets.inOrder().any { it.host == host }
-        }
-        return targets.svcName.equals(host, ignoreCase = true)
+        val configuredHost = configured
+            .takeIf { it.isNotEmpty() }
+            ?.let { parseEndpointAuthority(it, DEFAULT_WG_PORT)?.first }
+            ?: customServerHost()
+            ?: return true
+        val canonical = ServerAliases.canonicalHost(configuredHost)
+        // Either spelling may appear on the wire — the advert always names the deployment by its
+        // published `svc=`, while a person may have typed the address (see [ServerAliases]) — so
+        // both sides are compared through the table rather than as strings.
+        val svc = targets.svcName?.trim()?.takeIf { it.isNotEmpty() }
+        if (svc != null && ServerAliases.sameHost(svc, canonical)) return true
+        return targets.inOrder().any { ServerAliases.sameHost(it.host, canonical) }
     }
 
     /**

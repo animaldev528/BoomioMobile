@@ -147,7 +147,12 @@ object ServerDiscoveryService {
     private const val maxDocumentBytes = 64 * 1024
 
     suspend fun discover(input: String): Result<ServerConfiguration> = runCatching {
-        val discoveryUrl = ServerDiscoveryPolicy.discoveryUrl(input)
+        // ⚠️ **An address and its name are one server, and only the name can hold a certificate.**
+        // The edge issues one certificate per named site, so `https://192.168.1.65` fails the
+        // handshake with no site block to match — which reads to a person as "the server is
+        // down" when it is two hops away and healthy. `ServerAliases` rewrites a known literal to
+        // the name that address is published under and leaves anything else alone.
+        val discoveryUrl = ServerDiscoveryPolicy.discoveryUrl(ServerAliases.canonicalInput(input))
         if (ServerDiscoveryPolicy.isOfficial(discoveryUrl)) {
             throw ServerDiscoveryException(ServerDiscoveryFailure.OfficialServer)
         }

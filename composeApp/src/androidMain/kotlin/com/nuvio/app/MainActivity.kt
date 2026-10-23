@@ -11,6 +11,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.mtls.MtlsRegistration
+import com.nuvio.app.core.network.ServerAliases
+import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.network.ServerConfigurationStorage
 import com.nuvio.app.core.overlay.OverlayEnrollment
 import com.nuvio.app.core.overlay.OverlayEndpointDiscovery
@@ -115,6 +117,18 @@ open class MainActivity : AppCompatActivity() {
         BoomioSessionRepository.initialize()
         PrivateListeningSession.initialize(applicationContext)
         ServerConfigurationStorage.initialize(applicationContext)
+        // ⚠️ **The server chosen last launch owns every boomio base from the first frame.** The
+        // storage above is what makes the configuration readable; until it is read nothing else
+        // may derive a URL from `BoomioConfig`, or the first consumers (pairing, overlay
+        // enrolment, the capability reporter) dial the compile-time name while the person sees
+        // their own server on screen. `ServerConnectionController` applies the same rule at
+        // switch time; this is the cold-start half of it.
+        ServerConfigurationRepository.active.value
+            .takeIf { it.isCustom }
+            ?.let {
+                com.nuvio.app.features.boomio.BoomioConfig.serviceOrigin =
+                    ServerAliases.canonicalInput(it.backendUrl)
+            }
         // The deployment's own Trakt/Simkl/MDBList app ids are applied in `NuvioApplication.onCreate`
         // instead of here — the one `initialize` in the app that is not on this list, because it has to
         // precede the first read of a generated `*Config.CLIENT_ID`, which can be at object
