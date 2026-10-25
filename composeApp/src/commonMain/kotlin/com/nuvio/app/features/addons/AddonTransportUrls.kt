@@ -62,10 +62,22 @@ private fun resourceQuery(manifestUrl: String, baseUrl: String): String {
     return if (params.isEmpty()) "" else "?" + params.joinToString("&")
 }
 
-/** True when [baseUrl] is this deployment's `bsf` addon (the media plane). */
+/**
+ * True when [baseUrl] is this deployment's `bsf` addon (the media plane).
+ *
+ * ⚠️ **Matched on the PATH as well as on the configured origin.** An addon URL is stored once,
+ * at install time, so the host inside it is whichever name was current then — the DuckDNS
+ * origin, the LAN literal, or an overlay address. [BoomioConfig.boomioBaseUrl] follows
+ * discovery and may not equal it. A host-only test would therefore drop the caps on exactly the
+ * devices whose stored addon predates a rename, which is the class of client this exists to fix.
+ */
 private fun isBoomioMediaPlane(baseUrl: String): Boolean {
+    val base = baseUrl.trim().trimEnd('/')
+    if (base.isEmpty()) return false
     val bsf = BoomioConfig.boomioBaseUrl.trim().trimEnd('/')
-    return bsf.isNotEmpty() && baseUrl.trim().trimEnd('/').equals(bsf, ignoreCase = true)
+    if (bsf.isNotEmpty() && base.equals(bsf, ignoreCase = true)) return true
+    val path = base.substringAfter("://", base).substringAfter('/', "").trimEnd('/')
+    return path.equals("bsf", ignoreCase = true) || path.startsWith("bsf/", ignoreCase = true)
 }
 
 internal fun String.encodeAddonPathSegment(): String =
