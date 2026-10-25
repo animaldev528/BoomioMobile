@@ -225,6 +225,45 @@ object BoomioConfig {
      */
     var overlayDeviceName: String = ""
 
+    /**
+     * **What this device says it can decode**, in the media plane's own query vocabulary.
+     *
+     * ⚠️ **Why the client declares this at all.** `bsf` gates `/find` and `/stream` on the
+     * capabilities that arrive WITH the request. A device is identified either by its client
+     * certificate (resolved against the edge's allow-list) or by what it *declares*; a request
+     * carrying neither falls through to the permissive branch and is offered everything the
+     * index holds. The TV client has declared its ceilings since the gates shipped; this client
+     * did not — which is how a 1080p, non-HDR tablet was handed a 4K HDR10 HEVC release that it
+     * opened, stalled on, and abandoned.
+     *
+     * ⚠️ **Populated from this device's own probe, never from a build value.** A hand-typed
+     * ceiling is a claim about hardware, and a wrong claim here either withholds playable
+     * streams or hands over unplayable ones. See `DeviceCapabilityReporter`.
+     *
+     * ⚠️ **Blank is a real state and must stay blank.** An absent cap reaches `bsf` as
+     * "unknown" and gates nothing; defaulting to e.g. "1080p" would silently cap every device
+     * whose probe has not run yet, including 4K televisions.
+     */
+    var deviceMaxResolution: String = ""
+    var deviceMaxResByCodec: String = ""
+    var deviceHdr: String = ""
+
+    /**
+     * The caps query for a media-plane request — `max_resolution=…&codecCapsMaxRes=…&hdr=…` —
+     * or blank when this device has not probed itself yet. Callers append nothing on blank, so
+     * an unprobed device asks for the same thing it did before this existed.
+     */
+    fun bsfCapsQuery(): String {
+        val parts = mutableListOf<String>()
+        deviceMaxResolution.trim().takeIf { it.isNotEmpty() }
+            ?.let { parts += "max_resolution=" + it.encodeBsfQueryValue() }
+        deviceMaxResByCodec.trim().takeIf { it.isNotEmpty() }
+            ?.let { parts += "codecCapsMaxRes=" + it.encodeBsfQueryValue() }
+        deviceHdr.trim().takeIf { it.isNotEmpty() }
+            ?.let { parts += "hdr=" + it.encodeBsfQueryValue() }
+        return parts.joinToString("&")
+    }
+
     /** True when the companion seam is configured ([companionBaseUrl] is set). */
     fun companionEnabled(): Boolean = companionBaseUrl.isNotBlank()
 
@@ -306,6 +345,29 @@ internal const val BOOMIO_SERVICE_HOST = "boomio.duckdns.org"
  * real one, including on a deployment that renames its service origin.
  */
 private const val DEFAULT_SERVICE_ORIGIN = "https://$BOOMIO_SERVICE_HOST"
+
+/**
+ * Encodes one cap value for a query string.
+ *
+ * `:` and `,` stay literal on purpose: `codecCapsMaxRes=avc:1080p,hevc:1080p` is the exact wire
+ * form the TV client sends and the one `bsf`'s reader expects. Everything outside the unreserved
+ * set — a `&`, a `#`, a space — is percent-encoded so a value can never break the query apart.
+ */
+private fun String.encodeBsfQueryValue(): String = buildString {
+    for (byte in encodeToByteArray()) {
+        val value = byte.toInt() and 0xFF
+        val char = value.toChar()
+        val literal = char in 'a'..'z' || char in 'A'..'Z' || char in '0'..'9' ||
+            char == '-' || char == '_' || char == '.' || char == '~' || char == ':' || char == ','
+        if (literal) {
+            append(char)
+        } else {
+            append('%').append(BSF_QUERY_HEX[value shr 4]).append(BSF_QUERY_HEX[value and 0x0F])
+        }
+    }
+}
+
+private const val BSF_QUERY_HEX = "0123456789ABCDEF"
 
 /** `https://…` → `wss://…`, and `http://…` → `ws://…`; anything else is passed through unchanged. */
 private fun String.toWebSocketScheme(): String = when {

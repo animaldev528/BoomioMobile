@@ -101,6 +101,10 @@ object BoomioStreamResolver {
         return buildString {
             append(base)
             segments.forEach { segment -> append('/').append(segment) }
+            // Declare this device's ceilings — /find is gated on what arrives with the call, and
+            // this route is routinely made WITHOUT a client certificate, so silence here is the
+            // permissive branch. Blank until the device has probed itself; then it gates.
+            BoomioConfig.bsfCapsQuery().takeIf { it.isNotEmpty() }?.let { append('?').append(it) }
         }
     }
 }

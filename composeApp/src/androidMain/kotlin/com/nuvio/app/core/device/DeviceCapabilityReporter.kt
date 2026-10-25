@@ -80,6 +80,10 @@ internal object DeviceCapabilityReporter {
         started = true
         // Hold the application context: this outlives whatever Activity called start().
         val app = context.applicationContext
+        // Declare this device's decode ceilings to the media plane FIRST, and regardless of bsm:
+        // the caps ride on every bsf request, and bsf gates on what arrives with the call whether
+        // or not this device can also be reported to the fleet view.
+        scope.launch { applyDeviceCaps(probeReport(app)) }
         if (BoomioConfig.bsmBaseUrl.isBlank()) {
             Log.i(TAG, "bsm base url blank — device capability reporting disabled")
             return
@@ -100,6 +104,42 @@ internal object DeviceCapabilityReporter {
         }
     }
 
+    /**
+     * Publishes the probe's ceilings to [BoomioConfig], which every bsf request reads.
+     *
+     * ⚠️ **HDR is TRI-STATE, and the denial has to survive.** `hdr=0` is an explicit "this panel
+     * has no HDR" and is what stops a non-HDR screen being handed an HDR10 release; an absent
+     * `hdr` means unknown and gates nothing. So a device whose display does not report its HDR
+     * capabilities sends nothing rather than a guess — recording "unknown" as a denial would
+     * withhold HDR from panels that can show it.
+     */
+    private fun applyDeviceCaps(report: DeviceCapabilityReport) {
+        val effective = report.effective
+        BoomioConfig.deviceMaxResolution = effective.decodeMaxResolution.trim()
+        BoomioConfig.deviceMaxResByCodec = effective.decodeMaxResByCodec.trim()
+        BoomioConfig.deviceHdr = when {
+            !report.display.hdrCapsKnown -> ""
+            effective.hdrUsable.isNotEmpty() -> "1"
+            else -> "0"
+        }
+        Log.i(
+            TAG,
+            "Declaring device caps to the media plane: max_resolution=${BoomioConfig.deviceMaxResolution} " +
+                "codecCapsMaxRes=${BoomioConfig.deviceMaxResByCodec} hdr=${BoomioConfig.deviceHdr}",
+        )
+    }
+
+    /** One capability probe, off the main thread; shared by the caps prime and the report. */
+    private suspend fun probeReport(context: Context): DeviceCapabilityReport =
+        withContext(Dispatchers.Default) {
+            DeviceCapabilityProbe.buildReport(
+                context = context,
+                installId = SyncClientIdentity.currentClientId(),
+                app = appInfo(context),
+                network = buildNetworkSection(context, DeviceNetworkMeter.lastMeasuredMbps(context)),
+            )
+        }
+
     /** One download measurement, then re-report only if it changed what the last report carried. */
     private suspend fun measureThenReReportIfChanged(context: Context) {
         val before = DeviceNetworkMeter.lastMeasuredMbps(context)
@@ -110,14 +150,10 @@ internal object DeviceCapabilityReporter {
     }
 
     private suspend fun reportOnce(context: Context) {
-        val report = withContext(Dispatchers.Default) {
-            DeviceCapabilityProbe.buildReport(
-                context = context,
-                installId = SyncClientIdentity.currentClientId(),
-                app = appInfo(context),
-                network = buildNetworkSection(context, DeviceNetworkMeter.lastMeasuredMbps(context)),
-            )
-        }
+        val report = probeReport(context)
+        // Re-publish on every probe: a display that changed (external output, a mode switch) moves
+        // the ceilings, and the media plane must be told the new ones without waiting for a relaunch.
+        applyDeviceCaps(report)
         val url = BoomioConfig.bsmBaseUrl.trimEnd('/') + REPORT_PATH
         try {
             httpPostJsonWithHeaders(url, reportJson.encodeToString(report), emptyMap())
