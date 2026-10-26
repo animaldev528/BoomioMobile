@@ -742,10 +742,16 @@ private fun DeviceView(ref: String, onAccountChanged: () -> Unit) {
             // ⚠️ An EMPTY selection is sent as null, not as an empty list. An empty array is a stored
             // override that owns the field while constraining nothing, which reads downstream as "the
             // operator set this" — so it would show as set-by-you and never fall back.
+            //
+            // HDR is the exception, and it is the one field where "none" is a real instruction
+            // rather than an empty one: unticking Dolby Vision means this device must stop being
+            // handed DV. Sent as null it cleared the override instead, falling back to the device's
+            // own report — which still advertises DV — so the box silently came back on and the
+            // toggle looked broken. An empty list reaches bsf as `hdr=0`.
             AdminPolicyPatch(
                 maxResolution = resolution,
                 videoCodecs = codecs.takeIf { it.isNotEmpty() }?.toList()?.sorted(),
-                hdr = hdr.takeIf { it.isNotEmpty() }?.toList()?.sorted(),
+                hdr = hdr.toList().sorted(),
                 audioChannels = audio.takeIf { it.isNotEmpty() }?.toList()?.sorted(),
                 bandwidthCapMbps = cap,
             )

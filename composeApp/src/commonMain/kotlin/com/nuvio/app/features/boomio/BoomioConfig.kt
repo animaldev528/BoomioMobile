@@ -246,6 +246,16 @@ object BoomioConfig {
      */
     var deviceMaxResolution: String = ""
     var deviceMaxResByCodec: String = ""
+
+    /**
+     * The HDR stance to declare: a comma list of the types this device may be handed
+     * (`dv,hdr10,hdr10plus,hlg`), `0` for an explicit denial, or blank while unknown.
+     *
+     * ⚠️ **The list, not `1`.** `hdr=1` is an unbounded affirmation — it tells the plane this
+     * device takes HDR but not which, so an operator who allowed HDR10 and withheld Dolby
+     * Vision still received every DV release. The list is the probe intersected with the
+     * operator's row, and the intersection is what `bfs`'s Gate 3b drops against.
+     */
     var deviceHdr: String = ""
 
     /**
