@@ -165,9 +165,10 @@ private class CastSender(private val host: String) : Closeable {
             """{"type":"CONNECT","origin":{}}""",
         )
 
+        val loadRequestId = nextRequestId()
         val load = JSONObject()
             .put("type", "LOAD")
-            .put("requestId", nextRequestId())
+            .put("requestId", loadRequestId)
             .put("sessionId", JSONObject.NULL)
             .put("autoplay", true)
             .put("currentTime", 0)
@@ -185,7 +186,7 @@ private class CastSender(private val host: String) : Closeable {
                     ),
             )
         send(SENDER, transport, NS_MEDIA, load.toString())
-        awaitLoadResult(System.currentTimeMillis() + LOAD_TIMEOUT_MS)
+        awaitLoadResult(loadRequestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS)
     }
 
     /** Sends PING twice a minute and drains what comes back, until closed. */
@@ -239,7 +240,18 @@ private class CastSender(private val host: String) : Closeable {
         }
     }
 
-    private fun awaitLoadResult(deadline: Long) {
+    /**
+     * Waits for the receiver's answer to the LOAD that was just sent.
+     *
+     * ⚠️ Connecting to a transport makes the receiver PUSH the state it already
+     * had — with nothing loaded that is `MEDIA_STATUS` / `IDLE` and an empty
+     * `idleReason`. That is a snapshot from before our LOAD, not its answer, and
+     * taking it as one fails the cast a few milliseconds after a launch that is
+     * still starting the receiver: the television opens its player and the phone
+     * says it could not play the stream. Only an IDLE that answers *this* load
+     * (matching `requestId`) or that names a reason is a verdict.
+     */
+    private fun awaitLoadResult(loadRequestId: Int, deadline: Long) {
         while (true) {
             val message = awaitMessage(deadline)
                 ?: throw CastFailure("the TV did not answer the load")
@@ -248,11 +260,17 @@ private class CastSender(private val host: String) : Closeable {
             when (payload.optString("type")) {
                 "MEDIA_STATUS" -> {
                     val status = payload.optJSONArray("status")?.optJSONObject(0) ?: continue
+                    val answered = payload.optInt("requestId", -1) == loadRequestId
                     when (status.optString("playerState")) {
                         "PLAYING", "BUFFERING", "PAUSED" -> return
-                        "IDLE" -> throw CastFailure(
-                            "the TV could not play it (${status.optString("idleReason").ifBlank { "idle" }})",
-                        )
+                        "IDLE" -> {
+                            val reason = status.optString("idleReason")
+                            if (reason.isBlank() && !answered) {
+                                log.d { "cast: ignoring the pre-load session snapshot (IDLE, no reason)" }
+                                continue
+                            }
+                            throw CastFailure("the TV could not play it (${reason.ifBlank { "idle" }})")
+                        }
                     }
                 }
 
