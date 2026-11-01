@@ -20,14 +20,55 @@ internal actual suspend fun playOnRenderer(
     url: String,
     title: String,
 ): CastPlayResult = withContext(Dispatchers.IO) {
+    val rendererUrl = castPlaybackUrl(device, url)
+    // Which URL went over the wire, in the shape the receiver will fetch it. The
+    // query is where the token rides, so it is named, never printed.
+    log.d {
+        "cast: ${device.protocol}/${device.name} media=${redact(rendererUrl)} " +
+            "query=${rendererUrl.contains("token=")} remuxed=${rendererUrl != url}"
+    }
     val result = when (device.protocol) {
         CastProtocol.DLNA -> dlnaPlay(device, url, title)
-        CastProtocol.CAST -> CastV2.play(device, url, title)
+        CastProtocol.CAST -> CastV2.play(device, rendererUrl, title)
         CastProtocol.ROKU -> CastPlayResult.failed("A Roku needs a channel; playback is not implemented yet")
-        CastProtocol.AIRPLAY -> AirPlay.play(device, url, title)
+        CastProtocol.AIRPLAY -> AirPlay.play(device, rendererUrl, title)
     }
     if (!result.ok) log.w { "cast to ${device.protocol}/${device.name} (${device.ip}) failed: ${result.reason}" }
     result
+}
+
+/**
+ * The URL a renderer can actually decode.
+ *
+ * ⚠️ A Google Cast Default Media Receiver plays MP4/WebM and HLS — it ships no
+ * Matroska decoder at all. The household's streams are mostly MKV, so the URL
+ * `/find` hands back is a file the receiver accepts the LOAD for, connects, and
+ * then cannot play: the television opens its player and the phone reports a
+ * failure a second later.
+ *
+ * bsc remuxes any registered stream into HLS on the same streamId
+ * (`/proxy/<id>/hls/index.m3u8`, a `-c copy` remux), and the stream is already
+ * bound to the renderer's address, so the playlist's relative `seg-N.ts` URIs
+ * resolve beside it and are authorised by the same rule the file itself was.
+ * AirPlay gets the same playlist: an Apple receiver is HLS-native and no better
+ * at MKV than the Cast receiver is.
+ *
+ * A URL that is already playable is returned byte-identical, query included —
+ * which also covers a server that has already turned it into a playlist.
+ */
+internal fun castPlaybackUrl(device: CastDevice, url: String): String {
+    if (device.protocol != CastProtocol.CAST && device.protocol != CastProtocol.AIRPLAY) return url
+    val path = url.substringBefore('?')
+    val file = path.substringAfterLast('/')
+    val ext = file.substringAfterLast('.', "").lowercase()
+    if (ext == "mp4" || ext == "m4v" || ext == "webm" || ext == "m3u8") return url
+    // Only bsc's own registered-stream shape is rewritten. Anything else (a
+    // library file, a direct addon URL) is handed over as it came: a guess about
+    // someone else's route is worse than the URL they gave us.
+    if (!file.startsWith("video.")) return url
+    val query = url.substringAfter('?', "")
+    val playlist = path.substringBeforeLast('/') + "/hls/index.m3u8"
+    return if (query.isEmpty()) playlist else "$playlist?$query"
 }
 
 private const val HTTP_TIMEOUT_MS = 2500
