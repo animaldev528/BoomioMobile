@@ -40,7 +40,13 @@ internal object AirPlay {
             connection.connectTimeout = TIMEOUT_MS
             connection.readTimeout = TIMEOUT_MS
             connection.requestMethod = "POST"
-            connection.doOutput = false
+            // A real AirPlay sender posts an empty body with an explicit
+            // `Content-Length: 0`. Leaving it off makes at least one receiver
+            // (AirScreen) close the connection without answering at all, which
+            // surfaces as "unexpected end of stream" and looks like a network
+            // fault. Opening the output stream and writing nothing is what emits
+            // that header.
+            connection.doOutput = true
             connection.setFixedLengthStreamingMode(0)
             connection.setRequestProperty("Content-Location", url)
             connection.setRequestProperty("Start-Position", "0")
@@ -48,6 +54,7 @@ internal object AirPlay {
             connection.setRequestProperty("Content-Type", "text/parameters")
             connection.setRequestProperty("User-Agent", "MediaControl/1.0")
             connection.setRequestProperty("Connection", "close")
+            connection.outputStream.close()
 
             val code = connection.responseCode
             val body = runCatching {
@@ -60,6 +67,14 @@ internal object AirPlay {
             if (code in 200..299) {
                 log.d { "airplay: ${device.name} accepted the stream" }
                 CastPlayResult.Ok
+            } else if (code == 403) {
+                // The one refusal worth naming: an Apple TV in its default mode
+                // answers 403 to an unpaired AirPlay 1 /play and will never take
+                // it, so "could not reach" would send someone checking the
+                // network for a pairing rule.
+                CastPlayResult.failed(
+                    "${device.name} refused AirPlay 1 (HTTP 403) — this receiver wants AirPlay 2 pairing",
+                )
             } else {
                 CastPlayResult.failed("AirPlay /play answered HTTP $code")
             }

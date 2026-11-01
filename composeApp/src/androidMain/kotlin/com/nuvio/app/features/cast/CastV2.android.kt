@@ -5,8 +5,10 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.DataInputStream
+import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URI
 import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -88,6 +90,9 @@ private object CastSenderHolder {
 
 private class CastFailure(message: String) : Exception(message)
 
+/** The receiver answered the LOAD with IDLE and no reason: worth one retry. */
+private class LoadRejected(message: String) : Exception(message)
+
 private const val PORT = 8009
 private const val SENDER = "sender-0"
 private const val RECEIVER = "receiver-0"
@@ -105,7 +110,8 @@ private const val HANDSHAKE_TIMEOUT_MS = 4000
 private const val READ_TIMEOUT_MS = 1000
 private const val STATUS_TIMEOUT_MS = 3000L
 private const val LAUNCH_TIMEOUT_MS = 10000L
-private const val LOAD_TIMEOUT_MS = 12000L
+private const val LOAD_TIMEOUT_MS = 10000L
+private const val PLAYLIST_PROBE_MS = 4000
 private const val PING_INTERVAL_MS = 5000L
 private const val MAX_FRAME = 1 shl 20
 
@@ -165,6 +171,30 @@ private class CastSender(private val host: String) : Closeable {
             """{"type":"CONNECT","origin":{}}""",
         )
 
+        // ⚠️ `streamType` is not decoration. The Default Media Receiver reads
+        // BUFFERED as "a finite file" and LIVE as "a playlist that grows", and it
+        // answers a mismatch with `IDLE` and no reason at all — the cast screen
+        // opens and nothing plays. Our HLS playlist carries
+        // `#EXT-X-ENDLIST` once bsc knows the stream's duration and does not
+        // carry it before that, so ask the playlist itself rather than guessing.
+        val vod = playlistIsVod(url)
+        var streamType = if (vod == false) "LIVE" else "BUFFERED"
+        try {
+            val requestId = sendLoad(transport, url, title, streamType)
+            awaitLoadResult(requestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS)
+        } catch (rejected: LoadRejected) {
+            if (vod != null) throw rejected
+            // Nothing was read from the playlist, so the guess was the risk. One
+            // retry with the other reading is cheaper than a failed cast and says
+            // in the log which of the two the receiver wanted.
+            streamType = if (streamType == "BUFFERED") "LIVE" else "BUFFERED"
+            log.d { "cast: the receiver went IDLE with no reason — retrying as $streamType" }
+            val requestId = sendLoad(transport, url, title, streamType)
+            awaitLoadResult(requestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS)
+        }
+    }
+
+    private fun sendLoad(transport: String, url: String, title: String, streamType: String): Int {
         val loadRequestId = nextRequestId()
         val load = JSONObject()
             .put("type", "LOAD")
@@ -176,7 +206,7 @@ private class CastSender(private val host: String) : Closeable {
                 "media",
                 JSONObject()
                     .put("contentId", url)
-                    .put("streamType", "BUFFERED")
+                    .put("streamType", streamType)
                     .put("contentType", contentTypeFor(url))
                     .put(
                         "metadata",
@@ -186,7 +216,45 @@ private class CastSender(private val host: String) : Closeable {
                     ),
             )
         send(SENDER, transport, NS_MEDIA, load.toString())
-        awaitLoadResult(loadRequestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS)
+        return loadRequestId
+    }
+
+    /**
+     * Does [url] name a playlist that ends? `null` when it is not a playlist or
+     * cannot be read — the caller then keeps the default.
+     *
+     * This is the one fetch the PHONE makes on the renderer's behalf, and it is
+     * allowed by the same rule the renderer is: a cast stream is bound to the
+     * household (`<renderer ip>,lan`), so any private address may read it. The
+     * status is logged either way, because a playlist that answers 403 here is a
+     * binding fault and not a codec one.
+     */
+    private fun playlistIsVod(url: String): Boolean? {
+        if (!url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)) return null
+        val connection = try {
+            URI(url).toURL().openConnection() as HttpURLConnection
+        } catch (_: Exception) {
+            return null
+        }
+        return try {
+            connection.connectTimeout = PLAYLIST_PROBE_MS
+            connection.readTimeout = PLAYLIST_PROBE_MS
+            connection.requestMethod = "GET"
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                log.w { "cast: playlist answered HTTP $code" }
+                return null
+            }
+            val body = connection.inputStream.bufferedReader().use { it.readText() }
+            val vod = body.contains("#EXT-X-ENDLIST")
+            log.d { "cast: playlist is ${if (vod) "VOD" else "live"} (${body.count { it == '\n' }} lines)" }
+            vod
+        } catch (error: Exception) {
+            log.w { "cast: playlist unreadable (${error.message})" }
+            null
+        } finally {
+            runCatching { connection.disconnect() }
+        }
     }
 
     /** Sends PING twice a minute and drains what comes back, until closed. */
@@ -269,7 +337,11 @@ private class CastSender(private val host: String) : Closeable {
                                 log.d { "cast: ignoring the pre-load session snapshot (IDLE, no reason)" }
                                 continue
                             }
-                            throw CastFailure("the TV could not play it (${reason.ifBlank { "idle" }})")
+                            // Answered, but with nothing to say. A receiver that
+                            // will not name the reason usually means it rejected
+                            // the LOAD's own shape, which is retryable — see load().
+                            val message = "the TV could not play it (${reason.ifBlank { "idle" }})"
+                            if (reason.isBlank()) throw LoadRejected(message) else throw CastFailure(message)
                         }
                     }
                 }
