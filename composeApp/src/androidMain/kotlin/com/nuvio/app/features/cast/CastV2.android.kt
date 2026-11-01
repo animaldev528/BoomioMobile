@@ -114,6 +114,13 @@ private const val LOAD_TIMEOUT_MS = 10000L
 private const val PLAYLIST_PROBE_MS = 4000
 
 /**
+ * How long to wait for the receiver to say which media session it is showing
+ * before a LOAD replaces it. Best effort — a receiver that does not answer
+ * costs the timeout and nothing else.
+ */
+private const val PRELOAD_STATUS_TIMEOUT_MS = 1500L
+
+/**
  * How long a blank-reason `IDLE` may stand before it is treated as a rejection.
  *
  * A freshly launched receiver answers the LOAD before its app is up. Measured on
@@ -181,6 +188,17 @@ private class CastSender(private val host: String) : Closeable {
             """{"type":"CONNECT","origin":{}}""",
         )
 
+        // ⚠️ A LOAD does not swap the receiver's media player in one step. The
+        // receiver tears the old player down first and *reports that teardown*
+        // as `IDLE / ERROR` for the OLD media session, milliseconds before it
+        // creates the player for ours. Measured on the SHIELD 2026-11-01
+        // 17:30:56.97: `kWebMediaPlayerDestroyed`, then `kWebMediaPlayerCreated`
+        // 60 ms later — and the sender read the first event as its verdict,
+        // showed "Couldn't reach the TV — playing here", opened the phone's own
+        // player, and the television went on to play the film anyway. Ask which
+        // session is showing now, so their teardown can be told from ours.
+        val replacedSessionId = currentMediaSessionId(transport)
+
         // ⚠️ `streamType` is not decoration. The Default Media Receiver reads
         // BUFFERED as "a finite file" and LIVE as "a playlist that grows", and it
         // answers a mismatch with `IDLE` and no reason at all — the cast screen
@@ -191,7 +209,7 @@ private class CastSender(private val host: String) : Closeable {
         var streamType = if (vod == false) "LIVE" else "BUFFERED"
         try {
             val requestId = sendLoad(transport, url, title, streamType)
-            awaitLoadResult(requestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS)
+            awaitLoadResult(requestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS, replacedSessionId)
         } catch (rejected: LoadRejected) {
             // An `IDLE` that names no reason is not a verdict about the stream: a
             // receiver still bringing its app up answers exactly this way and then
@@ -201,7 +219,28 @@ private class CastSender(private val host: String) : Closeable {
             if (vod == null) streamType = if (streamType == "BUFFERED") "LIVE" else "BUFFERED"
             log.d { "cast: the receiver went IDLE with no reason — retrying as $streamType" }
             val requestId = sendLoad(transport, url, title, streamType)
-            awaitLoadResult(requestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS)
+            awaitLoadResult(requestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS, Int.MIN_VALUE)
+        }
+    }
+
+    /**
+     * The media session the receiver is showing right now, or [Int.MIN_VALUE]
+     * when there is none — or when the receiver does not answer in time.
+     */
+    private fun currentMediaSessionId(transport: String): Int {
+        send(
+            SENDER, transport, NS_MEDIA,
+            """{"type":"GET_STATUS","requestId":${nextRequestId()}}""",
+        )
+        val deadline = System.currentTimeMillis() + PRELOAD_STATUS_TIMEOUT_MS
+        while (true) {
+            val message = awaitMessage(deadline) ?: return Int.MIN_VALUE
+            if (message.namespace != NS_MEDIA) continue
+            val payload = message.json ?: continue
+            if (payload.optString("type") != "MEDIA_STATUS") continue
+            // No status entry: the receiver has nothing loaded.
+            val status = payload.optJSONArray("status")?.optJSONObject(0) ?: return Int.MIN_VALUE
+            return status.optInt("mediaSessionId", Int.MIN_VALUE)
         }
     }
 
@@ -330,7 +369,7 @@ private class CastSender(private val host: String) : Closeable {
      * says it could not play the stream. Only an IDLE that answers *this* load
      * (matching `requestId`) or that names a reason is a verdict.
      */
-    private fun awaitLoadResult(loadRequestId: Int, deadline: Long) {
+    private fun awaitLoadResult(loadRequestId: Int, deadline: Long, replacedSessionId: Int = Int.MIN_VALUE) {
         // Set by the first blank-reason `IDLE`: from then on the wait is bounded
         // by the grace rather than the whole load timeout, so a receiver that
         // never recovers fails in seconds instead of hanging on for ten.
@@ -360,6 +399,16 @@ private class CastSender(private val host: String) : Closeable {
                     val status = payload.optJSONArray("status")?.optJSONObject(0) ?: continue
                     val answered = payload.optInt("requestId", -1) == loadRequestId
                     val sessionId = status.optInt("mediaSessionId", Int.MIN_VALUE)
+                    // The teardown of the session this load replaced. It is not an
+                    // answer to our request (so `answered` is false) and we do not
+                    // know our own id yet, which is exactly the window in which it
+                    // used to be taken for our verdict.
+                    if (!answered && loadSessionId == Int.MIN_VALUE &&
+                        replacedSessionId != Int.MIN_VALUE && sessionId == replacedSessionId
+                    ) {
+                        log.d { "cast: ignoring the teardown of the session this load replaced ($sessionId)" }
+                        continue
+                    }
                     if (loadSessionId != Int.MIN_VALUE && sessionId != Int.MIN_VALUE && sessionId != loadSessionId) {
                         log.d { "cast: ignoring a status for media session $sessionId (ours is $loadSessionId)" }
                         continue
