@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.features.cast.CastSession
+import com.nuvio.app.features.cast.canHandToRenderer
 import com.nuvio.app.features.cast.playOnRenderer
 import com.nuvio.app.core.ui.NuvioLoadingIndicator
 import com.nuvio.app.core.ui.NuvioToastController
@@ -663,10 +664,10 @@ internal fun StreamDestination(
 
         val castTargetDevice = castDevice
         if (castTargetDevice != null && !forceExternal && !forceInternal) {
-            // A renderer fetches the URL itself, so a stream that only plays with
-            // our headers cannot play there at all. Say so and stay local rather
+            // A renderer fetches the URL itself, so a stream that needs headers it
+            // cannot send cannot play there at all. Say so and stay local rather
             // than handing the TV a URL that 403s.
-            if (playerLaunch.sourceHeaders.isNotEmpty()) {
+            if (!canHandToRenderer(sourceUrl, playerLaunch.sourceHeaders)) {
                 NuvioToastController.show(castFailedMessage)
                 startLocalPlayback()
                 return

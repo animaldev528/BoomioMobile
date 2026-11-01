@@ -27,3 +27,16 @@ internal expect suspend fun playOnRenderer(
     url: String,
     title: String,
 ): CastPlayResult
+
+/**
+ * Whether a renderer can actually fetch this stream.
+ *
+ * A television sends no headers of its own, so a stream that only plays with our
+ * `Authorization` / `X-Boomio-Stream-Token` headers is a guaranteed 403 on the
+ * couch. bsf knows this and, on a cast request, moves the stream token into the
+ * URL query — which is the same credential on the one channel the device has.
+ * So the question is not "are there headers" but "does the link carry its own
+ * credential".
+ */
+internal fun canHandToRenderer(url: String, requestHeaders: Map<String, String>): Boolean =
+    requestHeaders.isEmpty() || url.contains("token=", ignoreCase = true)
