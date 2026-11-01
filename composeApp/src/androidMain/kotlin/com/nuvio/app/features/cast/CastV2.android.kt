@@ -112,6 +112,16 @@ private const val STATUS_TIMEOUT_MS = 3000L
 private const val LAUNCH_TIMEOUT_MS = 10000L
 private const val LOAD_TIMEOUT_MS = 10000L
 private const val PLAYLIST_PROBE_MS = 4000
+
+/**
+ * How long a blank-reason `IDLE` may stand before it is treated as a rejection.
+ *
+ * A freshly launched receiver answers the LOAD before its app is up. Measured on
+ * a SHIELD: the phone gave up 175 ms after the LOAD and fell back to local
+ * playback while the TV went on to play the film. Waiting is the correct
+ * response to that answer, not failing.
+ */
+private const val STARTUP_GRACE_MS = 4000L
 private const val PING_INTERVAL_MS = 5000L
 private const val MAX_FRAME = 1 shl 20
 
@@ -183,11 +193,12 @@ private class CastSender(private val host: String) : Closeable {
             val requestId = sendLoad(transport, url, title, streamType)
             awaitLoadResult(requestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS)
         } catch (rejected: LoadRejected) {
-            if (vod != null) throw rejected
-            // Nothing was read from the playlist, so the guess was the risk. One
-            // retry with the other reading is cheaper than a failed cast and says
-            // in the log which of the two the receiver wanted.
-            streamType = if (streamType == "BUFFERED") "LIVE" else "BUFFERED"
+            // An `IDLE` that names no reason is not a verdict about the stream: a
+            // receiver still bringing its app up answers exactly this way and then
+            // plays anyway. One retry is cheap, and it is the only thing that
+            // distinguishes a cold start from a refusal. When the playlist was
+            // read, the measured reading is kept rather than flipped.
+            if (vod == null) streamType = if (streamType == "BUFFERED") "LIVE" else "BUFFERED"
             log.d { "cast: the receiver went IDLE with no reason — retrying as $streamType" }
             val requestId = sendLoad(transport, url, title, streamType)
             awaitLoadResult(requestId, System.currentTimeMillis() + LOAD_TIMEOUT_MS)
@@ -320,9 +331,19 @@ private class CastSender(private val host: String) : Closeable {
      * (matching `requestId`) or that names a reason is a verdict.
      */
     private fun awaitLoadResult(loadRequestId: Int, deadline: Long) {
+        // Set by the first blank-reason `IDLE`: from then on the wait is bounded
+        // by the grace rather than the whole load timeout, so a receiver that
+        // never recovers fails in seconds instead of hanging on for ten.
+        var graceUntil = 0L
         while (true) {
-            val message = awaitMessage(deadline)
-                ?: throw CastFailure("the TV did not answer the load")
+            val waitUntil = if (graceUntil > 0L) minOf(deadline, graceUntil) else deadline
+            val message = awaitMessage(waitUntil)
+            if (message == null) {
+                if (graceUntil > 0L && System.currentTimeMillis() >= graceUntil) {
+                    throw LoadRejected("the TV could not play it (idle)")
+                }
+                throw CastFailure("the TV did not answer the load")
+            }
             if (message.namespace != NS_MEDIA) continue
             val payload = message.json ?: continue
             when (payload.optString("type")) {
@@ -337,11 +358,18 @@ private class CastSender(private val host: String) : Closeable {
                                 log.d { "cast: ignoring the pre-load session snapshot (IDLE, no reason)" }
                                 continue
                             }
-                            // Answered, but with nothing to say. A receiver that
-                            // will not name the reason usually means it rejected
-                            // the LOAD's own shape, which is retryable — see load().
-                            val message = "the TV could not play it (${reason.ifBlank { "idle" }})"
-                            if (reason.isBlank()) throw LoadRejected(message) else throw CastFailure(message)
+                            val failure = "the TV could not play it (${reason.ifBlank { "idle" }})"
+                            if (reason.isNotBlank()) throw CastFailure(failure)
+                            // Answered, and with nothing to say. On a cold start
+                            // that is a receiver that is not ready yet — it goes on
+                            // to play — so this only becomes a verdict if it
+                            // outlives the grace window. See STARTUP_GRACE_MS.
+                            if (graceUntil == 0L) {
+                                log.d { "cast: the receiver answered IDLE while starting — waiting ${STARTUP_GRACE_MS}ms" }
+                                graceUntil = System.currentTimeMillis() + STARTUP_GRACE_MS
+                                continue
+                            }
+                            throw LoadRejected(failure)
                         }
                     }
                 }
