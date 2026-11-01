@@ -73,6 +73,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import coil3.compose.AsyncImage
 import com.nuvio.app.core.ui.nuvioSafeBottomPadding
 import com.nuvio.app.core.ui.shimmer
+import com.nuvio.app.features.cast.CastSession
 import com.nuvio.app.features.debrid.DebridSettingsRepository
 import com.nuvio.app.features.debrid.DirectDebridPlayableResult
 import com.nuvio.app.features.debrid.DirectDebridPlaybackResolver
@@ -177,7 +178,12 @@ fun StreamsScreen(
     val effectiveResumePositionMs = resumeState.positionMs
     val effectiveResumeProgressFraction = resumeState.progressFraction
 
-    LaunchedEffect(type, videoId, seasonNumber, episodeNumber, manualSelection) {
+    // The renderer is part of the request: a cast list is gated for that screen
+    // and its URLs are bound to its address, so the list already on screen is the
+    // wrong list the moment a device is picked — or cleared. Reload on that edge
+    // instead of leaving a phone-fetched (token-less) list to be tapped.
+    val castTarget by CastSession.target.collectAsStateWithLifecycle()
+    LaunchedEffect(type, videoId, seasonNumber, episodeNumber, manualSelection, castTarget?.id) {
         StreamsRepository.load(
             type = type,
             videoId = videoId,

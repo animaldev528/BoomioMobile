@@ -11,6 +11,14 @@ internal fun buildAddonResourceUrl(
     type: String,
     id: String,
     extraPathSegment: String? = null,
+    /**
+     * False when the list is being built for a RENDERER rather than for this device.
+     * The ceilings describe the phone's decoder, and on a cast request they would ride
+     * alongside the target's own caps — where a per-codec key the target's row does
+     * not name (the floor sets `max_resolution`, `videoCodecs`, `audio_codecs` and
+     * `hdr`, but not `codecCapsMaxRes`) survives the merge and can only tighten the TV.
+     */
+    declareDeviceCaps: Boolean = true,
 ): String {
     val encodedId = id.encodeAddonPathSegment()
     val baseUrl = addonTransportBaseUrl(manifestUrl)
@@ -19,7 +27,7 @@ internal fun buildAddonResourceUrl(
     } else {
         "$baseUrl/$resource/$type/$encodedId/$extraPathSegment.json"
     }
-    return resourceUrl + resourceQuery(manifestUrl, baseUrl)
+    return resourceUrl + resourceQuery(manifestUrl, baseUrl, declareDeviceCaps)
 }
 
 /**
@@ -40,12 +48,12 @@ internal fun buildAddonResourceUrl(
  * A key the manifest URL already carries wins: this appends only what is missing, so a hand-made
  * addon URL that pins a ceiling is not silently overridden by the probe.
  */
-private fun resourceQuery(manifestUrl: String, baseUrl: String): String {
+private fun resourceQuery(manifestUrl: String, baseUrl: String, declareDeviceCaps: Boolean): String {
     val existing = manifestUrl.substringAfter("?", "")
     val params = mutableListOf<String>()
     if (existing.isNotBlank()) params += existing
 
-    if (!isBoomioMediaPlane(baseUrl)) {
+    if (!declareDeviceCaps || !isBoomioMediaPlane(baseUrl)) {
         return if (params.isEmpty()) "" else "?" + params.joinToString("&")
     }
 
@@ -78,6 +86,17 @@ private fun isBoomioMediaPlane(baseUrl: String): Boolean {
     if (bsf.isNotEmpty() && base.equals(bsf, ignoreCase = true)) return true
     val path = base.substringAfter("://", base).substringAfter('/', "").trimEnd('/')
     return path.equals("bsf", ignoreCase = true) || path.startsWith("bsf/", ignoreCase = true)
+}
+
+/**
+ * Appends [extra] query parameters to this URL, joining with `&` when it already
+ * carries a query. Returns the URL untouched when [extra] is null or blank, so a
+ * caller with nothing to add does not have to branch.
+ */
+internal fun String.appendQuery(extra: String?): String {
+    if (extra.isNullOrBlank()) return this
+    val separator = if (contains('?')) '&' else '?'
+    return this + separator + extra
 }
 
 internal fun String.encodeAddonPathSegment(): String =

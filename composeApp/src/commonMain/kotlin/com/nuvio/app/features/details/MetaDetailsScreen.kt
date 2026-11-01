@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAddCheckCircle
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.People
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -115,6 +116,9 @@ import com.nuvio.app.features.home.MetaPreview
 import com.nuvio.app.features.mdblist.MdbListSettingsRepository
 import com.nuvio.app.features.library.LibraryRepository
 import com.nuvio.app.features.library.PendingTrackingMembershipRemoval
+import com.nuvio.app.features.boomio.BoomioStreamResolver
+import com.nuvio.app.features.cast.CastPickerDialog
+import com.nuvio.app.features.cast.CastSession
 import com.nuvio.app.features.library.TrackingMembershipRemovalConfirmationHost
 import com.nuvio.app.features.library.executeTrackingMembershipOperation
 import com.nuvio.app.features.library.showTrackingMembershipRewriteFeedback
@@ -2225,6 +2229,13 @@ private fun ConfiguredMetaSections(
     sharedTransitionScope: SharedTransitionScope?,
     animatedVisibilityScope: AnimatedVisibilityScope?,
 ) {
+    // Cast: the scan itself only runs when the picker opens, so this screen makes
+    // no network call of its own. The target lives in CastSession rather than here
+    // because it outlives the screen — it is a property of the phone, not the page.
+    val castTarget by CastSession.target.collectAsStateWithLifecycle()
+    var showCastPicker by remember { mutableStateOf(false) }
+    val castAvailable = remember { BoomioStreamResolver.isEnabled() }
+
     val enabledItems = settings.items.filter { it.enabled }
 
     // Helper to check if a section actually has content to show
@@ -2255,12 +2266,27 @@ private fun ConfiguredMetaSections(
                         onClick = onClick,
                     )
                 }
+                // Cast pins itself next to Play: it is the one action that changes
+                // WHERE playback happens, so it should not be a second tap away.
+                // Shuffle keeps the pin only while it is running; cast moves into
+                // the expanded row then, rather than disappearing.
+                val castAction = if (castAvailable) {
+                    DetailSecondaryAction(
+                        label = stringResource(Res.string.cast_action),
+                        icon = Icons.Rounded.Cast,
+                        isActive = castTarget != null,
+                        onClick = { showCastPicker = true },
+                    )
+                } else {
+                    null
+                }
                 DetailActionButtons(
                     playLabel = if (isPrimaryPlayEnabled) playButtonLabel else stringResource(Res.string.playback_unavailable),
                     playEnabled = isPrimaryPlayEnabled,
-                    pinnedAction = shuffleAction?.takeIf { shuffleEnabled },
+                    pinnedAction = shuffleAction?.takeIf { shuffleEnabled } ?: castAction,
                     secondaryActions = buildList {
                         if (!shuffleEnabled) shuffleAction?.let(::add)
+                        if (shuffleEnabled) castAction?.let(::add)
                         add(DetailSecondaryAction(
                             label = if (isWatched) {
                                 stringResource(Res.string.hero_mark_unwatched)
@@ -2444,6 +2470,16 @@ private fun ConfiguredMetaSections(
             }
             // else: already processed as part of group, skip
         }
+    }
+
+    if (showCastPicker) {
+        CastPickerDialog(
+            onDismissRequest = { showCastPicker = false },
+            onSelect = { device ->
+                CastSession.select(device)
+                showCastPicker = false
+            },
+        )
     }
 }
 

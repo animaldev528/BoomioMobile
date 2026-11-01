@@ -1,0 +1,169 @@
+package com.nuvio.app.features.cast
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class CastModelCatalogTest {
+
+    // ── Roku ────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `roku tv without 4k is the 1080p family`() {
+        val row = CastModelCatalog.forRoku(
+            mapOf("is-tv" to "true", "model-name" to "Roku TV", "ui-resolution" to "1080p"),
+        )
+        assertEquals(CastModelCatalog.Row("Roku TVs", "1080p Models (TCL, Hisense, etc)"), row)
+    }
+
+    @Test
+    fun `roku tv reports 4k in ui-resolution`() {
+        val row = CastModelCatalog.forRoku(
+            mapOf("is-tv" to "true", "model-name" to "TCL Roku TV", "ui-resolution" to "4k"),
+        )
+        // Pre-2021 on purpose: ECP does not report a model year, and the newer
+        // row would advertise AV1 to a set that may not decode it.
+        assertEquals(CastModelCatalog.Row("Roku TVs", "4K Models (Pre-2021)"), row)
+    }
+
+    @Test
+    fun `roku stick and express are different rows`() {
+        assertEquals(
+            CastModelCatalog.Row("Roku", "Streaming Stick 4K / Ultra"),
+            CastModelCatalog.forRoku(mapOf("model-name" to "Roku Streaming Stick 4K", "is-tv" to "false")),
+        )
+        assertEquals(
+            CastModelCatalog.Row("Roku", "Express / Express+"),
+            CastModelCatalog.forRoku(mapOf("model-name" to "Roku Express 3960X", "is-tv" to "false")),
+        )
+    }
+
+    @Test
+    fun `roku device-info keys are read case-insensitively`() {
+        val row = CastModelCatalog.forRoku(
+            mapOf("IS-TV" to "true", "Model-Name" to "Roku TV", "UI-Resolution" to "4k"),
+        )
+        assertEquals("Roku TVs", row?.ecosystem)
+    }
+
+    @Test
+    fun `an unrecognisable roku gets no row`() {
+        assertNull(CastModelCatalog.forRoku(mapOf("model-name" to "Roku", "is-tv" to "false")))
+    }
+
+    // ── Google Cast ─────────────────────────────────────────────────────────
+
+    @Test
+    fun `cast md names the dongle`() {
+        assertEquals(
+            CastModelCatalog.Row("Google", "Chromecast Ultra"),
+            CastModelCatalog.forCast("Chromecast Ultra"),
+        )
+        assertEquals(
+            CastModelCatalog.Row("Google", "Chromecast (1st/2nd/3rd Gen)"),
+            CastModelCatalog.forCast("Chromecast"),
+        )
+    }
+
+    @Test
+    fun `a cast device that does not say what it is gets the floor`() {
+        // Chromecast with Google TV and Nest speakers share `md` values with
+        // older hardware; borrowing the wrong row is worse than the floor.
+        assertNull(CastModelCatalog.forCast("Chromecast with Google TV"))
+        assertNull(CastModelCatalog.forCast("Google Nest Mini"))
+        assertNull(CastModelCatalog.forCast(null))
+        assertNull(CastModelCatalog.forCast(" "))
+    }
+
+    // ── DLNA ────────────────────────────────────────────────────────────────
+
+    @Test
+    fun `dlna is deliberately unmapped in v1`() {
+        assertNull(
+            CastModelCatalog.forDlna(
+                mapOf("manufacturer" to "LG Electronics", "modelName" to "LG webOS TV", "modelNumber" to "OLED55C1PUB"),
+            ),
+        )
+    }
+
+    // ── Device and target ───────────────────────────────────────────────────
+
+    @Test
+    fun `a placed device carries the table strings`() {
+        val device = CastModelCatalog.device(
+            protocol = CastProtocol.ROKU,
+            ip = "192.168.1.50",
+            name = "Living Room",
+            port = 8060,
+            facts = mapOf("is-tv" to "true", "model-name" to "Roku TV", "ui-resolution" to "4k"),
+        )
+        assertTrue(device.hasCapabilityRow)
+        assertEquals("Roku TVs", device.ecosystem)
+        assertEquals("4K Models (Pre-2021)", device.model)
+    }
+
+    @Test
+    fun `an unplaced device still produces a cast request`() {
+        val device = CastModelCatalog.device(
+            protocol = CastProtocol.DLNA,
+            ip = "192.168.1.60",
+            name = "Bedroom TV",
+        )
+        assertFalse(device.hasCapabilityRow)
+
+        val target = CastTarget.of(device)
+
+        // bsf only treats a request as a cast when an ecosystem or model is
+        // present; an IP alone would bind the stream to the phone instead.
+        assertEquals("DLNA", target.ecosystem)
+        assertEquals("Bedroom TV", target.model)
+        assertEquals("192.168.1.60", target.ip)
+    }
+
+    @Test
+    fun `a placed device sends the capability row`() {
+        val device = CastModelCatalog.device(
+            protocol = CastProtocol.CAST,
+            ip = "192.168.1.70",
+            name = "Living Room",
+            md = "Chromecast Ultra",
+        )
+        val target = CastTarget.of(device)
+        assertEquals("Google", target.ecosystem)
+        assertEquals("Chromecast Ultra", target.model)
+    }
+
+    @Test
+    fun `device identity is stable across rediscovery`() {
+        val first = CastModelCatalog.device(CastProtocol.ROKU, "192.168.1.50", "Roku")
+        val second = CastModelCatalog.device(CastProtocol.ROKU, "192.168.1.50", "Roku (renamed)")
+        assertEquals(first.id, second.id)
+        assertEquals("roku:192.168.1.50", first.id)
+    }
+
+    // ── Query encoding ──────────────────────────────────────────────────────
+
+    @Test
+    fun `query values are percent-encoded for the wire`() {
+        val target = CastTarget(
+            ip = "192.168.1.50",
+            ecosystem = "Roku TVs",
+            model = "1080p Models (TCL, Hisense, etc)",
+        )
+        assertEquals(
+            "targetEcosystem=Roku%20TVs" +
+                "&targetModel=1080p%20Models%20%28TCL%2C%20Hisense%2C%20etc%29" +
+                "&targetIp=192.168.1.50",
+            target.queryString(),
+        )
+    }
+
+    @Test
+    fun `unreserved characters survive encoding untouched`() {
+        assertEquals("A-z_0.9~", encode("A-z_0.9~"))
+        assertEquals("%2F", encode("/"))
+        assertEquals("%C3%A9", encode("é"))
+    }
+}
