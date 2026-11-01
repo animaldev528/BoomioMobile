@@ -74,8 +74,7 @@ object CastDiscovery {
                 val ssdp = async { ssdpDevices(timeoutMillis) }
                 val mdns = async { CastMdns.discover(timeoutMillis) }
                 (ssdp.await() + mdns.await())
-                    .distinctBy { it.id }
-                    .sortedBy { it.name.lowercase() }
+                    .distinctByIdentified()
             }
         }
 

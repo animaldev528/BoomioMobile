@@ -179,7 +179,12 @@ object CastModelCatalog {
     ): CastDevice {
         val row = when (protocol) {
             CastProtocol.ROKU -> forRoku(facts)
-            CastProtocol.CAST -> forCast(md)
+            // A DIAL description is the only record some Cast receivers answer
+            // with, and it names the hardware rather than the Cast product: an
+            // Amazon Fire TV answers DIAL (and opens :8009, so it is a valid
+            // target) while its `md`, which is what the Cast table keys on, is
+            // not there at all. The Amazon rows are matched on the DIAL facts.
+            CastProtocol.CAST -> forCast(md) ?: forDlna(facts)
             CastProtocol.DLNA -> forDlna(facts)
             // `_airplay._tcp` reports the model in the same record, and the
             // discovery layer passes it as `md`; read the facts so `_raop`'s

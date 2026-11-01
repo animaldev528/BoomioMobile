@@ -63,6 +63,30 @@ data class CastDevice(
 }
 
 /**
+ * Collapses the same screen discovered twice onto the record that can name it.
+ *
+ * A Cast receiver answers BOTH SSDP/DIAL and mDNS, and the two do not say the
+ * same thing. A television with Cast built in answers DIAL with
+ * `modelName=Eureka Dongle` — Google's generic name for the built-in product,
+ * which names no row at all — while the same screen's `_googlecast._tcp` record
+ * carries `md=Chromecast`. Deduplicating on the id alone therefore threw away
+ * the only record that could place the device, and the picker showed
+ * "not identified" for a television it had correctly identified a second earlier.
+ *
+ * The rule is identification first, then order: a record that names a row beats
+ * one that does not, and when neither (or both) can, the first one seen wins.
+ */
+internal fun List<CastDevice>.distinctByIdentified(): List<CastDevice> =
+    groupBy { it.id }
+        .map { (_, found) -> found.reduce(::betterRecord) }
+        .sortedBy { it.name.lowercase() }
+
+private fun betterRecord(current: CastDevice, candidate: CastDevice): CastDevice = when {
+    candidate.hasCapabilityRow && !current.hasCapabilityRow -> candidate
+    else -> current
+}
+
+/**
  * The three values `/find` needs to treat a request as a cast.
  *
  * ⚠️ bsf only recognises a cast request when `targetEcosystem` or `targetModel`

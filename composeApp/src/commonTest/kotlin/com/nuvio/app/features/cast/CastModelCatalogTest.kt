@@ -15,7 +15,7 @@ class CastModelCatalogTest {
         val row = CastModelCatalog.forRoku(
             mapOf("is-tv" to "true", "model-name" to "Roku TV", "ui-resolution" to "1080p"),
         )
-        assertEquals(CastModelCatalog.Row("Roku TVs", "1080p Models (TCL, Hisense, etc)"), row)
+        assertEquals(CastModelCatalog.Row("Roku TVs", "1080p Models (TCL, Hisense, etc)", "1080p · H.264 only"), row)
     }
 
     @Test
@@ -25,17 +25,17 @@ class CastModelCatalogTest {
         )
         // Pre-2021 on purpose: ECP does not report a model year, and the newer
         // row would advertise AV1 to a set that may not decode it.
-        assertEquals(CastModelCatalog.Row("Roku TVs", "4K Models (Pre-2021)"), row)
+        assertEquals(CastModelCatalog.Row("Roku TVs", "4K Models (Pre-2021)", "4K · HEVC · HDR10"), row)
     }
 
     @Test
     fun `roku stick and express are different rows`() {
         assertEquals(
-            CastModelCatalog.Row("Roku", "Streaming Stick 4K / Ultra"),
+            CastModelCatalog.Row("Roku", "Streaming Stick 4K / Ultra", "4K · HEVC · HDR10"),
             CastModelCatalog.forRoku(mapOf("model-name" to "Roku Streaming Stick 4K", "is-tv" to "false")),
         )
         assertEquals(
-            CastModelCatalog.Row("Roku", "Express / Express+"),
+            CastModelCatalog.Row("Roku", "Express / Express+", "1080p · HEVC · H.264"),
             CastModelCatalog.forRoku(mapOf("model-name" to "Roku Express 3960X", "is-tv" to "false")),
         )
     }
@@ -182,6 +182,71 @@ class CastModelCatalogTest {
         val target = CastTarget.of(device)
         assertEquals("Google", target.ecosystem)
         assertEquals("Chromecast Ultra", target.model)
+    }
+
+    @Test
+    fun `an amazon receiver discovered over dial takes the amazon row`() {
+        // A Fire TV answers DIAL and opens :8009, so it reaches us as a CAST
+        // device — but its DIAL description never carries a Cast `md`. Without
+        // this fallback the only device that says what it is in words we can
+        // read was showing as "not identified".
+        val device = CastModelCatalog.device(
+            protocol = CastProtocol.CAST,
+            ip = "192.168.1.51",
+            name = "Kyle's FireTVStick",
+            facts = mapOf("friendlyname" to "Kyle's FireTVStick", "manufacturer" to "Amazon", "modelname" to "AFTKA"),
+        )
+        assertEquals("Amazon", device.ecosystem)
+        assertEquals("Fire TV Stick (1st/2nd/3rd/Lite)", device.model)
+    }
+
+    // ── Merging two records for one screen ──────────────────────────────────
+
+    @Test
+    fun `the record that can name the device wins over the one that cannot`() {
+        // A television with Cast built in answers DIAL with Google's generic
+        // "Eureka Dongle", while its `_googlecast._tcp` record says Chromecast.
+        val dial = CastModelCatalog.device(
+            protocol = CastProtocol.CAST,
+            ip = "192.168.1.61",
+            name = "Family room TV",
+            md = "Eureka Dongle",
+        )
+        val mdns = CastModelCatalog.device(
+            protocol = CastProtocol.CAST,
+            ip = "192.168.1.61",
+            name = "Family room TV",
+            md = "Chromecast",
+        )
+        assertFalse(dial.hasCapabilityRow)
+        assertTrue(mdns.hasCapabilityRow)
+
+        val merged = listOf(dial, mdns).distinctByIdentified()
+        assertEquals(1, merged.size)
+        assertEquals("Chromecast (1st/2nd/3rd Gen)", merged.single().model)
+    }
+
+    @Test
+    fun `merging keeps a record that is already identified`() {
+        val first = CastDevice(
+            protocol = CastProtocol.CAST,
+            ip = "192.168.1.55",
+            name = "SHIELD",
+            ecosystem = "Nvidia",
+            model = "Shield TV Pro (2015/17/19)",
+        )
+        val second = CastDevice(CastProtocol.CAST, "192.168.1.55", "SHIELD")
+        assertEquals("Nvidia", listOf(first, second).distinctByIdentified().single().ecosystem)
+        // Order does not matter: an unidentified record never displaces one that names a row.
+        assertEquals("Nvidia", listOf(second, first).distinctByIdentified().single().ecosystem)
+    }
+
+    @Test
+    fun `two different protocols on one address are two devices`() {
+        // A Roku answers ECP and DLNA; both are real ways to reach it.
+        val roku = CastDevice(CastProtocol.ROKU, "192.168.1.50", "Roku")
+        val dlna = CastDevice(CastProtocol.DLNA, "192.168.1.50", "Roku")
+        assertEquals(2, listOf(roku, dlna).distinctByIdentified().size)
     }
 
     @Test
