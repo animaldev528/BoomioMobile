@@ -47,6 +47,10 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
         // re-enrolling device lands back on its existing row, and a pairing request can be built
         // before any activity has run. Reads ANDROID_ID — cheap, no I/O.
         com.nuvio.app.core.device.DeviceHardwareFingerprint.initialize(this)
+        // Cast discovery is called from common UI with no Context in its signature, but mDNS
+        // (`NsdManager`) and the multicast lock are system services that need one. Published here
+        // so the picker can scan without a Context threaded through the platform seam.
+        com.nuvio.app.features.cast.CastAndroidContext.initialize(this)
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {

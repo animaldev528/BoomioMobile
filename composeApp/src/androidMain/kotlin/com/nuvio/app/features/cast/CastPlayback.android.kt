@@ -7,8 +7,8 @@ import java.net.HttpURLConnection
 import java.net.URI
 
 /**
- * The transport half of a DLNA cast: fetch the description, then POST the two
- * `AVTransport` actions the renderer expects.
+ * The transport half of a cast, per protocol: DLNA over `AVTransport`, Google
+ * Cast over CASTV2 on `:8009`, AirPlay over `POST :7000/play`.
  *
  * Everything here is bounded and single-shot. A renderer that is asleep, on
  * another VLAN or lying about its control URL fails within a few seconds and the
@@ -22,9 +22,9 @@ internal actual suspend fun playOnRenderer(
 ): CastPlayResult = withContext(Dispatchers.IO) {
     val result = when (device.protocol) {
         CastProtocol.DLNA -> dlnaPlay(device, url, title)
-        CastProtocol.CAST -> CastPlayResult.failed("Chromecast playback is not implemented yet")
+        CastProtocol.CAST -> CastV2.play(device, url, title)
         CastProtocol.ROKU -> CastPlayResult.failed("A Roku needs a channel; playback is not implemented yet")
-        CastProtocol.AIRPLAY -> CastPlayResult.failed("AirPlay is not implemented yet")
+        CastProtocol.AIRPLAY -> AirPlay.play(device, url, title)
     }
     if (!result.ok) log.w { "cast to ${device.protocol}/${device.name} (${device.ip}) failed: ${result.reason}" }
     result

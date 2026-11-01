@@ -22,7 +22,11 @@ enum class CastProtocol {
      */
     ROKU,
 
-    /** `_airplay._tcp`. Deferred — H.264/MP4 or HLS only. */
+    /**
+     * `_airplay._tcp`, AirPlay 1: `POST :7000/play` with the URL in
+     * `Content-Location`. The receiver fetches it itself, so like DLNA and Cast it
+     * plays H.264/MP4 or HLS only — and the stream must carry its token in the URL.
+     */
     AIRPLAY,
 }
 

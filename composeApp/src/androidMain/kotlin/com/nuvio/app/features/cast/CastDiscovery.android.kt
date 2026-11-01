@@ -2,18 +2,22 @@ package com.nuvio.app.features.cast
 
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.HttpURLConnection
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.net.URI
 
 /**
- * Finds renderers on the LAN with SSDP.
+ * Finds renderers on the LAN.
  *
- * Two search targets are sent, because the two protocols answer differently and
- * only one of them can be played to today:
+ * SSDP covers DLNA and Roku, and (as a fallback) Google Cast through its DIAL
+ * advertisement:
  *
  *   - `urn:schemas-upnp-org:device:MediaRenderer:1` — a DLNA television. The reply
  *     carries a `LOCATION` pointing at a description XML, which is where the
@@ -22,44 +26,70 @@ import java.net.URI
  *     `GET :8060/query/device-info` with a much richer document (`is-tv`,
  *     `ui-resolution`), which is why Roku is the one family the catalog can place
  *     precisely.
+ *   - `urn:dial-multiscreen-org:service:dial:1` — a Google Cast receiver's
+ *     secondary announcement. Not every device answers it, and not every device
+ *     that answers it is a Cast receiver (smart TVs use DIAL to launch their own
+ *     apps), so a DIAL hit only becomes a Cast target when `:8009` is open.
+ *
+ * mDNS (`_googlecast._tcp`, `_airplay._tcp`) runs alongside it and is the
+ * reliable path for Cast and AirPlay — see `CastDiscoveryMdns.android.kt`.
  *
  * Discovery is bounded and best-effort: a box that answers with something
  * malformed is dropped, never retried, and never fails the whole scan. An empty
  * list is a normal answer — it means "no renderer here", and the caller hides the
  * cast affordance rather than showing a dead button.
  *
- * No `MulticastLock` is taken and no multicast permission is needed: M-SEARCH
- * replies are unicast back to this socket, so joining a group never happens.
- * (mDNS for Google Cast does need both, which is why it is a separate step.)
+ * No `MulticastLock` is taken for SSDP and no multicast permission is needed:
+ * M-SEARCH replies are unicast back to this socket, so joining a group never
+ * happens. (mDNS does need both, which is why it is a separate step.)
  */
 object CastDiscovery {
 
     private const val SSDP_HOST = "239.255.255.250"
     private const val SSDP_PORT = 1900
     private const val ROKU_PORT = 8060
+    private const val CAST_PORT = 8009
     private const val HTTP_TIMEOUT_MS = 1500
+    private const val PROBE_TIMEOUT_MS = 400
 
     const val DEFAULT_TIMEOUT_MS = 2500L
 
     private val SEARCH_TARGETS = listOf(
         "urn:schemas-upnp-org:device:MediaRenderer:1",
         "roku:ecp",
+        "urn:dial-multiscreen-org:service:dial:1",
     )
 
     /**
      * One bounded scan. Never throws — a socket failure is an empty result, so a
      * device that is offline or on a hostile network degrades to "no targets".
+     *
+     * SSDP and mDNS run together, each with its own window; the merge is by
+     * `(protocol, address)` so a screen that speaks two protocols is offered once
+     * per protocol rather than twice for the same one.
      */
     suspend fun discover(timeoutMillis: Long = DEFAULT_TIMEOUT_MS): List<CastDevice> =
         withContext(Dispatchers.IO) {
-            val replies = searchSsdp(timeoutMillis)
-            val devices = replies.mapNotNull { resolve(it) }
-                // A Roku TV can answer both targets; keep the richer record, which
-                // is the Roku one — it carries the capability row.
-                .groupBy { it.ip }
-                .map { (_, found) -> found.firstOrNull { it.protocol == CastProtocol.ROKU } ?: found.first() }
-            devices.sortedBy { it.name.lowercase() }
+            coroutineScope {
+                val ssdp = async { ssdpDevices(timeoutMillis) }
+                val mdns = async { CastMdns.discover(timeoutMillis) }
+                (ssdp.await() + mdns.await())
+                    .distinctBy { it.id }
+                    .sortedBy { it.name.lowercase() }
+            }
         }
+
+    private fun ssdpDevices(timeoutMillis: Long): List<CastDevice> {
+        val devices = searchSsdp(timeoutMillis).mapNotNull { resolve(it) }
+        return devices
+            // A Roku TV can answer the generic renderer target too; keep the richer
+            // record, which is the Roku one — it carries the capability row.
+            .groupBy { it.ip }
+            .flatMap { (_, found) ->
+                val roku = found.firstOrNull { it.protocol == CastProtocol.ROKU }
+                if (roku != null) listOf(roku) else found
+            }
+    }
 
     // ── SSDP ────────────────────────────────────────────────────────────────
 
@@ -99,7 +129,10 @@ object CastDiscovery {
                 val ip = packet.address?.hostAddress ?: continue
                 val text = packet.data.decodeToString(0, packet.length)
                 val headers = parseHeaders(text)
-                replies.putIfAbsent(ip, Reply(ip, headers))
+                // Keyed by target as well as address: one screen may answer both
+                // the renderer search and the DIAL one, and those are two
+                // different protocols to offer, not a duplicate.
+                replies.putIfAbsent("$ip|${headers["st"].orEmpty()}", Reply(ip, headers))
             }
         } catch (_: Exception) {
             // Keep whatever arrived before the failure.
@@ -129,10 +162,38 @@ object CastDiscovery {
         val location = reply.headers["location"]
         return when {
             st.contains("roku:ecp", ignoreCase = true) -> resolveRoku(reply.ip)
+            st.contains("dial-multiscreen", ignoreCase = true) -> resolveDial(reply.ip, location)
             location != null -> resolveDlna(reply.ip, location)
             else -> null
         }
     }
+
+    /**
+     * A DIAL advertisement is only *evidence* of a Cast receiver, not proof:
+     * smart TVs speak DIAL to launch Netflix over their own protocol. The proof
+     * is `:8009` accepting a connection, which every Cast receiver must do and a
+     * plain DIAL server does not.
+     */
+    private fun resolveDial(ip: String, location: String?): CastDevice? {
+        if (!portOpen(ip, CAST_PORT)) return null
+        val finalLocation = location?.let { absoluteLocation(ip, it) }
+        val facts = finalLocation?.let { httpGet(it) }?.let { parseLeafFields(it) }.orEmpty()
+        return CastModelCatalog.device(
+            protocol = CastProtocol.CAST,
+            ip = ip,
+            name = facts["friendlyname"] ?: facts["modelname"] ?: ip,
+            port = CAST_PORT,
+            facts = facts,
+            md = facts["modelname"],
+        )
+    }
+
+    private fun portOpen(ip: String, port: Int): Boolean = runCatching {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(ip, port), PROBE_TIMEOUT_MS)
+            true
+        }
+    }.getOrDefault(false)
 
     private fun resolveRoku(ip: String): CastDevice? {
         val xml = httpGet("http://$ip:$ROKU_PORT/query/device-info") ?: return null
