@@ -236,14 +236,18 @@ internal object CastMdns {
                 md = txt["md"],
             )
 
-            CastProtocol.AIRPLAY -> CastModelCatalog.device(
-                protocol = CastProtocol.AIRPLAY,
-                ip = ip,
-                name = serviceName,
-                port = info.port.takeIf { it > 0 } ?: 7000,
-                facts = txt,
-                md = txt["model"],
-            )
+            CastProtocol.AIRPLAY -> {
+                // A HomePod answers this service identically and has no screen.
+                if (CastModelCatalog.isAudioOnlyAirplay(txt)) return null
+                CastModelCatalog.device(
+                    protocol = CastProtocol.AIRPLAY,
+                    ip = ip,
+                    name = serviceName,
+                    port = info.port.takeIf { it > 0 } ?: 7000,
+                    facts = txt,
+                    md = txt["model"],
+                )
+            }
 
             else -> null
         }

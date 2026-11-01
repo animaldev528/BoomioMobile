@@ -58,34 +58,83 @@ class CastModelCatalogTest {
     @Test
     fun `cast md names the dongle`() {
         assertEquals(
-            CastModelCatalog.Row("Google", "Chromecast Ultra"),
+            CastModelCatalog.Row("Google", "Chromecast Ultra", "4K · HEVC · HDR10"),
             CastModelCatalog.forCast("Chromecast Ultra"),
         )
         assertEquals(
-            CastModelCatalog.Row("Google", "Chromecast (1st/2nd/3rd Gen)"),
+            CastModelCatalog.Row("Google", "Chromecast (1st/2nd/3rd Gen)", "1080p · H.264 · AAC"),
             CastModelCatalog.forCast("Chromecast"),
         )
     }
 
     @Test
+    fun `a shield is placed by its md`() {
+        assertEquals(
+            "Shield TV Pro (2015/17/19)",
+            CastModelCatalog.forCast("SHIELD Android TV")?.model,
+        )
+        assertEquals("Nvidia", CastModelCatalog.forCast("SHIELD Android TV")?.ecosystem)
+    }
+
+    @Test
+    fun `google tv dongles split on the HD suffix`() {
+        assertEquals("CCwGTV (4K)", CastModelCatalog.forCast("Chromecast with Google TV")?.model)
+        assertEquals("CCwGTV (HD)", CastModelCatalog.forCast("Chromecast with Google TV (HD)")?.model)
+    }
+
+    @Test
     fun `a cast device that does not say what it is gets the floor`() {
-        // Chromecast with Google TV and Nest speakers share `md` values with
-        // older hardware; borrowing the wrong row is worse than the floor.
-        assertNull(CastModelCatalog.forCast("Chromecast with Google TV"))
         assertNull(CastModelCatalog.forCast("Google Nest Mini"))
         assertNull(CastModelCatalog.forCast(null))
         assertNull(CastModelCatalog.forCast(" "))
+        // No video out: offering it as a cast target plays sound and no picture.
+        assertNull(CastModelCatalog.forCast("Chromecast Audio"))
+    }
+
+    // ── AirPlay ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun `airplay names the apple tv generation`() {
+        assertEquals(
+            CastModelCatalog.Row("Apple", "TV 4K (1st/2nd Gen)", "4K · HEVC · HDR10/DV"),
+            CastModelCatalog.forAirplay(mapOf("model" to "AppleTV6,2")),
+        )
+        assertEquals("TV 4K (3rd Gen)", CastModelCatalog.forAirplay(mapOf("model" to "AppleTV14,1"))?.model)
+        assertEquals("TV HD (4th Gen)", CastModelCatalog.forAirplay(mapOf("model" to "AppleTV5,3"))?.model)
+        // `_raop` spells the same identifier `am`.
+        assertEquals("TV 4K (1st/2nd Gen)", CastModelCatalog.forAirplay(mapOf("am" to "AppleTV11,1"))?.model)
+    }
+
+    @Test
+    fun `an airplay receiver with no screen is not a target`() {
+        assertNull(CastModelCatalog.forAirplay(mapOf("model" to "AudioAccessory5,1")))
+        assertTrue(CastModelCatalog.isAudioOnlyAirplay(mapOf("model" to "AudioAccessory5,1")))
+        assertFalse(CastModelCatalog.isAudioOnlyAirplay(mapOf("model" to "AppleTV6,2")))
+        assertNull(CastModelCatalog.forAirplay(mapOf("model" to "Whatever1,1")))
     }
 
     // ── DLNA ────────────────────────────────────────────────────────────────
 
     @Test
-    fun `dlna is deliberately unmapped in v1`() {
+    fun `dlna tvs stay unmapped without a year`() {
         assertNull(
             CastModelCatalog.forDlna(
                 mapOf("manufacturer" to "LG Electronics", "modelName" to "LG webOS TV", "modelNumber" to "OLED55C1PUB"),
             ),
         )
+    }
+
+    @Test
+    fun `amazon renderers take the conservative stick row`() {
+        assertEquals(
+            "Fire TV Stick (1st/2nd/3rd/Lite)",
+            CastModelCatalog.forDlna(mapOf("manufacturer" to "Amazon", "modelname" to "AFTMM"))?.model,
+        )
+        assertEquals(
+            "Amazon",
+            CastModelCatalog.forDlna(mapOf("modelname" to "AFTKA"))?.ecosystem,
+        )
+        assertNull(CastModelCatalog.forDlna(mapOf("manufacturer" to "Sony")))
     }
 
     // ── Device and target ───────────────────────────────────────────────────

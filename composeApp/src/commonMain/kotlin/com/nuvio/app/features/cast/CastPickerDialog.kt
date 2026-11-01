@@ -164,6 +164,9 @@ private fun CastDevice.subtitle(): String {
     return if (model.isNullOrBlank()) {
         "$protocol · " + stringResource(Res.string.cast_device_floor)
     } else {
-        "$protocol · $model"
+        // The ceiling is the useful half: "Chromecast (1st/2nd/3rd Gen)" is a
+        // name, "1080p · H.264 · AAC" is what the viewer is about to get.
+        listOfNotNull("$protocol · $model", ceiling?.takeIf { it.isNotBlank() })
+            .joinToString(" — ")
     }
 }

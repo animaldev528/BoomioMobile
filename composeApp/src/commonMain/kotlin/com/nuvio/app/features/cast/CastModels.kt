@@ -45,6 +45,8 @@ data class CastDevice(
     val port: Int = 0,
     val ecosystem: String? = null,
     val model: String? = null,
+    /** The row's ceiling in words, for the picker only — never for a decision. */
+    val ceiling: String? = null,
     /** What the protocol actually told us, kept for the log and for diagnosis. */
     val raw: Map<String, String> = emptyMap(),
 ) {
