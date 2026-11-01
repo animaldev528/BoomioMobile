@@ -335,6 +335,15 @@ private class CastSender(private val host: String) : Closeable {
         // by the grace rather than the whole load timeout, so a receiver that
         // never recovers fails in seconds instead of hanging on for ten.
         var graceUntil = 0L
+        // ⚠️ The media session THIS load creates, adopted from the first status
+        // that answers it (or the first that is playing). A LOAD carries no
+        // session id, so it INTERRUPTS whatever the receiver was showing, and
+        // the receiver then pushes `MEDIA_STATUS` / `IDLE` / `INTERRUPTED` for
+        // that OLD session. Taking it as a verdict on this load is what makes
+        // the phone say "Couldn't reach the TV — playing here" while the film
+        // visibly starts on the television — and the fallback then plays it on
+        // the phone too, so both screens show it and the phone is wrong.
+        var loadSessionId = Int.MIN_VALUE
         while (true) {
             val waitUntil = if (graceUntil > 0L) minOf(deadline, graceUntil) else deadline
             val message = awaitMessage(waitUntil)
@@ -350,12 +359,37 @@ private class CastSender(private val host: String) : Closeable {
                 "MEDIA_STATUS" -> {
                     val status = payload.optJSONArray("status")?.optJSONObject(0) ?: continue
                     val answered = payload.optInt("requestId", -1) == loadRequestId
+                    val sessionId = status.optInt("mediaSessionId", Int.MIN_VALUE)
+                    if (loadSessionId != Int.MIN_VALUE && sessionId != Int.MIN_VALUE && sessionId != loadSessionId) {
+                        log.d { "cast: ignoring a status for media session $sessionId (ours is $loadSessionId)" }
+                        continue
+                    }
+                    // An answer to this LOAD names our session even when the
+                    // session is IDLE: adopt it so later pushes can be told apart.
+                    if (answered && loadSessionId == Int.MIN_VALUE && sessionId != Int.MIN_VALUE) {
+                        loadSessionId = sessionId
+                    }
                     when (status.optString("playerState")) {
-                        "PLAYING", "BUFFERING", "PAUSED" -> return
+                        "PLAYING", "BUFFERING", "PAUSED" -> {
+                            if (loadSessionId == Int.MIN_VALUE && sessionId != Int.MIN_VALUE) {
+                                loadSessionId = sessionId
+                            }
+                            return
+                        }
                         "IDLE" -> {
                             val reason = status.optString("idleReason")
                             if (reason.isBlank() && !answered) {
                                 log.d { "cast: ignoring the pre-load session snapshot (IDLE, no reason)" }
+                                continue
+                            }
+                            // The session this load replaced is torn down with an
+                            // INTERRUPTED (or CANCELLED) status. That is not a
+                            // verdict on our load — it is the receipt for it. Our
+                            // load is by definition the newest media on this
+                            // receiver, so it can never be the one interrupted.
+                            if (loadSessionId == Int.MIN_VALUE &&
+                                (reason == "INTERRUPTED" || reason == "CANCELLED")) {
+                                log.d { "cast: ignoring $reason for the session this load replaced" }
                                 continue
                             }
                             val failure = "the TV could not play it (${reason.ifBlank { "idle" }})"
