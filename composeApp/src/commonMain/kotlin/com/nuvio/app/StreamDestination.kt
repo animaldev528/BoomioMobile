@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import co.touchlab.kermit.Logger
 import com.nuvio.app.features.cast.CastSession
 import com.nuvio.app.features.cast.canHandToRenderer
 import com.nuvio.app.features.cast.playOnRenderer
@@ -663,17 +664,33 @@ internal fun StreamDestination(
         }
 
         val castTargetDevice = castDevice
+        // One line naming every input to the handoff decision. When a cast falls
+        // back to the phone, this says WHICH reason did it — no device, a forced
+        // local/external player, or a stream that needs headers a renderer cannot
+        // send — without a second build to find out.
+        Logger.withTag("CastPlayback").d {
+            "handoff: target=${castTargetDevice?.let { "${it.protocol}/${it.name}" } ?: "none"} " +
+                "addon=${stream.addonName} forceExternal=$forceExternal forceInternal=$forceInternal " +
+                "url=${sourceUrl.substringBefore('?')} hasToken=${sourceUrl.contains("token=")} " +
+                "headers=${playerLaunch.sourceHeaders.keys}"
+        }
+        val castLog = Logger.withTag("CastPlayback")
         if (castTargetDevice != null && !forceExternal && !forceInternal) {
             // A renderer fetches the URL itself, so a stream that needs headers it
             // cannot send cannot play there at all. Say so and stay local rather
             // than handing the TV a URL that 403s.
-            if (!canHandToRenderer(sourceUrl, playerLaunch.sourceHeaders)) {
+            val handable = canHandToRenderer(sourceUrl, playerLaunch.sourceHeaders)
+            castLog.d { "handoff: canHand=$handable -> ${if (handable) "cast" else "refused"}" }
+            if (!handable) {
                 NuvioToastController.show(castFailedMessage)
                 startLocalPlayback()
                 return
             }
+            castLog.d { "handoff: launching cast coroutine" }
             streamRouteScope.launch {
+                castLog.d { "handoff: coroutine running" }
                 val result = playOnRenderer(castTargetDevice, sourceUrl, playerLaunch.title)
+                castLog.d { "handoff: result ok=${result.ok} reason=${result.reason}" }
                 if (result.ok) {
                     StreamsRepository.cancelLoading()
                     NuvioToastController.show(castStartedMessage)

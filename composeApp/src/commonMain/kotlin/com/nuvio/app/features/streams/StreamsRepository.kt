@@ -3,8 +3,11 @@ package com.nuvio.app.features.streams
 import co.touchlab.kermit.Logger
 import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.features.addons.AddonRepository
+import com.nuvio.app.features.boomio.BoomioConfig
 import com.nuvio.app.features.boomio.BoomioStreamResolver
 import com.nuvio.app.features.cast.CastSession
+import com.nuvio.app.features.cast.CastTarget
+import com.nuvio.app.features.addons.appendQuery
 import com.nuvio.app.features.addons.buildAddonResourceUrl
 import com.nuvio.app.features.addons.enabledAddons
 import com.nuvio.app.features.addons.fetchAddonResponseText
@@ -438,12 +441,24 @@ object StreamsRepository {
 
             streamAddons.forEach { addon ->
                 launch {
+                    // ── A renderer is not the phone ──────────────────────────────
+                    // Our own addon is served by bsf, which binds every stream it
+                    // registers to the CALLER's address. A list fetched as "the
+                    // phone" and then handed to a television is a stream the
+                    // television is not authorised for: it fails at play, on the
+                    // couch, after the list looked fine. Ask as the renderer
+                    // whenever one is picked — the same query /find already takes.
+                    // Third-party addons get nothing: their host is not ours, and
+                    // a renderer's address is not theirs to learn.
+                    val castQuery = CastSession.current()
+                        ?.takeIf { isBoomioHostedAddon(addon.manifest.transportUrl) }
+                        ?.let { CastTarget.of(it).queryString() }
                     val url = buildAddonResourceUrl(
                         manifestUrl = addon.manifest.transportUrl,
                         resource = "stream",
                         type = type,
                         id = videoId,
-                    )
+                    ).appendQuery(castQuery)
                     log.d { "Fetching streams from: $url" }
 
                     val displayName = addon.addonName
@@ -719,4 +734,21 @@ object StreamsRepository {
     fun setOverlayVisible(visible: Boolean, message: String? = null) {
         _uiState.update { it.copy(showDirectAutoPlayOverlay = visible, overlayMessage = message) }
     }
+}
+
+/**
+ * True when [manifestUrl] is served by our own backend — the same host as
+ * [BoomioConfig.boomioBaseUrl]. Only our addon understands a cast target; any
+ * other addon would ignore it, and a renderer's address is not a third party's
+ * to learn.
+ */
+private fun isBoomioHostedAddon(manifestUrl: String): Boolean {
+    fun host(value: String): String = value
+        .substringAfter("://", "")
+        .substringBefore('/')
+        .substringBefore(':')
+        .lowercase()
+
+    val ownHost = host(BoomioConfig.boomioBaseUrl.trim())
+    return ownHost.isNotEmpty() && host(manifestUrl) == ownHost
 }

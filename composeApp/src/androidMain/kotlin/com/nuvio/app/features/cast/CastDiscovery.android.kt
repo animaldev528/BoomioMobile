@@ -1,5 +1,6 @@
 package com.nuvio.app.features.cast
 
+import co.touchlab.kermit.Logger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
@@ -151,6 +152,7 @@ object CastDiscovery {
 
     private fun resolveDlna(ip: String, location: String): CastDevice? {
         val finalLocation = absoluteLocation(ip, location) ?: return null
+        Logger.withTag("CastDiscovery").d { "dlna reply from $ip location=$finalLocation" }
         val xml = httpGet(finalLocation) ?: return null
         val facts = parseLeafFields(xml)
         val name = facts["friendlyname"] ?: facts["modelname"] ?: return null
