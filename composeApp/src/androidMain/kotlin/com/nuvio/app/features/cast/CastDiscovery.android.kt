@@ -159,7 +159,10 @@ object CastDiscovery {
             ip = ip,
             name = name,
             port = portOf(finalLocation),
-            facts = facts,
+            // The description URL is not a leaf element, so it rides along here:
+            // the AVTransport control URL is relative to it, and re-reading the
+            // description at cast time is useless without knowing where it lives.
+            facts = facts + ("location" to finalLocation),
         )
     }
 

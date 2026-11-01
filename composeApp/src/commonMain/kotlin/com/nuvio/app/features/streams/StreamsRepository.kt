@@ -4,6 +4,7 @@ import co.touchlab.kermit.Logger
 import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.features.addons.AddonRepository
 import com.nuvio.app.features.boomio.BoomioStreamResolver
+import com.nuvio.app.features.cast.CastSession
 import com.nuvio.app.features.addons.buildAddonResourceUrl
 import com.nuvio.app.features.addons.enabledAddons
 import com.nuvio.app.features.addons.fetchAddonResponseText
@@ -88,7 +89,13 @@ object StreamsRepository {
             episode = episode,
             manualSelection = manualSelection,
         )
-        val requestKey = "$requestToken::pluginsGrouped=${pluginUiState.groupStreamsByRepository}"
+        // The cast target belongs in the reuse key: the same film asked for on
+        // this phone and for a television produces DIFFERENT lists (the renderer
+        // gates them, and the URLs are bound to its address). Reusing the phone's
+        // answer after a device was picked is how a cast plays on the phone.
+        val castKey = CastSession.current()?.id ?: "phone"
+        val requestKey =
+            "$requestToken::pluginsGrouped=${pluginUiState.groupStreamsByRepository}::cast=$castKey"
         val currentState = _uiState.value
         if (
             !forceRefresh &&

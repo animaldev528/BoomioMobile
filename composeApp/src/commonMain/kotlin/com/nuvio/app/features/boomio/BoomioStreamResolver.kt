@@ -2,6 +2,8 @@ package com.nuvio.app.features.boomio
 
 import co.touchlab.kermit.Logger
 import com.nuvio.app.features.addons.httpGetText
+import com.nuvio.app.features.cast.CastSession
+import com.nuvio.app.features.cast.CastTarget
 import com.nuvio.app.features.streams.StreamItem
 import com.nuvio.app.features.streams.StreamParser
 import kotlinx.coroutines.CancellationException
@@ -101,6 +103,13 @@ object BoomioStreamResolver {
         return buildString {
             append(base)
             segments.forEach { segment -> append('/').append(segment) }
+            // A cast target turns this into a request for THAT screen: bsf gates
+            // the list on the renderer's capability row (or its floor) and binds
+            // the stream URL to the renderer's address, because the television —
+            // not this phone — is what will fetch the bytes.
+            CastSession.current()?.let { device ->
+                append('?').append(CastTarget.of(device).queryString())
+            }
         }
     }
 }
