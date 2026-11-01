@@ -2,6 +2,8 @@ package com.nuvio.app.features.boomio
 
 import co.touchlab.kermit.Logger
 import com.nuvio.app.features.addons.httpGetText
+import com.nuvio.app.features.cast.CastSession
+import com.nuvio.app.features.cast.CastTarget
 import com.nuvio.app.features.streams.StreamItem
 import com.nuvio.app.features.streams.StreamParser
 import kotlinx.coroutines.CancellationException
@@ -68,12 +70,22 @@ object BoomioStreamResolver {
     ): List<StreamItem> {
         val url = buildFindUrl(videoId, season, episode) ?: return emptyList()
         val payload = httpGetText(url)
-        return StreamParser.parse(
+        val streams = StreamParser.parse(
             payload = payload,
             addonName = ADDON_NAME,
             addonId = ADDON_ID,
             addonLogo = null,
         )
+        // The cast credential rides in the URL, and only a list fetched WHILE a
+        // renderer was selected gets one. Name which list this was: a cast that
+        // falls back to the phone then says whether it was handed the wrong list
+        // or the wrong stream, instead of leaving only the tap to guess.
+        log.d {
+            val cast = CastSession.current()
+            "find cast=${cast?.let { "${it.protocol}/${it.name}" } ?: "none"} " +
+                "streams=${streams.size} tokenUrls=${streams.count { it.url?.contains("token=") == true }}"
+        }
+        return streams
     }
 
     /**
@@ -101,6 +113,13 @@ object BoomioStreamResolver {
         return buildString {
             append(base)
             segments.forEach { segment -> append('/').append(segment) }
+            // A cast target turns this into a request for THAT screen: bsf gates
+            // the list on the renderer's capability row (or its floor) and binds
+            // the stream URL to the renderer's address, because the television —
+            // not this phone — is what will fetch the bytes.
+            CastSession.current()?.let { device ->
+                append('?').append(CastTarget.of(device).queryString())
+            }
         }
     }
 }

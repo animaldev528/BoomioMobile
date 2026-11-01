@@ -24,6 +24,17 @@ internal fun buildAddonResourceUrl(
 }
 
 
+/**
+ * Appends [extra] query parameters to this URL, joining with `&` when it already
+ * carries a query. Returns the URL untouched when [extra] is null or blank, so a
+ * caller with nothing to add does not have to branch.
+ */
+internal fun String.appendQuery(extra: String?): String {
+    if (extra.isNullOrBlank()) return this
+    val separator = if (contains('?')) '&' else '?'
+    return this + separator + extra
+}
+
 internal fun String.encodeAddonPathSegment(): String =
     buildString {
         encodeToByteArray().forEach { byte ->
