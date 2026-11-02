@@ -17,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import co.touchlab.kermit.Logger
+import com.nuvio.app.features.cast.CastRemote
 import com.nuvio.app.features.cast.CastSession
 import com.nuvio.app.features.cast.canHandToRenderer
 import com.nuvio.app.features.cast.playOnRenderer
@@ -694,6 +695,20 @@ internal fun StreamDestination(
                 if (result.ok) {
                     StreamsRepository.cancelLoading()
                     NuvioToastController.show(castStartedMessage)
+                    // Jump to the controls. The renderer is playing now, and this
+                    // phone is the only thing that can pause it, seek it, switch
+                    // its tracks, or ask the server what song is playing.
+                    val remote = CastRemote.watch(
+                        device = castTargetDevice,
+                        title = playerLaunch.title,
+                        streamUrl = sourceUrl,
+                        imdbId = effectiveVideoId.takeIf { it.startsWith("tt") },
+                        season = launch.seasonNumber,
+                        episode = launch.episodeNumber,
+                    )
+                    // Only when there is something to control: a renderer with no
+                    // remote must not land the viewer on an empty screen.
+                    if (remote) navController.navigate(CastRemoteRoute(playerLaunch.title))
                 } else {
                     // The television did not take it. Fall back to the phone with
                     // a toast instead of a black screen on both devices.

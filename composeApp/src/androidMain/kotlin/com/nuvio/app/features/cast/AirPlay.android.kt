@@ -51,6 +51,14 @@ internal object AirPlay {
     @Volatile
     private var playing: AirkastSession? = null
 
+    /** The live session, for the remote screen to poll and command. */
+    fun session(): AirkastSession? = playing
+
+    /** Drops the session reference after playback was ended on purpose. */
+    fun release() {
+        synchronized(lock) { playing = null }
+    }
+
     /** Pairs with [device] if it has not been paired with yet, and proves it. */
     suspend fun prepare(
         device: CastDevice,

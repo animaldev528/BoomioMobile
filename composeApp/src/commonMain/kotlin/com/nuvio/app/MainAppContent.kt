@@ -95,6 +95,7 @@ import com.nuvio.app.features.boomio.BsmAdminRepository
 import com.nuvio.app.features.boomio.EnrollTvScreen
 import com.nuvio.app.features.boomio.VpnScreen
 import com.nuvio.app.features.boomio.CompanionScreen
+import com.nuvio.app.features.cast.CastRemoteScreen
 import com.nuvio.app.features.boomio.IptvChannelsScreen
 import com.nuvio.app.features.boomio.WatchPartyScreen
 import com.nuvio.app.features.cloud.CloudLibraryItem
@@ -1550,6 +1551,9 @@ internal fun MainAppContent(
                         launchExternalPlayer = launchExternalPlayer,
                         openExternalStreamUrl = ::openExternalStreamUrl,
                     )
+                }
+                entry<CastRemoteRoute> { _ ->
+                    CastRemoteScreen(onBack = { navController.popBackStack() })
                 }
                 entry<CatalogRoute> { route ->
                     CatalogDestination(

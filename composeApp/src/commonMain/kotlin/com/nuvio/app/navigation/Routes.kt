@@ -212,3 +212,16 @@ data class PlayerRoute(
     override val hidesNavigationBar: Boolean
         get() = true
 }
+
+/**
+ * The phone's controls for a cast that is already playing — reached right after
+ * a cast is handed over. No launch id: the session being controlled is the live
+ * one, and the screen reads it from `CastRemote`.
+ */
+@Serializable
+data class CastRemoteRoute(
+    override val title: String = "",
+) : AppRoute {
+    override val hidesNavigationBar: Boolean
+        get() = true
+}

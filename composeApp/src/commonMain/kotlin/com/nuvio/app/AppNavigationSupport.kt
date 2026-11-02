@@ -54,6 +54,7 @@ internal val navigationSavedStateConfiguration = SavedStateConfiguration {
             subclass(StreamRoute::class, StreamRoute.serializer())
             subclass(CatalogRoute::class, CatalogRoute.serializer())
             subclass(PlayerRoute::class, PlayerRoute.serializer())
+            subclass(CastRemoteRoute::class, CastRemoteRoute.serializer())
         }
     }
 }
