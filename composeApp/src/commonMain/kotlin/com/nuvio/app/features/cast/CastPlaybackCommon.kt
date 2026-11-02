@@ -40,3 +40,24 @@ internal expect suspend fun playOnRenderer(
  */
 internal fun canHandToRenderer(url: String, requestHeaders: Map<String, String>): Boolean =
     requestHeaders.isEmpty() || url.contains("token=", ignoreCase = true)
+
+/** Which secret an AirPlay receiver is asking the user to read off its screen. */
+internal enum class AirPlaySecret { PIN, PASSWORD }
+
+/**
+ * Makes [device] ready to take a cast before the picker hands it back.
+ *
+ * An Apple TV refuses AirPlay 2's transient pairing outright (HTTP 470) and does
+ * not say so in its announcement, so the first cast to one has to pair with the
+ * PIN it shows. Pairing is per receiver and survives: it is kept in the app's
+ * credential store, and every later cast proves it without asking.
+ *
+ * [askSecret] runs while the connection waits, so the picker can show a code
+ * field and suspend until the viewer types what the TV shows; returning null
+ * cancels. The session opened here is closed again — this proves the pairing,
+ * it does not start playback.
+ */
+internal expect suspend fun prepareAirPlay(
+    device: CastDevice,
+    askSecret: suspend (AirPlaySecret) -> String?,
+): CastPlayResult

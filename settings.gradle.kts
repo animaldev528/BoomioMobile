@@ -30,3 +30,6 @@ dependencyResolutionManagement {
 
 include(":composeApp")
 include(":androidApp")
+
+// airkast-core 0.6.0, vendored with the tvOS timing fix — see vendor/airkast-core/README.md.
+include(":vendor:airkast-core")

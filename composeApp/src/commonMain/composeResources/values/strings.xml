@@ -2717,6 +2717,10 @@
     <string name="cast_picker_empty">No TV found. Make sure the TV is on and on the same Wi-Fi.</string>
     <string name="cast_picker_rescan">Scan again</string>
     <string name="cast_device_floor">not identified — 1080p H.264 limit</string>
+    <string name="cast_pairing_waiting">Preparing %1$s…</string>
+    <string name="cast_pairing_code">Code shown on %1$s</string>
+    <string name="cast_pairing_pair">Pair</string>
+    <string name="cast_pairing_cancel">Cancel</string>
     <string name="cast_playing_on">Playing on %1$s</string>
     <string name="cast_failed_on">Couldn\'t reach %1$s — playing here</string>
 </resources>
