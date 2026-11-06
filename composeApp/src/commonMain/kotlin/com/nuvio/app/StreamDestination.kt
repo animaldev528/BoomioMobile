@@ -33,6 +33,7 @@ import com.nuvio.app.features.p2p.P2pSettingsRepository
 import com.nuvio.app.features.player.PlayerLaunch
 import com.nuvio.app.features.player.PlayerLaunchStore
 import com.nuvio.app.features.player.PlayerSettingsRepository
+import com.nuvio.app.features.player.externalPlaybackSession
 import com.nuvio.app.features.player.resolveContentLanguage
 import com.nuvio.app.features.player.sanitizePlaybackHeaders
 import com.nuvio.app.features.player.sanitizePlaybackResponseHeaders
@@ -705,6 +706,13 @@ internal fun StreamDestination(
                         imdbId = effectiveVideoId.takeIf { it.startsWith("tt") },
                         season = launch.seasonNumber,
                         episode = launch.episodeNumber,
+                        // ⛔ The renderer only ever received the URL, so casting
+                        // a half-watched title restarted it while the phone's
+                        // own player resumed correctly. Hand over the same
+                        // resume point the local player uses, plus the progress
+                        // row that the receiver's position is written back to.
+                        startPositionMs = playerLaunch.initialPositionMs,
+                        playbackSession = playerLaunch.externalPlaybackSession(),
                     )
                     // Only when there is something to control: a renderer with no
                     // remote must not land the viewer on an empty screen.

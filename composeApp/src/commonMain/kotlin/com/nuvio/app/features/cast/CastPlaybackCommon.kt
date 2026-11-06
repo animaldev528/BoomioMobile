@@ -18,7 +18,7 @@ data class CastPlayResult(val ok: Boolean, val reason: String? = null) {
 /**
  * Hands [url] to [device] and starts it.
  *
- * Android implements DLNA, Google Cast (CASTV2) and AirPlay 1; iOS answers
+ * Android implements DLNA, Google Cast (CASTV2), Roku ECP and AirPlay 1; iOS answers
  * "unsupported" because AirPlay is reached through the system picker instead, and
  * the platform seam keeps the common caller free of that distinction.
  */

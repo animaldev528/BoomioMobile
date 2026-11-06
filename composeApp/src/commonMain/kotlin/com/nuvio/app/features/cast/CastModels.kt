@@ -17,8 +17,9 @@ enum class CastProtocol {
     CAST,
 
     /**
-     * Roku ECP. Discovery only for now: ECP has no generic "play this URL"
-     * command, so a stock Roku needs a companion channel (phase 2).
+     * Roku ECP. Discovery is SSDP `roku:ecp` + `GET :8060/query/device-info`;
+     * playback is a deep link into a URL-capable channel (`Media Assistant`),
+     * because Roku has no generic "play this URL" command of its own.
      */
     ROKU,
 

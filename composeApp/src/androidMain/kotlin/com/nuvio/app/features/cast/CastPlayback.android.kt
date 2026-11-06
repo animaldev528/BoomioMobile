@@ -30,7 +30,9 @@ internal actual suspend fun playOnRenderer(
     val result = when (device.protocol) {
         CastProtocol.DLNA -> dlnaPlay(device, url, title)
         CastProtocol.CAST -> CastV2.play(device, rendererUrl, title)
-        CastProtocol.ROKU -> CastPlayResult.failed("A Roku needs a channel; playback is not implemented yet")
+        // A Roku has no generic media renderer: playback is a deep link into a
+        // URL-capable channel. See RokuEcp for why that channel is Media Assistant.
+        CastProtocol.ROKU -> RokuEcp.play(device, rendererUrl, title)
         CastProtocol.AIRPLAY -> AirPlay.play(device, rendererUrl, title)
     }
     if (!result.ok) log.w { "cast to ${device.protocol}/${device.name} (${device.ip}) failed: ${result.reason}" }
@@ -57,7 +59,14 @@ internal actual suspend fun playOnRenderer(
  * which also covers a server that has already turned it into a playlist.
  */
 internal fun castPlaybackUrl(device: CastDevice, url: String): String {
-    if (device.protocol != CastProtocol.CAST && device.protocol != CastProtocol.AIRPLAY) return url
+    // A Roku's own player decodes HLS and MP4, not Matroska, exactly like the
+    // Cast receiver and the Apple TV — so the same remux applies.
+    if (device.protocol != CastProtocol.CAST &&
+        device.protocol != CastProtocol.AIRPLAY &&
+        device.protocol != CastProtocol.ROKU
+    ) {
+        return url
+    }
     val path = url.substringBefore('?')
     val file = path.substringAfterLast('/')
     val ext = file.substringAfterLast('.', "").lowercase()

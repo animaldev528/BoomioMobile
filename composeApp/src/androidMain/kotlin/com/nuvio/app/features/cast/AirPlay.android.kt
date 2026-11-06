@@ -79,7 +79,28 @@ internal object AirPlay {
                         client.pair(receiver, Secret.Pin) { askFor(askSecret, AirPlaySecret.PIN) }
                         client.connect(receiver).use { }
                     }
-                    else -> client.connect(receiver) { secret -> askFor(askSecret, secret.asPrompt()) }.use { }
+                    else -> {
+                        try {
+                            client.connect(receiver) { secret -> askFor(askSecret, secret.asPrompt()) }.use { }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (cancelled: SecretNotGiven) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            // A receiver can demand pairing by putting a code on
+                            // its screen and *not* answering the bare connect —
+                            // measured 2026-11-06 on a Roku Streaming Stick 4K,
+                            // which shows the code but stays silent, so the
+                            // secret callback never fires and the viewer has
+                            // nowhere to type it. When the failure looks like
+                            // pairing rather than a network fault, ask for the
+                            // code and pair explicitly, the way tvOS is handled.
+                            if (!error.asksForPairing()) throw error
+                            log.w { "airplay: ${device.name} wants pairing (${error.message}); asking for its code" }
+                            client.pair(receiver, Secret.Pin) { askFor(askSecret, AirPlaySecret.PIN) }
+                            client.connect(receiver).use { }
+                        }
+                    }
                 }
                 log.d { "airplay: ${device.name} ready" }
                 CastPlayResult.Ok
@@ -166,6 +187,22 @@ internal object AirPlay {
 
     /** The viewer closed the code prompt instead of typing one. */
     private class SecretNotGiven : Exception("no secret entered")
+
+    /**
+     * True when a failed connect is the receiver asking to be paired rather than
+     * the network being wrong. A silent timeout counts: a receiver that is
+     * showing a code waits for a pair-setup it never asked for, which looks
+     * exactly like no answer at all.
+     */
+    private fun Exception.asksForPairing(): Boolean = when (this) {
+        is AirkastException.PairingFailed,
+        is AirkastException.SecretRejected,
+        is AirkastException.Timeout,
+        is AirkastException.Disconnected,
+        -> true
+        is AirkastException.Rejected -> status == 401 || status == 403 || status == 470
+        else -> false
+    }
 
     private val airkastLogger =
         object : Airkast.Logger {

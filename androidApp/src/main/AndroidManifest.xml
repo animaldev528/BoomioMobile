@@ -176,6 +176,14 @@
             android:foregroundServiceType="mediaPlayback"
             android:stopWithTask="false" />
 
+        <!-- Holds the process at foreground priority while a cast runs: an
+             AirPlay sender is a socket this process has to keep servicing. -->
+        <service
+            android:name="com.nuvio.app.features.cast.CastPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="false" />
+
         <receiver
             android:name="com.nuvio.app.features.player.PlayerNowPlayingActionReceiver"
             android:exported="false" />

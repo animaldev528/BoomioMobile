@@ -8,6 +8,7 @@ import com.nuvio.app.features.boomio.CompanionMusicFailure
 import com.nuvio.app.features.boomio.companionRestBaseUrl
 import com.nuvio.app.features.boomio.createBoomioHttpClient
 import com.nuvio.app.features.boomio.parseMusicIdentifyAnswer
+import com.nuvio.app.features.watchprogress.WatchProgressPlaybackSession
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -85,6 +86,14 @@ internal expect object CastRemote {
      *   the cast is fine, there is just nothing to control from here, and the
      *   caller must not open a screen that cannot do anything.
      */
+    /**
+     * @param startPositionMs where the viewer was when they last watched this
+     *   title — the receiver is seeked there once its item is loaded, so a cast
+     *   resumes instead of restarting. Zero keeps the receiver at its own start.
+     * @param playbackSession the latest watch-progress row: the receiver's
+     *   position is written to it as playback advances, which is what makes the
+     *   title come back at the right place after the app or the cast is stopped.
+     */
     fun watch(
         device: CastDevice,
         title: String,
@@ -92,6 +101,8 @@ internal expect object CastRemote {
         imdbId: String?,
         season: Int?,
         episode: Int?,
+        startPositionMs: Long = 0L,
+        playbackSession: WatchProgressPlaybackSession? = null,
     ): Boolean
 
     /** Stops following. Does not stop the renderer. */
