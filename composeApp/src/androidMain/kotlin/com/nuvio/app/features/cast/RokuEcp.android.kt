@@ -58,12 +58,19 @@ internal object RokuEcp {
     suspend fun play(device: CastDevice, url: String, title: String): CastPlayResult =
         withContext(Dispatchers.IO) {
             val base = baseUrl(device)
-            val apps = installedApps(base)
-                ?: return@withContext CastPlayResult.failed(
-                    "Could not read the Roku's channel list at $base/query/apps. " +
-                        "Check Settings → System → Advanced system settings → " +
-                        "Control by mobile apps → Network access is Enabled.",
+            val apps = when (val result = queryApps(base)) {
+                is AppsResult.Found -> result.apps
+                AppsResult.Limited -> return@withContext CastPlayResult.failed(
+                    "The Roku is in Limited mode. On the Roku: Settings → System → " +
+                        "Advanced system settings → Control by mobile apps → " +
+                        "Network access → Default, then cast again.",
                 )
+                AppsResult.Unreachable -> return@withContext CastPlayResult.failed(
+                    "Could not reach ${device.name} at $base. Check it is on the same " +
+                        "network as this phone and that Settings → System → Advanced system " +
+                        "settings → Control by mobile apps → Network access is not Disabled.",
+                )
+            }
             val channel = listOf(MEDIA_ASSISTANT, SIDELOADED).firstOrNull { apps.containsKey(it) }
                 ?: return@withContext CastPlayResult.failed(
                     "The Roku has no channel that can play a link. Install \"Media Assistant\" " +
@@ -143,14 +150,55 @@ internal object RokuEcp {
 
     private fun baseUrl(device: CastDevice): String = "http://${device.ip}:$PORT"
 
-    /** `GET /query/apps` → id → display name, or null when the list is unreadable. */
-    private fun installedApps(base: String): Map<String, String>? {
-        val xml = httpGet("$base/query/apps") ?: return null
-        val apps = LinkedHashMap<String, String>()
-        for (match in APP_ELEMENT.findAll(xml)) {
-            apps[match.groupValues[1]] = decodeEntities(match.groupValues[2]).trim()
+    /** What `/query/apps` said — three answers that need three different messages. */
+    private sealed interface AppsResult {
+        data class Found(val apps: Map<String, String>) : AppsResult
+
+        /**
+         * ECP answered and refused: "ECP command not allowed in Limited mode."
+         * With Network access on Limited, no launch can ever succeed — measured
+         * on a Streaming Stick 4K (Roku OS 15.1.4) on 2026-11-06, where
+         * `/query/apps` gave 403 while `/query/device-info` answered normally.
+         */
+        data object Limited : AppsResult
+
+        data object Unreachable : AppsResult
+    }
+
+    /** `GET /query/apps` → id → display name. */
+    private fun queryApps(base: String): AppsResult {
+        val connection = try {
+            URI("$base/query/apps").toURL().openConnection() as HttpURLConnection
+        } catch (_: Exception) {
+            return AppsResult.Unreachable
         }
-        return apps
+        return try {
+            connection.connectTimeout = HTTP_TIMEOUT_MS
+            connection.readTimeout = HTTP_TIMEOUT_MS
+            connection.requestMethod = "GET"
+            val code = connection.responseCode
+            if (code == HttpURLConnection.HTTP_FORBIDDEN) {
+                val body = runCatching {
+                    connection.errorStream?.bufferedReader()?.use { it.readText() }
+                }.getOrNull().orEmpty()
+                return if (body.contains("Limited", ignoreCase = true)) {
+                    AppsResult.Limited
+                } else {
+                    AppsResult.Unreachable
+                }
+            }
+            if (code !in 200..299) return AppsResult.Unreachable
+            val xml = connection.inputStream.bufferedReader().use { it.readText() }
+            val apps = LinkedHashMap<String, String>()
+            for (match in APP_ELEMENT.findAll(xml)) {
+                apps[match.groupValues[1]] = decodeEntities(match.groupValues[2]).trim()
+            }
+            AppsResult.Found(apps)
+        } catch (_: Exception) {
+            AppsResult.Unreachable
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun activeApp(base: String): ActiveApp? {

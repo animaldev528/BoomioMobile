@@ -51,6 +51,13 @@ class NuvioApplication : Application(), SingletonImageLoader.Factory {
         // (`NsdManager`) and the multicast lock are system services that need one. Published here
         // so the picker can scan without a Context threaded through the platform seam.
         com.nuvio.app.features.cast.CastAndroidContext.initialize(this)
+        // Kermit ships with NO writer, so until now every `log.d`/`log.w` in this
+        // app was written nowhere: a cast that failed on a TV the developer does
+        // not hold could not be diagnosed from logcat at all (measured
+        // 2026-11-06, casting to a Roku on another network). Logcat is the only
+        // channel that reaches such a device. Debug level on purpose — the cast
+        // path logs the stream URL without its query, which is the token.
+        co.touchlab.kermit.Logger.setLogWriters(co.touchlab.kermit.LogcatWriter())
     }
 
     override fun newImageLoader(context: android.content.Context): ImageLoader {

@@ -1613,7 +1613,13 @@ internal fun MainAppContent(
                 }
                 entry<CompanionRoute> { route ->
                     SettingsDestination(route, navController) { onBack ->
-                        CompanionScreen(onBack = onBack)
+                        // The cast card on the companion screen opens the same
+                        // controls the post-cast handoff does: a cast that is
+                        // still playing is reachable again from Settings.
+                        CompanionScreen(
+                            onBack = onBack,
+                            onOpenCast = { navController.navigate(CastRemoteRoute()) },
+                        )
                     }
                 }
                 entry<AddTvRoute> { route ->

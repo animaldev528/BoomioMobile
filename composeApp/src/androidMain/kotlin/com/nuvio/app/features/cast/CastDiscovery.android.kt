@@ -73,6 +73,12 @@ object CastDiscovery {
             coroutineScope {
                 val ssdp = async { ssdpDevices(timeoutMillis) }
                 val mdns = async { CastMdns.discover(timeoutMillis) }
+                // ⚠️ One device can legitimately appear twice: a Roku answers
+                // `roku:ecp` AND advertises AirPlay (Roku OS 12.5+), and the two
+                // rows are two different ways to drive the same screen. The
+                // AirPlay row stays: it is the only path that does not need a
+                // Media Assistant channel on the Roku, so hiding it removed the
+                // fallback when ECP could not work (measured 2026-11-06).
                 (ssdp.await() + mdns.await())
                     .distinctByIdentified()
             }

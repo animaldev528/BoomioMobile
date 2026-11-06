@@ -2,6 +2,7 @@ package com.nuvio.app.features.cast
 
 import com.nuvio.app.features.boomio.CompanionMusicAnswer
 import com.nuvio.app.features.boomio.CompanionMusicFailure
+import com.nuvio.app.features.watchprogress.WatchProgressPlaybackSession
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,6 +25,8 @@ internal actual object CastRemote {
         imdbId: String?,
         season: Int?,
         episode: Int?,
+        startPositionMs: Long,
+        playbackSession: WatchProgressPlaybackSession?,
     ): Boolean = false
 
     actual fun stopWatching() = Unit

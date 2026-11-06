@@ -792,6 +792,12 @@
     <string name="companion_pl_sync_ms">%1$d ms</string>
     <string name="companion_pl_tv_speakers">Play on the TV too</string>
     <string name="companion_pl_tv_speakers_hint">Keep this TV’s speakers on while its audio streams here. Off means only the phone plays.</string>
+    <string name="companion_cast_title">Casting</string>
+    <string name="companion_cast_playing_on">Playing on %1$s</string>
+    <string name="companion_cast_loading_on">Opening on %1$s</string>
+    <string name="companion_cast_paused_on">Paused on %1$s</string>
+    <string name="companion_cast_controls">Open controls</string>
+    <string name="companion_cast_stop">Stop</string>
     <string name="companion_toast_timeout">Your TV went quiet. Check it’s still on.</string>
     <string name="companion_toast_not_paired">Choose a TV first.</string>
     <string name="companion_toast_rate_limited">Too many commands — slow down.</string>
