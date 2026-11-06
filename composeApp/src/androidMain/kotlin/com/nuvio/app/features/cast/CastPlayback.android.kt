@@ -49,7 +49,8 @@ internal actual suspend fun playOnRenderer(
  * failure a second later.
  *
  * bsc remuxes any registered stream into HLS on the same streamId
- * (`/proxy/<id>/hls/index.m3u8`, a `-c copy` remux), and the stream is already
+ * (`/proxy/<id>/hls/master.m3u8`, a `-c copy` remux with subtitle renditions on
+ * top), and the stream is already
  * bound to the renderer's address, so the playlist's relative `seg-N.ts` URIs
  * resolve beside it and are authorised by the same rule the file itself was.
  * AirPlay gets the same playlist: an Apple receiver is HLS-native and no better
@@ -76,7 +77,13 @@ internal fun castPlaybackUrl(device: CastDevice, url: String): String {
     // someone else's route is worse than the URL they gave us.
     if (!file.startsWith("video.")) return url
     val query = url.substringAfter('?', "")
-    val playlist = path.substringBeforeLast('/') + "/hls/index.m3u8"
+    // ⚠️ The MASTER, not `index.m3u8`. bsc's master declares one
+    // `EXT-X-MEDIA:TYPE=SUBTITLES` rendition per text subtitle track, so the
+    // receiver lists them in its OWN caption menu and draws them itself — no
+    // burn-in, no re-encode, and switching costs nothing. `index.m3u8` is still
+    // the media playlist underneath; the master only adds a level above it, so a
+    // stream with no text captions gets a variant-only master and plays as before.
+    val playlist = path.substringBeforeLast('/') + "/hls/master.m3u8"
     return if (query.isEmpty()) playlist else "$playlist?$query"
 }
 
