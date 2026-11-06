@@ -49,6 +49,7 @@ import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.LocalNavAnimatedContentScope
 import androidx.navigation3.ui.NavDisplay
 import com.nuvio.app.core.ui.LocalPosterClickAnchor
+import com.nuvio.app.features.search.resolveMetaPreviewDetailId
 import com.nuvio.app.navigation.PosterNavigationState
 import com.nuvio.app.navigation.posterNavigationEntry
 import com.nuvio.app.core.auth.AuthRepository
@@ -1332,11 +1333,29 @@ internal fun MainAppContent(
                                 onCatalogClick = onCatalogClick,
                                 onPosterClick = { meta ->
                                     navController.navigate(
-                                        DetailRoute(type = meta.type, id = meta.id, title = meta.name),
+                                        DetailRoute(
+                                            type = meta.type,
+                                            // Episode search hits ("tt123:6:9") open the parent show.
+                                            id = resolveMetaPreviewDetailId(meta.id),
+                                            title = meta.name,
+                                        ),
                                     )
                                 },
                                 onPosterLongClick = { meta ->
                                     openPosterActions(PosterActionTarget(preview = meta))
+                                },
+                                onPersonClick = { person, avatarTransitionKey ->
+                                    val tmdbId = person.tmdbId
+                                    if (tmdbId != null && tmdbId > 0) {
+                                        navController.navigate(
+                                            PersonDetailRoute(
+                                                personId = tmdbId,
+                                                personName = person.name,
+                                                personPhoto = person.photo,
+                                                castAvatarTransitionKey = avatarTransitionKey,
+                                            ),
+                                        )
+                                    }
                                 },
                                 onLibraryPosterClick = { item ->
                                     navController.navigate(

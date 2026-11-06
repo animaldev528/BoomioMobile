@@ -25,6 +25,7 @@ import com.nuvio.app.core.ui.nuvio
 import com.nuvio.app.features.cloud.CloudLibraryContentType
 import com.nuvio.app.features.cloud.CloudLibraryFile
 import com.nuvio.app.features.cloud.CloudLibraryItem
+import com.nuvio.app.features.details.MetaPerson
 import com.nuvio.app.features.home.HomeCatalogSection
 import com.nuvio.app.features.home.HomeScreen
 import com.nuvio.app.features.home.MetaPreview
@@ -87,6 +88,7 @@ internal data class AppTabActions(
     val onCatalogClick: ((HomeCatalogSection) -> Unit)? = null,
     val onPosterClick: ((MetaPreview) -> Unit)? = null,
     val onPosterLongClick: ((MetaPreview) -> Unit)? = null,
+    val onPersonClick: ((MetaPerson, String?) -> Unit)? = null,
     val onLibraryPosterClick: ((LibraryItem) -> Unit)? = null,
     val onLibraryPosterLongClick: ((LibraryItem, LibrarySection) -> Unit)? = null,
     val onLibrarySectionViewAllClick: ((LibrarySection, LibrarySortOption) -> Unit)? = null,
@@ -158,6 +160,7 @@ internal fun AppTabHost(
                     listState = state.searchListState,
                     onPosterClick = actions.onPosterClick,
                     onPosterLongClick = actions.onPosterLongClick,
+                    onPersonClick = actions.onPersonClick,
                     searchFocusRequestCount = state.searchFocusRequestCount,
                     scrollToTopRequests = requests.searchScrollToTopRequests,
                 )

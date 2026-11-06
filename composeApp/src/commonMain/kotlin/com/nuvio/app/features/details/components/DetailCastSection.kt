@@ -49,6 +49,8 @@ fun DetailCastSection(
     modifier: Modifier = Modifier,
     showHeader: Boolean = true,
     horizontalScrollPadding: Dp = 0.dp,
+    /** Overrides the "Cast" header; search reuses the row as a People strip. */
+    headerTitle: String? = null,
     onCastClick: ((MetaPerson, String?) -> Unit)? = null,
     sharedTransitionScope: SharedTransitionScope? = null,
     animatedVisibilityScope: AnimatedVisibilityScope? = null,
@@ -56,7 +58,7 @@ fun DetailCastSection(
     if (cast.isEmpty()) return
 
     DetailSection(
-        title = stringResource(Res.string.settings_meta_cast),
+        title = headerTitle ?: stringResource(Res.string.settings_meta_cast),
         modifier = modifier,
         showHeader = showHeader,
     ) {
