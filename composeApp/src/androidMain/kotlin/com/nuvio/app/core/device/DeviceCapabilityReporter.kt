@@ -23,6 +23,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 private const val TAG = "DevCapReporter"
 
@@ -75,11 +80,28 @@ internal object DeviceCapabilityReporter {
     @Volatile
     private var started = false
 
+    /**
+     * The operator's HDR stance for this device, as bsm resolved it, or null before the first
+     * report has answered.
+     *
+     * ⚠️ The probe is this device's *opinion of itself*; the operator's row is the policy. When
+     * the two disagree the policy wins, which is the whole point of the Devices page: a phone
+     * whose panel can do Dolby Vision must still stop being handed DV releases once the operator
+     * unticks that box. Before this, the declaration was the probe alone, so unticking DV moved
+     * nothing on the wire — the same list kept going out however many times the row was saved.
+     */
+    @Volatile
+    private var operatorHdr: HdrPolicy? = null
+
     fun start(context: Context) {
         if (started) return
         started = true
         // Hold the application context: this outlives whatever Activity called start().
         val app = context.applicationContext
+        // Declare this device's decode ceilings to the media plane FIRST, and regardless of bsm:
+        // the caps ride on every bsf request, and bsf gates on what arrives with the call whether
+        // or not this device can also be reported to the fleet view.
+        scope.launch { applyDeviceCaps(probeReport(app)) }
         if (BoomioConfig.bsmBaseUrl.isBlank()) {
             Log.i(TAG, "bsm base url blank — device capability reporting disabled")
             return
@@ -100,6 +122,61 @@ internal object DeviceCapabilityReporter {
         }
     }
 
+    /**
+     * Publishes the probe's ceilings to [BoomioConfig], which every bsf request reads.
+     *
+     * ⚠️ **HDR is TRI-STATE, and the denial has to survive.** `hdr=0` is an explicit "this panel
+     * has no HDR" and is what stops a non-HDR screen being handed an HDR10 release; an absent
+     * `hdr` means unknown and gates nothing. So a device whose display does not report its HDR
+     * capabilities sends nothing rather than a guess — recording "unknown" as a denial would
+     * withhold HDR from panels that can show it.
+     *
+     * ⚠️ **When the operator has an opinion, the LIST goes out, not `1`.** `hdr=1` says "any HDR",
+     * which bsf cannot narrow — so a row that allowed HDR10/HDR10+/HLG and withheld Dolby Vision
+     * still received every DV release. The list names the types that may be delivered, the device's
+     * own probe intersected with the operator's stance; an empty intersection is a denial.
+     */
+    private fun applyDeviceCaps(report: DeviceCapabilityReport) {
+        val effective = report.effective
+        BoomioConfig.deviceMaxResolution = effective.decodeMaxResolution.trim()
+        BoomioConfig.deviceMaxResByCodec = effective.decodeMaxResByCodec.trim()
+        BoomioConfig.deviceHdr = declareHdr(report)
+        Log.i(
+            TAG,
+            "Declaring device caps to the media plane: max_resolution=${BoomioConfig.deviceMaxResolution} " +
+                "codecCapsMaxRes=${BoomioConfig.deviceMaxResByCodec} hdr=${BoomioConfig.deviceHdr}",
+        )
+    }
+
+    /** The `hdr` query value: a type list, `0` for a denial, or blank while genuinely unknown. */
+    private fun declareHdr(report: DeviceCapabilityReport): String {
+        val operator = operatorHdr
+        if (operator != null && operator.known) {
+            // A device that never reported its sink still obeys the operator: the row is the only
+            // statement anyone has made about it, and it was made deliberately.
+            val usable = if (report.display.hdrCapsKnown) {
+                val own = report.effective.hdrUsable.toSet()
+                own.intersect(operator.types.toSet())
+            } else {
+                operator.types.toSet()
+            }
+            return if (usable.isEmpty()) "0" else usable.sorted().joinToString(",")
+        }
+        if (!report.display.hdrCapsKnown) return ""
+        return report.effective.hdrUsable.sorted().joinToString(",").ifEmpty { "0" }
+    }
+
+    /** One capability probe, off the main thread; shared by the caps prime and the report. */
+    private suspend fun probeReport(context: Context): DeviceCapabilityReport =
+        withContext(Dispatchers.Default) {
+            DeviceCapabilityProbe.buildReport(
+                context = context,
+                installId = SyncClientIdentity.currentClientId(),
+                app = appInfo(context),
+                network = buildNetworkSection(context, DeviceNetworkMeter.lastMeasuredMbps(context)),
+            )
+        }
+
     /** One download measurement, then re-report only if it changed what the last report carried. */
     private suspend fun measureThenReReportIfChanged(context: Context) {
         val before = DeviceNetworkMeter.lastMeasuredMbps(context)
@@ -110,29 +187,51 @@ internal object DeviceCapabilityReporter {
     }
 
     private suspend fun reportOnce(context: Context) {
-        val report = withContext(Dispatchers.Default) {
-            DeviceCapabilityProbe.buildReport(
-                context = context,
-                installId = SyncClientIdentity.currentClientId(),
-                app = appInfo(context),
-                network = buildNetworkSection(context, DeviceNetworkMeter.lastMeasuredMbps(context)),
-            )
-        }
+        val report = probeReport(context)
+        // Re-publish on every probe: a display that changed (external output, a mode switch) moves
+        // the ceilings, and the media plane must be told the new ones without waiting for a relaunch.
+        applyDeviceCaps(report)
         val url = BoomioConfig.bsmBaseUrl.trimEnd('/') + REPORT_PATH
         try {
-            httpPostJsonWithHeaders(url, reportJson.encodeToString(report), emptyMap())
+            val body = httpPostJsonWithHeaders(url, reportJson.encodeToString(report), emptyMap())
+            // The report answers with this device's resolved limits. Adopt the operator's HDR
+            // stance, then re-publish so the very next stream request carries it — the report and
+            // the declaration are one round trip, not two.
+            val policy = parseHdrPolicy(body)
+            if (policy != null && policy != operatorHdr) {
+                operatorHdr = policy
+                applyDeviceCaps(report)
+            }
             Log.i(
                 TAG,
                 "Reported device capabilities to bsm " +
                     "${report.display.sinkWidth}x${report.display.sinkHeight} " +
                     "decode=${report.effective.decodeMaxResolution} " +
-                    "hdr=${report.effective.hdrUsable}",
+                    "hdr=${report.effective.hdrUsable} " +
+                    "operatorHdr=${policy?.let { if (it.known) it.types.joinToString(",") else "unknown" } ?: "none"}",
             )
         } catch (t: Throwable) {
             // Best-effort: bsm offline / DNS / socket. The next heartbeat or launch retries.
             Log.w(TAG, "Capability report failed — will retry next tick", t)
         }
     }
+
+    /**
+     * The operator's HDR stance out of the report's answer, or null when the answer does not carry
+     * one (an older bsm, a shape change). Unknown keys are ignored, and a body that is not JSON
+     * must not throw — this runs on the reporting path, which is best-effort throughout.
+     */
+    private fun parseHdrPolicy(body: String): HdrPolicy? = runCatching {
+        val limits = reportJson.parseToJsonElement(body).jsonObject["limits"]?.jsonObject
+            ?: return@runCatching null
+        HdrPolicy(
+            known = limits["hdr_known"]?.jsonPrimitive?.booleanOrNull ?: false,
+            types = limits["hdr"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList(),
+        )
+    }.getOrNull()
+
+    /** The operator's resolved HDR stance for this device; `types` is empty for a denial. */
+    private data class HdrPolicy(val known: Boolean, val types: List<String>)
 
     /**
      * Which build produced this report. Read from the platform rather than a `BuildConfig`: the

@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
@@ -37,6 +38,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -51,6 +54,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,16 +71,25 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.nuvio.app.features.cast.CastRemote
+import com.nuvio.app.features.cast.CastRemoteState
 import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioSurfaceCard
 import com.nuvio.app.core.ui.NuvioToastController
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeSource
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.companion_cancel
+import nuvio.composeapp.generated.resources.companion_cast_controls
+import nuvio.composeapp.generated.resources.companion_cast_loading_on
+import nuvio.composeapp.generated.resources.companion_cast_paused_on
+import nuvio.composeapp.generated.resources.companion_cast_playing_on
+import nuvio.composeapp.generated.resources.companion_cast_stop
+import nuvio.composeapp.generated.resources.companion_cast_title
 import nuvio.composeapp.generated.resources.companion_connected_hub
 import nuvio.composeapp.generated.resources.companion_connecting_hub
 import nuvio.composeapp.generated.resources.companion_connect
@@ -181,6 +194,13 @@ private const val DEVICE_REFRESH_INTERVAL_MILLIS = 5_000L
 fun CompanionScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * Opens the cast controls for the cast shown in the card below — the way
+     * back into a cast the viewer left. This screen is the phone's one remote
+     * surface, so both kinds of remote (the Boomio companion and a renderer cast)
+     * live here rather than in two places nobody can find.
+     */
+    onOpenCast: () -> Unit = {},
 ) {
     LaunchedEffect(Unit) {
         BoomioSessionRepository.initialize()
@@ -194,6 +214,12 @@ fun CompanionScreen(
     val devices by CompanionBridge.devices.collectAsStateWithLifecycle()
     val pairedDeviceId by CompanionBridge.pairedDeviceId.collectAsStateWithLifecycle()
     val deviceListError by CompanionBridge.deviceListError.collectAsStateWithLifecycle()
+
+    // A cast outlives this screen: the phone may be in any app while the Apple
+    // TV plays. When one is live it is shown first, above the companion's own
+    // controls, so returning here always offers the way back to it.
+    val castState by CastRemote.state.collectAsStateWithLifecycle()
+    val castScope = rememberCoroutineScope()
 
     // Keep the now-playing line current while linked.
     LaunchedEffect(session) {
@@ -228,6 +254,16 @@ fun CompanionScreen(
                 title = stringResource(Res.string.compose_settings_page_companion),
                 onBack = onBack,
             )
+        }
+        castState?.let { cast ->
+            item {
+                ActiveCastCard(
+                    state = cast,
+                    onOpen = onOpenCast,
+                    onToggle = { castScope.launch { CastRemote.togglePlayPause() } },
+                    onStop = { castScope.launch { CastRemote.stopPlayback() } },
+                )
+            }
         }
         if (session == null) {
             item { UnlinkedCard(linkState = linkState) }
@@ -1299,5 +1335,89 @@ private fun AudioSyncSlider() {
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/**
+ * The cast that is playing right now, at the top of the companion screen.
+ *
+ * A cast is not a screen the phone can stay on: the viewer leaves the app and
+ * the receiver keeps playing. This card is how that cast is found again — it is
+ * the only surface that offers the way back into the cast controls, so it is
+ * shown whenever a cast is live, whatever the companion's own link state is.
+ *
+ * The transport here is the same remote the cast screen drives; this is a
+ * shorter path to it, not a second implementation.
+ */
+@Composable
+private fun ActiveCastCard(
+    state: CastRemoteState,
+    onOpen: () -> Unit,
+    onToggle: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val status = when {
+        state.playing -> stringResource(Res.string.companion_cast_playing_on, state.deviceName)
+        state.loading -> stringResource(Res.string.companion_cast_loading_on, state.deviceName)
+        else -> stringResource(Res.string.companion_cast_paused_on, state.deviceName)
+    }
+    NuvioSurfaceCard {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Cast,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = state.title.ifBlank { stringResource(Res.string.companion_cast_title) },
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = onToggle) {
+                    Icon(
+                        imageVector = if (state.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = stringResource(Res.string.companion_play_pause),
+                    )
+                }
+            }
+            if (state.durationMs > 0L) {
+                LinearProgressIndicator(
+                    progress = { state.progress },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                FilledTonalButton(
+                    onClick = onOpen,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(stringResource(Res.string.companion_cast_controls))
+                }
+                OutlinedButton(onClick = onStop) {
+                    Text(stringResource(Res.string.companion_cast_stop))
+                }
+            }
+        }
     }
 }

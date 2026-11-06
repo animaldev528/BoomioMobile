@@ -16,6 +16,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import co.touchlab.kermit.Logger
+import com.nuvio.app.features.cast.CastRemote
+import com.nuvio.app.features.cast.CastSession
+import com.nuvio.app.features.cast.canHandToRenderer
+import com.nuvio.app.features.cast.playOnRenderer
 import com.nuvio.app.core.ui.NuvioLoadingIndicator
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.nuvio
@@ -29,6 +34,7 @@ import com.nuvio.app.features.player.PlayerLaunch
 import com.nuvio.app.features.player.PlayerLaunchStore
 import com.nuvio.app.features.player.PlayerSettingsRepository
 import com.nuvio.app.features.player.SubtitleRequestExtras
+import com.nuvio.app.features.player.externalPlaybackSession
 import com.nuvio.app.features.player.resolveContentLanguage
 import com.nuvio.app.features.player.sanitizePlaybackHeaders
 import com.nuvio.app.features.player.sanitizePlaybackResponseHeaders
@@ -89,6 +95,13 @@ internal fun StreamDestination(
     }
     val pauseDescription = launch.pauseDescription
     val streamRouteScope = rememberCoroutineScope()
+    val castDevice by CastSession.target.collectAsStateWithLifecycle()
+    val castStartedMessage = castDevice
+        ?.let { stringResource(Res.string.cast_playing_on, it.name) }
+        .orEmpty()
+    val castFailedMessage = castDevice
+        ?.let { stringResource(Res.string.cast_failed_on, it.name) }
+        .orEmpty()
     var autoPlayNavigationStarted by remember(route.launchId) { mutableStateOf(false) }
     var resolvingDebridStream by rememberSaveable(route.launchId) { mutableStateOf(false) }
     var resolvingYouTubeStream by rememberSaveable(route.launchId) { mutableStateOf(false) }
@@ -763,19 +776,85 @@ internal fun StreamDestination(
             stream = stream,
         )
 
-        if (!forceInternal && (forceExternal || playerSettings.externalPlayerEnabled)) {
+        fun startLocalPlayback() {
+            if (!forceInternal && (forceExternal || playerSettings.externalPlayerEnabled)) {
+                streamRouteScope.launch {
+                    openExternalPlayback(playerLaunch)
+                    StreamsRepository.cancelLoading()
+                }
+                return
+            }
+
+            val launchId = PlayerLaunchStore.put(playerLaunch)
+            StreamsRepository.cancelLoading()
+            navController.navigate(
+                PlayerRoute(launchId = launchId, title = playerLaunch.title)
+            )
+        }
+
+        val castTargetDevice = castDevice
+        // One line naming every input to the handoff decision. When a cast falls
+        // back to the phone, this says WHICH reason did it — no device, a forced
+        // local/external player, or a stream that needs headers a renderer cannot
+        // send — without a second build to find out.
+        Logger.withTag("CastPlayback").d {
+            "handoff: target=${castTargetDevice?.let { "${it.protocol}/${it.name}" } ?: "none"} " +
+                "addon=${stream.addonName} forceExternal=$forceExternal forceInternal=$forceInternal " +
+                "url=${sourceUrl.substringBefore('?')} hasToken=${sourceUrl.contains("token=")} " +
+                "headers=${playerLaunch.sourceHeaders.keys}"
+        }
+        val castLog = Logger.withTag("CastPlayback")
+        if (castTargetDevice != null && !forceExternal && !forceInternal) {
+            // A renderer fetches the URL itself, so a stream that needs headers it
+            // cannot send cannot play there at all. Say so and stay local rather
+            // than handing the TV a URL that 403s.
+            val handable = canHandToRenderer(sourceUrl, playerLaunch.sourceHeaders)
+            castLog.d { "handoff: canHand=$handable -> ${if (handable) "cast" else "refused"}" }
+            if (!handable) {
+                NuvioToastController.show(castFailedMessage)
+                startLocalPlayback()
+                return
+            }
+            castLog.d { "handoff: launching cast coroutine" }
             streamRouteScope.launch {
-                openExternalPlayback(playerLaunch)
-                StreamsRepository.cancelLoading()
+                castLog.d { "handoff: coroutine running" }
+                val result = playOnRenderer(castTargetDevice, sourceUrl, playerLaunch.title)
+                castLog.d { "handoff: result ok=${result.ok} reason=${result.reason}" }
+                if (result.ok) {
+                    StreamsRepository.cancelLoading()
+                    NuvioToastController.show(castStartedMessage)
+                    // Jump to the controls. The renderer is playing now, and this
+                    // phone is the only thing that can pause it, seek it, switch
+                    // its tracks, or ask the server what song is playing.
+                    val remote = CastRemote.watch(
+                        device = castTargetDevice,
+                        title = playerLaunch.title,
+                        streamUrl = sourceUrl,
+                        imdbId = effectiveVideoId.takeIf { it.startsWith("tt") },
+                        season = launch.seasonNumber,
+                        episode = launch.episodeNumber,
+                        // ⛔ The renderer only ever received the URL, so casting
+                        // a half-watched title restarted it while the phone's
+                        // own player resumed correctly. Hand over the same
+                        // resume point the local player uses, plus the progress
+                        // row that the receiver's position is written back to.
+                        startPositionMs = playerLaunch.initialPositionMs,
+                        playbackSession = playerLaunch.externalPlaybackSession(),
+                    )
+                    // Only when there is something to control: a renderer with no
+                    // remote must not land the viewer on an empty screen.
+                    if (remote) navController.navigate(CastRemoteRoute(playerLaunch.title))
+                } else {
+                    // The television did not take it. Fall back to the phone with
+                    // a toast instead of a black screen on both devices.
+                    NuvioToastController.show(castFailedMessage)
+                    startLocalPlayback()
+                }
             }
             return
         }
 
-        val launchId = PlayerLaunchStore.put(playerLaunch)
-        StreamsRepository.cancelLoading()
-        navController.navigate(
-            PlayerRoute(launchId = launchId, title = playerLaunch.title)
-        )
+        startLocalPlayback()
     }
 
     LaunchedEffect(reuseNavigated) {

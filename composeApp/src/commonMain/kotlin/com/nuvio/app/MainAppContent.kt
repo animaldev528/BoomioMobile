@@ -98,6 +98,7 @@ import com.nuvio.app.features.boomio.BsmAdminRepository
 import com.nuvio.app.features.boomio.EnrollTvScreen
 import com.nuvio.app.features.boomio.VpnScreen
 import com.nuvio.app.features.boomio.CompanionScreen
+import com.nuvio.app.features.cast.CastRemoteScreen
 import com.nuvio.app.features.boomio.IptvChannelsScreen
 import com.nuvio.app.features.boomio.WatchPartyScreen
 import com.nuvio.app.features.cloud.CloudLibraryItem
@@ -1646,6 +1647,9 @@ internal fun MainAppContent(
                         onOpenPartyMedia = ::openPartyMedia,
                     )
                 }
+                entry<CastRemoteRoute> { _ ->
+                    CastRemoteScreen(onBack = { navController.popBackStack() })
+                }
                 entry<CatalogRoute> { route ->
                     CatalogDestination(
                         route = route,
@@ -1704,7 +1708,13 @@ internal fun MainAppContent(
                 }
                 entry<CompanionRoute> { route ->
                     SettingsDestination(route, navController) { onBack ->
-                        CompanionScreen(onBack = onBack)
+                        // The cast card on the companion screen opens the same
+                        // controls the post-cast handoff does: a cast that is
+                        // still playing is reachable again from Settings.
+                        CompanionScreen(
+                            onBack = onBack,
+                            onOpenCast = { navController.navigate(CastRemoteRoute()) },
+                        )
                     }
                 }
                 entry<AddTvRoute> { route ->

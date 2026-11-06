@@ -17,12 +17,17 @@ enum class CastProtocol {
     CAST,
 
     /**
-     * Roku ECP. Discovery only for now: ECP has no generic "play this URL"
-     * command, so a stock Roku needs a companion channel (phase 2).
+     * Roku ECP. Discovery is SSDP `roku:ecp` + `GET :8060/query/device-info`;
+     * playback is a deep link into a URL-capable channel (`Media Assistant`),
+     * because Roku has no generic "play this URL" command of its own.
      */
     ROKU,
 
-    /** `_airplay._tcp`. Deferred — H.264/MP4 or HLS only. */
+    /**
+     * `_airplay._tcp`, AirPlay 1: `POST :7000/play` with the URL in
+     * `Content-Location`. The receiver fetches it itself, so like DLNA and Cast it
+     * plays H.264/MP4 or HLS only — and the stream must carry its token in the URL.
+     */
     AIRPLAY,
 }
 
@@ -41,6 +46,8 @@ data class CastDevice(
     val port: Int = 0,
     val ecosystem: String? = null,
     val model: String? = null,
+    /** The row's ceiling in words, for the picker only — never for a decision. */
+    val ceiling: String? = null,
     /** What the protocol actually told us, kept for the log and for diagnosis. */
     val raw: Map<String, String> = emptyMap(),
 ) {
@@ -54,6 +61,30 @@ data class CastDevice(
     /** True when we can name the row; false means the server's floor applies. */
     val hasCapabilityRow: Boolean
         get() = !ecosystem.isNullOrBlank() && !model.isNullOrBlank()
+}
+
+/**
+ * Collapses the same screen discovered twice onto the record that can name it.
+ *
+ * A Cast receiver answers BOTH SSDP/DIAL and mDNS, and the two do not say the
+ * same thing. A television with Cast built in answers DIAL with
+ * `modelName=Eureka Dongle` — Google's generic name for the built-in product,
+ * which names no row at all — while the same screen's `_googlecast._tcp` record
+ * carries `md=Chromecast`. Deduplicating on the id alone therefore threw away
+ * the only record that could place the device, and the picker showed
+ * "not identified" for a television it had correctly identified a second earlier.
+ *
+ * The rule is identification first, then order: a record that names a row beats
+ * one that does not, and when neither (or both) can, the first one seen wins.
+ */
+internal fun List<CastDevice>.distinctByIdentified(): List<CastDevice> =
+    groupBy { it.id }
+        .map { (_, found) -> found.reduce(::betterRecord) }
+        .sortedBy { it.name.lowercase() }
+
+private fun betterRecord(current: CastDevice, candidate: CastDevice): CastDevice = when {
+    candidate.hasCapabilityRow && !current.hasCapabilityRow -> candidate
+    else -> current
 }
 
 /**

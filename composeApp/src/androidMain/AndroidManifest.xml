@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- mDNS discovery of Google Cast and AirPlay receivers. Without the lock a
+         phone in power-save silently stops hearing multicast, which reads as "no
+         TV found" with a TV in the room. See CastDiscoveryMdns.android.kt. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application>
         <service
