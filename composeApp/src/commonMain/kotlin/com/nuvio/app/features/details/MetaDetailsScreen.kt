@@ -2320,8 +2320,16 @@ private fun ConfiguredMetaSections(
     fun RenderSection(key: MetaScreenSectionKey, showHeader: Boolean = true) {
         when (key) {
             MetaScreenSectionKey.ACTIONS -> {
+                val shuffleAction = onShuffleClick?.let { onClick ->
+                    DetailSecondaryAction(
+                        label = stringResource(if (shuffleEnabled) Res.string.shuffle_stop else Res.string.random_episode_title),
+                        icon = Icons.Default.Shuffle,
+                        isActive = shuffleEnabled,
+                        onClick = onClick,
+                    )
+                }
                 DetailActionButtons(
-                    playLabel = playButtonLabel,
+                    playLabel = if (isPrimaryPlayEnabled) playButtonLabel else stringResource(Res.string.playback_unavailable),
                     playEnabled = isPrimaryPlayEnabled,
                     pinnedAction = shuffleAction?.takeIf { shuffleEnabled },
                     secondaryActions = buildList {
