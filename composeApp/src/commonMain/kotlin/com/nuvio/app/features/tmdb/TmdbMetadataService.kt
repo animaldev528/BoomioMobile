@@ -11,6 +11,7 @@ import com.nuvio.app.features.details.MoreLikeThisSource
 import com.nuvio.app.features.details.PersonDetail
 import com.nuvio.app.features.home.MetaPreview
 import com.nuvio.app.features.home.PosterShape
+import com.nuvio.app.features.search.PersonSearchResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -37,6 +38,7 @@ object TmdbMetadataService {
     private val collectionCache = mutableMapOf<String, Pair<String?, List<MetaPreview>>>()
     private val trailerCache = mutableMapOf<String, List<MetaTrailer>>()
     private val personCache = mutableMapOf<String, PersonDetail>()
+    private val peopleSearchCache = mutableMapOf<String, List<PersonSearchResult>>()
     private val entityBrowseCache = mutableMapOf<String, TmdbEntityBrowseData>()
     private val entityHeaderCache = mutableMapOf<String, TmdbEntityHeader>()
     private val entityRailCache = mutableMapOf<String, List<MetaPreview>>()
@@ -71,12 +73,89 @@ object TmdbMetadataService {
             }
         }
 
+    /**
+     * Client-side person search for the Search "People" strip. The addon catalogs never
+     * surface TMDB's person results, so the client queries them directly and hands the
+     * tapped person to [fetchPersonDetail]. Never throws — a disabled or failed lookup
+     * simply renders no People row.
+     */
+    suspend fun searchPeople(
+        query: String,
+        limit: Int = 12,
+    ): List<PersonSearchResult> = withContext(Dispatchers.Default) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return@withContext emptyList()
+        // Unlike the catalog enrichment features, person search has no addon equivalent:
+        // it runs whenever a TMDB key exists, so the People strip does not depend on the
+        // global "enrich with TMDB" switch being on.
+        if (TmdbSettingsRepository.effectiveApiKey().isBlank()) return@withContext emptyList()
+        val settings = TmdbSettingsRepository.snapshot()
+        val language = normalizeTmdbLanguage(settings.language)
+        val cacheKey = "${trimmed.lowercase()}:$language:$limit"
+        peopleSearchCache[cacheKey]?.let { return@withContext it }
+
+        val response = fetch<TmdbPersonSearchResponse>(
+            endpoint = "search/person",
+            query = mapOf(
+                "query" to trimmed,
+                "language" to language,
+            ),
+        ) ?: return@withContext emptyList()
+
+        val results = response.results
+            .asSequence()
+            .filter { it.id > 0 && !it.name.isNullOrBlank() }
+            .take(limit)
+            .map { person ->
+                PersonSearchResult(
+                    tmdbId = person.id,
+                    name = person.name.orEmpty(),
+                    profilePhotoUrl = buildImageUrl(person.profilePath, "w342"),
+                    knownForLabel = buildPersonKnownForLabel(
+                        department = person.knownForDepartment,
+                        knownFor = person.knownFor,
+                    ),
+                )
+            }
+            .toList()
+        if (results.isNotEmpty()) {
+            if (peopleSearchCache.size >= 32) peopleSearchCache.clear()
+            peopleSearchCache[cacheKey] = results
+        }
+        results
+    }
+
+    private fun buildPersonKnownForLabel(
+        department: String?,
+        knownFor: List<TmdbPersonSearchKnownFor>,
+    ): String? {
+        val base = when {
+            department.isNullOrBlank() -> null
+            department.equals("Acting", ignoreCase = true) -> "Actor"
+            else -> department
+        }
+        val titles = knownFor.asSequence()
+            .mapNotNull { credit -> credit.title ?: credit.name }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(2)
+            .joinToString(" / ")
+        return when {
+            base != null && titles.isNotEmpty() -> "$base · $titles"
+            base != null -> base
+            titles.isNotEmpty() -> titles
+            else -> null
+        }
+    }
+
     suspend fun fetchPersonDetail(
         personId: Int,
         preferCrewCredits: Boolean? = null,
     ): PersonDetail? = withContext(Dispatchers.Default) {
+        // Same reasoning as searchPeople: a person screen opened from search or from a
+        // cast row needs a TMDB key, not the catalog-enrichment switch.
+        if (TmdbSettingsRepository.effectiveApiKey().isBlank()) return@withContext null
         val settings = TmdbSettingsRepository.snapshot()
-        if (!settings.enabled) return@withContext null
         val language = normalizeTmdbLanguage(settings.language)
         val cacheKey = "$personId:${preferCrewCredits?.toString() ?: "auto"}:$language"
         personCache[cacheKey]?.let { return@withContext it }
@@ -2089,6 +2168,27 @@ private data class TmdbPersonResponse(
     @SerialName("place_of_birth") val placeOfBirth: String? = null,
     @SerialName("profile_path") val profilePath: String? = null,
     @SerialName("known_for_department") val knownForDepartment: String? = null,
+)
+
+@Serializable
+private data class TmdbPersonSearchResponse(
+    val results: List<TmdbPersonSearchResult> = emptyList(),
+)
+
+@Serializable
+private data class TmdbPersonSearchResult(
+    val id: Int = 0,
+    val name: String? = null,
+    @SerialName("profile_path") val profilePath: String? = null,
+    @SerialName("known_for_department") val knownForDepartment: String? = null,
+    @SerialName("known_for") val knownFor: List<TmdbPersonSearchKnownFor> = emptyList(),
+)
+
+@Serializable
+private data class TmdbPersonSearchKnownFor(
+    @SerialName("media_type") val mediaType: String? = null,
+    val title: String? = null,
+    val name: String? = null,
 )
 
 @Serializable

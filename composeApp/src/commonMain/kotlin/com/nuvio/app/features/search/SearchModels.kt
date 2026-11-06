@@ -13,8 +13,23 @@ enum class SearchEmptyStateReason {
 data class SearchUiState(
     val isLoading: Boolean = false,
     val sections: List<HomeCatalogSection> = emptyList(),
+    /** Client-side TMDB people matches, rendered as a strip above the catalog rows. */
+    val people: List<PersonSearchResult> = emptyList(),
+    val peopleLoading: Boolean = false,
     val emptyStateReason: SearchEmptyStateReason? = null,
     val errorMessage: String? = null,
+)
+
+/**
+ * One person from TMDB's `/search/person`, mirroring the TV client's People strip.
+ * Addon catalogs never surface actors, so the client asks TMDB directly.
+ */
+data class PersonSearchResult(
+    val tmdbId: Int,
+    val name: String,
+    val profilePhotoUrl: String? = null,
+    /** e.g. "Actor · Forrest Gump / Cast Away" */
+    val knownForLabel: String? = null,
 )
 
 enum class DiscoverEmptyStateReason {
