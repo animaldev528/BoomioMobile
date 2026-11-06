@@ -20,6 +20,7 @@ import com.nuvio.app.features.home.HomeCatalogSettingsRepository
 import com.nuvio.app.features.home.HomeCatalogSection
 import com.nuvio.app.features.home.MetaPreview
 import com.nuvio.app.features.home.filterReleasedItems
+import com.nuvio.app.features.tmdb.TmdbMetadataService
 import com.nuvio.app.core.poster.withCustomPosterUrls
 import com.nuvio.app.features.watchprogress.CurrentDateProvider
 import kotlinx.coroutines.CancellationException
@@ -31,6 +32,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.*
@@ -67,7 +69,9 @@ object SearchRepository {
 
     private var activeJob: Job? = null
     private var activeDiscoverJob: Job? = null
+    private var activePeopleJob: Job? = null
     private var lastRequestKey: String? = null
+    private var peopleRequestKey: String? = null
     private var discoverSources: List<DiscoverCatalogOption> = emptyList()
     private var lastDiscoverRequestKey: DiscoverRequestKey? = null
 
@@ -89,15 +93,21 @@ object SearchRepository {
         if (activeAddons.isEmpty()) {
             activeJob?.cancel()
             lastRequestKey = null
-            _uiState.value = SearchUiState(
-                isLoading = hasPendingAddonManifests,
-                emptyStateReason = when {
-                    hasPendingAddonManifests -> null
-                    addonManifestErrorMessage != null -> SearchEmptyStateReason.RequestFailed
-                    else -> SearchEmptyStateReason.NoActiveAddons
-                },
-                errorMessage = addonManifestErrorMessage,
-            )
+            // People come from TMDB, not from the addons, so a People hit still shows
+            // beside the "no addons" empty state.
+            _uiState.update { current ->
+                SearchUiState(
+                    isLoading = hasPendingAddonManifests,
+                    people = current.people,
+                    peopleLoading = current.peopleLoading,
+                    emptyStateReason = when {
+                        hasPendingAddonManifests -> null
+                        addonManifestErrorMessage != null -> SearchEmptyStateReason.RequestFailed
+                        else -> SearchEmptyStateReason.NoActiveAddons
+                    },
+                    errorMessage = addonManifestErrorMessage,
+                )
+            }
             return
         }
 
@@ -108,10 +118,14 @@ object SearchRepository {
         if (requests.isEmpty()) {
             activeJob?.cancel()
             lastRequestKey = null
-            _uiState.value = SearchUiState(
-                isLoading = hasPendingAddonManifests,
-                emptyStateReason = if (hasPendingAddonManifests) null else SearchEmptyStateReason.NoSearchCatalogs,
-            )
+            _uiState.update { current ->
+                SearchUiState(
+                    isLoading = hasPendingAddonManifests,
+                    people = current.people,
+                    peopleLoading = current.peopleLoading,
+                    emptyStateReason = if (hasPendingAddonManifests) null else SearchEmptyStateReason.NoSearchCatalogs,
+                )
+            }
             return
         }
 
@@ -171,10 +185,12 @@ object SearchRepository {
                     results[result.index] = result
                     val sections = results.orderedSections()
                     if (sections.isNotEmpty()) {
-                        _uiState.value = SearchUiState(
-                            isLoading = true,
-                            sections = sections,
-                        )
+                        _uiState.update {
+                            it.copy(
+                                isLoading = true,
+                                sections = sections,
+                            )
+                        }
                     }
                 }
             } finally {
@@ -187,29 +203,73 @@ object SearchRepository {
             val firstFailure = completedResults.firstNotNullOfOrNull { it.error?.message }
             val allFailed = completedResults.isNotEmpty() && completedResults.all { it.error != null }
 
-            _uiState.value = SearchUiState(
-                isLoading = sections.isEmpty() && hasPendingAddonManifests,
-                sections = sections,
-                emptyStateReason = when {
-                    sections.isNotEmpty() -> null
-                    hasPendingAddonManifests -> null
-                    allFailed -> SearchEmptyStateReason.RequestFailed
-                    else -> SearchEmptyStateReason.NoResults
-                },
-                errorMessage = if (allFailed) firstFailure else null,
-            )
+            _uiState.update {
+                it.copy(
+                    isLoading = sections.isEmpty() && hasPendingAddonManifests,
+                    sections = sections,
+                    emptyStateReason = when {
+                        sections.isNotEmpty() -> null
+                        hasPendingAddonManifests -> null
+                        allFailed -> SearchEmptyStateReason.RequestFailed
+                        else -> SearchEmptyStateReason.NoResults
+                    },
+                    errorMessage = if (allFailed) firstFailure else null,
+                )
+            }
         }
+    }
+
+    /**
+     * TMDB person search for the People strip. Runs beside the addon fan-out — the addon
+     * catalogs never surface actors — and a missing TMDB key or a failed lookup simply
+     * leaves the strip hidden.
+     */
+    fun searchPeople(
+        query: String,
+        forceRefresh: Boolean = false,
+    ) {
+        val normalizedQuery = query.trim()
+        if (normalizedQuery.isBlank()) {
+            clearPeople()
+            return
+        }
+        val requestKey = normalizedQuery.lowercase()
+        if (!forceRefresh && requestKey == peopleRequestKey) return
+        peopleRequestKey = requestKey
+        activePeopleJob?.cancel()
+        _uiState.update { it.copy(people = emptyList(), peopleLoading = true) }
+
+        activePeopleJob = scope.launch {
+            val people = runCatching { TmdbMetadataService.searchPeople(normalizedQuery) }
+                .getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    log.w { "People search failed for \"$normalizedQuery\": ${error.message}" }
+                    emptyList()
+                }
+            if (peopleRequestKey != requestKey) return@launch
+            _uiState.update { it.copy(people = people, peopleLoading = false) }
+        }
+    }
+
+    fun clearPeople() {
+        activePeopleJob?.cancel()
+        peopleRequestKey = null
+        _uiState.update { it.copy(people = emptyList(), peopleLoading = false) }
     }
 
     fun clear() {
         activeJob?.cancel()
+        activePeopleJob?.cancel()
         lastRequestKey = null
+        peopleRequestKey = null
         _uiState.value = SearchUiState()
     }
 
     fun reset() {
         activeJob?.cancel()
         activeDiscoverJob?.cancel()
+        activePeopleJob?.cancel()
+        peopleRequestKey = null
         lastRequestKey = null
         discoverSources = emptyList()
         lastDiscoverRequestKey = null

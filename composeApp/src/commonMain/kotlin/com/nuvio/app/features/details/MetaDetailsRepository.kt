@@ -11,6 +11,7 @@ import com.nuvio.app.features.home.HomeCatalogSettingsRepository
 import com.nuvio.app.features.home.filterReleasedItems
 import com.nuvio.app.features.mdblist.MdbListMetadataService
 import com.nuvio.app.features.mdblist.MdbListSettingsRepository
+import com.nuvio.app.features.search.resolveMetaPreviewDetailId
 import com.nuvio.app.features.tmdb.TmdbMetadataService
 import com.nuvio.app.features.tmdb.TmdbService
 import com.nuvio.app.features.tmdb.TmdbSettingsRepository
@@ -313,6 +314,11 @@ object MetaDetailsRepository {
         addons.enabledAddons().any { addon -> addon.manifest == null && addon.isRefreshing }
 
     private suspend fun resolveMetaLookupId(itemId: String, itemType: String): String {
+        // Per-episode ids from bsf's ai-search-episodes catalog ("tt123:6:9") resolve to
+        // the parent show; the detail screen, seasons and streams are all per show.
+        val strippedItemId = resolveMetaPreviewDetailId(itemId)
+        if (strippedItemId != itemId) return strippedItemId
+
         val tmdbId = itemId
             .takeIf { it.startsWith("tmdb:", ignoreCase = true) }
             ?.substringAfter(':')

@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -47,12 +48,16 @@ import com.nuvio.app.core.ui.NuvioInputField
 import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioNetworkOfflineCard
 import com.nuvio.app.core.ui.NuvioScreenHeader
+import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.nuvioConsumePointerEvents
 import com.nuvio.app.core.ui.withDuplicateSafeLazyKeys
 import com.nuvio.app.core.ui.ScreenActivityEffect
 import com.nuvio.app.features.addons.AddonRepository
+import com.nuvio.app.features.details.MetaPerson
+import com.nuvio.app.features.details.components.DetailCastSection
 import com.nuvio.app.features.addons.firstEnabledManifestError
 import com.nuvio.app.features.addons.hasPendingEnabledManifests
+import com.nuvio.app.features.boomio.rememberSpeechLauncher
 import com.nuvio.app.features.home.HomeCatalogSettingsRepository
 import com.nuvio.app.features.home.MetaPreview
 import com.nuvio.app.features.home.buildAddonCatalogRefreshSignature
@@ -81,9 +86,13 @@ import nuvio.composeapp.generated.resources.compose_search_empty_no_results_mess
 import nuvio.composeapp.generated.resources.compose_search_empty_no_results_title
 import nuvio.composeapp.generated.resources.compose_search_empty_no_search_catalogs_message
 import nuvio.composeapp.generated.resources.compose_search_empty_no_search_catalogs_title
+import nuvio.composeapp.generated.resources.compose_search_people
 import nuvio.composeapp.generated.resources.compose_search_placeholder
 import nuvio.composeapp.generated.resources.compose_search_recent_searches
 import nuvio.composeapp.generated.resources.compose_search_remove_recent_search
+import nuvio.composeapp.generated.resources.compose_search_voice
+import nuvio.composeapp.generated.resources.compose_search_voice_prompt
+import nuvio.composeapp.generated.resources.compose_search_voice_unavailable
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
@@ -92,6 +101,8 @@ fun SearchScreen(
     listState: LazyListState = rememberLazyListState(),
     onPosterClick: ((MetaPreview) -> Unit)? = null,
     onPosterLongClick: ((MetaPreview) -> Unit)? = null,
+    /** Opens a person from the People strip; the second argument is the avatar transition key. */
+    onPersonClick: ((MetaPerson, String?) -> Unit)? = null,
     searchFocusRequestCount: Int = 0,
     scrollToTopRequests: Flow<Unit> = emptyFlow(),
 ) {
@@ -131,6 +142,13 @@ fun SearchScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var lastRequestedQuery by rememberSaveable { mutableStateOf<String?>(null) }
     var observedOfflineState by remember { mutableStateOf(false) }
+    val voicePrompt = stringResource(Res.string.compose_search_voice_prompt)
+    val voiceUnavailable = stringResource(Res.string.compose_search_voice_unavailable)
+    val launchSpeech = rememberSpeechLauncher(prompt = voicePrompt) { transcript ->
+        if (!transcript.isNullOrBlank()) {
+            query = transcript.trim()
+        }
+    }
     val discoverInFocus by remember(query, listState) {
         derivedStateOf {
             query.isBlank() && listState.firstVisibleItemIndex > 0
@@ -167,6 +185,7 @@ fun SearchScreen(
                 query = normalizedQuery,
                 addons = addonsUiState.addons,
             )
+            SearchRepository.searchPeople(query = normalizedQuery)
         }
     }
 
@@ -185,12 +204,13 @@ fun SearchScreen(
             }
     }
 
-    ScreenActivityEffect(query, lastRequestedQuery, uiState.isLoading, uiState.sections) { screenActive ->
+    ScreenActivityEffect(query, lastRequestedQuery, uiState.isLoading, uiState.sections, uiState.people) { screenActive ->
         if (!screenActive) return@ScreenActivityEffect
         val normalizedQuery = query.trim()
         if (normalizedQuery.isBlank()) return@ScreenActivityEffect
         if (lastRequestedQuery != normalizedQuery) return@ScreenActivityEffect
-        if (uiState.isLoading || uiState.sections.isEmpty()) return@ScreenActivityEffect
+        if (uiState.isLoading) return@ScreenActivityEffect
+        if (uiState.sections.isEmpty() && uiState.people.isEmpty()) return@ScreenActivityEffect
         SearchHistoryRepository.recordSearch(normalizedQuery)
     }
 
@@ -217,6 +237,10 @@ fun SearchScreen(
                     SearchRepository.search(
                         query = normalizedQuery,
                         addons = addonsUiState.addons,
+                        forceRefresh = true,
+                    )
+                    SearchRepository.searchPeople(
+                        query = normalizedQuery,
                         forceRefresh = true,
                     )
                 }
@@ -272,18 +296,31 @@ fun SearchScreen(
                             modifier = Modifier
                                 .focusRequester(focusRequester)
                                 .onFocusChanged { isSearchFocused = it.isFocused },
-                            trailingContent = if (query.isNotBlank()) {
-                                {
-                                    IconButton(onClick = { query = "" }) {
+                            trailingContent = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (query.isNotBlank()) {
+                                        IconButton(onClick = { query = "" }) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.Close,
+                                                contentDescription = stringResource(Res.string.compose_search_clear),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            if (!launchSpeech()) {
+                                                NuvioToastController.show(voiceUnavailable)
+                                            }
+                                        },
+                                    ) {
                                         Icon(
-                                            imageVector = Icons.Rounded.Close,
-                                            contentDescription = stringResource(Res.string.compose_search_clear),
+                                            imageVector = Icons.Rounded.Mic,
+                                            contentDescription = stringResource(Res.string.compose_search_voice),
                                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
                                 }
-                            } else {
-                                null
                             },
                         )
                     }
@@ -329,8 +366,33 @@ fun SearchScreen(
             } else {
                 val normalizedQuery = query.trim()
                 val isWaitingForSearch = normalizedQuery.isNotBlank() && lastRequestedQuery != normalizedQuery
+                val hasResults = uiState.sections.isNotEmpty() || uiState.people.isNotEmpty()
+
+                if (uiState.people.isNotEmpty()) {
+                    item(key = "search_people") {
+                        DetailCastSection(
+                            cast = uiState.people.map { person ->
+                                MetaPerson(
+                                    name = person.name,
+                                    role = person.knownForLabel,
+                                    photo = person.profilePhotoUrl,
+                                    tmdbId = person.tmdbId,
+                                )
+                            },
+                            modifier = Modifier.padding(
+                                start = homeSectionPadding,
+                                end = homeSectionPadding,
+                                bottom = 12.dp,
+                            ),
+                            headerTitle = stringResource(Res.string.compose_search_people),
+                            horizontalScrollPadding = homeSectionPadding,
+                            onCastClick = onPersonClick,
+                        )
+                    }
+                }
+
                 when {
-                    isWaitingForSearch -> {
+                    !hasResults && (isWaitingForSearch || uiState.isLoading || addonManifestsLoading) -> {
                         items(2) {
                             HomeSkeletonRow(
                                 horizontalPadding = homeSectionPadding,
@@ -338,15 +400,7 @@ fun SearchScreen(
                         }
                     }
 
-                    (uiState.isLoading || addonManifestsLoading) && uiState.sections.isEmpty() -> {
-                        items(2) {
-                            HomeSkeletonRow(
-                                horizontalPadding = homeSectionPadding,
-                            )
-                        }
-                    }
-
-                    uiState.sections.isEmpty() -> {
+                    !hasResults -> {
                         item {
                             SearchEmptyStateCard(
                                 reason = uiState.emptyStateReason,
@@ -361,6 +415,10 @@ fun SearchScreen(
                                             SearchRepository.search(
                                                 query = normalizedQuery,
                                                 addons = addonsUiState.addons,
+                                                forceRefresh = true,
+                                            )
+                                            SearchRepository.searchPeople(
+                                                query = normalizedQuery,
                                                 forceRefresh = true,
                                             )
                                         }
