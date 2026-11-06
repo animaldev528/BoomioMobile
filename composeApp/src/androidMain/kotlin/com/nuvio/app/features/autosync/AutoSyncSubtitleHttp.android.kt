@@ -43,7 +43,7 @@ internal object AutoSyncSubtitleHttp {
             }
         }
 
-        val call = AddonHttpClientProvider.get().newCall(requestBuilder.build())
+        val call = AddonHttpClientProvider.getFor(url).newCall(requestBuilder.build())
 
         return suspendCancellableCoroutine { continuation ->
             continuation.invokeOnCancellation {
