@@ -84,6 +84,21 @@ internal data class OverlayPlane(
 internal data class OverlayDiscoveryTargets(
     /** `svc` — the FQDN every URL, SNI and certificate check stays on. Null on a record without it. */
     val svcName: String?,
+    /**
+     * `media` — the CERTLESS second name, or null on a record that does not carry one.
+     *
+     * It is the same box as [svcName], reached on a doorway that asks for no client certificate
+     * and serves only the media surface (`/bss-*`, `/bsc`, `/bsf`, `/t-<token>/…`). Anything a
+     * *renderer* has to fetch belongs on this name: a Chromecast, Roku, AirPlay receiver or libmpv
+     * has no way to present a client certificate at all, so a URL on [svcName] is refused at the
+     * handshake for exactly the clients casting exists to serve.
+     *
+     * ⚠️ **Null is not "use `svc` instead" for a renderer URL — it is "this server has no media
+     * doorway",** which is every box older than the field. A caller that must build a
+     * renderer-facing URL has to decide what to do with null; silently substituting [svcName]
+     * reproduces the failure the field was added to remove.
+     */
+    val mediaName: String? = null,
     /** The planes to dial, LAN first. See the ordering note on this class. */
     val planes: List<OverlayPlane>,
 ) {
@@ -153,8 +168,22 @@ internal data class OverlayAdvertTuple(
      * which [advertTupleFrom] refuses**, so a non-null value here is always [REQUIRED_VERSION].
      */
     val version: Int? = null,
-    /** `svc` — the service FQDN. The only *name* in the tuple, and the one every URL keeps. */
+    /**
+     * `svc` — the service FQDN, the name this client's own requests stay on.
+     *
+     * ⚠️ **No longer the only name in the tuple** — `media` is a second one. The difference is
+     * which client fetches it: this client holds an enrolled certificate and may use [svcName];
+     * a renderer cannot present one and must use [mediaName]. See [OverlayDiscoveryTargets].
+     */
     val svcName: String? = null,
+    /**
+     * `media` — the second, CERTLESS name this server can be reached on, when it publishes one.
+     *
+     * Additive: `v` stays 2, and a publisher that does not emit it leaves this null rather than
+     * blank. See [OverlayDiscoveryTargets.mediaName] for what it is for and why null must not be
+     * read as "use `svc`".
+     */
+    val mediaName: String? = null,
     /** `lan` — the server's address at home, as a **literal**, never a name. */
     val lanAddress: String? = null,
     /** `wan` — the server's public address, as a **literal**, never a name. */
@@ -206,6 +235,7 @@ internal data class OverlayAdvertTuple(
             val enroll = provisioningPort ?: tunnel
             return OverlayDiscoveryTargets(
                 svcName = svcName,
+                mediaName = mediaName,
                 planes = listOfNotNull(
                     lanAddress?.let { OverlayPlane(it, lanPort ?: tunnel, lanProvisioningPort ?: enroll, isLan = true) },
                     wanAddress?.let { OverlayPlane(it, wanPort ?: tunnel, wanProvisioningPort ?: enroll, isLan = false) },
@@ -378,9 +408,12 @@ private fun advertTupleFrom(field: (String) -> String?): OverlayAdvertTuple {
         provisioningEnabled = value("prov").toProvisioningFlagOrNull(),
         provisioningPortOverride = value("pport").orEmpty().toPortOrNull(),
         version = version,
-        // `svc` is a NAME — the one field here that is — because a certificate is issued for a
-        // name; everything under it is an address, dialled as written.
+        // `svc` and `media` are NAMES — the only two fields here — because a certificate is issued
+        // for a name; everything under them is an address, dialled as written. `media` goes through
+        // the same validator for the same reason: it ends up in a URL, so a scheme, a port or a path
+        // in it is a publisher bug, not something to salvage by guessing.
         svcName = validDiscoveryNameOrNull(value("svc")),
+        mediaName = validDiscoveryNameOrNull(value("media")),
         lanAddress = validDottedQuadOrNull(value("lan")),
         wanAddress = validDottedQuadOrNull(value("wan")),
         lanPort = value("lanport").orEmpty().toPortOrNull(),

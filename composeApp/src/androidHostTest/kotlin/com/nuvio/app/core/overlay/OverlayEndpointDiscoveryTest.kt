@@ -221,6 +221,58 @@ class OverlayEndpointDiscoveryTest {
     }
 
     // -----------------------------------------------------------------------------------------
+    // media= — the certless second name, and why the version does NOT move for it
+    // -----------------------------------------------------------------------------------------
+
+    @Test
+    fun `media comes off the DuckDNS record and reaches the dial targets`() {
+        // The one field a renderer needs: a cast target cannot present a client certificate, so
+        // a URL on `svc` is refused at the handshake. Additive, so `v=2` is still the version.
+        val tuple = parseDnsTxtRecord(
+            listOf(
+                "v=2;pk=$PUBLISHED_SERVER_KEY_B64;port=51820;prov=1" +
+                    ";svc=boomiopi.duckdns.org;media=boomiopi-media.duckdns.org" +
+                    ";lan=192.168.1.65;wan=203.0.113.7",
+            ),
+        )
+        assertEquals("boomiopi-media.duckdns.org", tuple.mediaName)
+        assertEquals("boomiopi.duckdns.org", tuple.svcName, "svc is not displaced")
+        assertEquals("boomiopi-media.duckdns.org", tuple.targets.mediaName)
+    }
+
+    @Test
+    fun `a record without media reads as null rather than blank`() {
+        // Every box older than the field. Null is "no media doorway" -- a caller must not read it
+        // as "use svc instead", because that is the failure the field exists to remove.
+        val tuple = parseDnsTxtRecord(
+            listOf("v=2;pk=$PUBLISHED_SERVER_KEY_B64;port=51820;svc=boomio.duckdns.org"),
+        )
+        assertNull(tuple.mediaName)
+        assertNull(tuple.targets.mediaName)
+    }
+
+    @Test
+    fun `a media value that is not a bare name reads as absent`() {
+        // It ends up in a URL, so a scheme or a path in it is a publisher bug -- and a garbage
+        // value would otherwise become a request to a nonsense host on a failure path.
+        assertNull(parseDnsTxtRecord(listOf("v=2;media=https://boomiopi-media.duckdns.org/bsc")).mediaName)
+        assertNull(parseDnsTxtRecord(listOf("v=2;media=boomiopi-media.duckdns.org/bsc")).mediaName)
+        assertNull(parseDnsTxtRecord(listOf("v=2;media=")).mediaName)
+    }
+
+    @Test
+    fun `the mDNS advert carries media as its own attribute`() {
+        val tuple = parseMdnsAdvertTxt(
+            mapOf(
+                "v" to "2".toByteArray(),
+                "svc" to "boomiopi.duckdns.org".toByteArray(),
+                "media" to "boomiopi-media.duckdns.org".toByteArray(),
+            ),
+        )
+        assertEquals("boomiopi-media.duckdns.org", tuple.mediaName)
+    }
+
+    // -----------------------------------------------------------------------------------------
     // The provisioning fields — what a device with no tunnel dials, and where
     // -----------------------------------------------------------------------------------------
 
