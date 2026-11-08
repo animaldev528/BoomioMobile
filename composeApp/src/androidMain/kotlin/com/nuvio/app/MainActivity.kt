@@ -23,6 +23,7 @@ import com.nuvio.app.core.overlay.OverlayRelay
 import com.nuvio.app.core.overlay.OverlaySession
 import com.nuvio.app.core.overlay.OverlayTunnel
 import com.nuvio.app.core.overlay.SecurityPolicyRefresh
+import com.nuvio.app.core.overlay.TvServerAdvert
 import com.nuvio.app.features.boomio.BoomioSessionRepository
 import com.nuvio.app.features.boomio.BoomioSessionStorage
 import com.nuvio.app.features.boomio.PrivateListeningSession
@@ -149,6 +150,9 @@ open class MainActivity : AppCompatActivity() {
         // rather than opening its own, so the browse has to exist first. Like them it only
         // stores the context here; the walk is foreground- and network-triggered.
         OverlayEndpointDiscovery.initialize(applicationContext)
+        // Context only. The advert itself is started and stopped by the Add-a-TV screens, never
+        // on boot: a phone must not broadcast its server on every Wi-Fi it joins.
+        TvServerAdvert.initialize(applicationContext)
         // The relay every engine has to be pointed at explicitly, because a userspace
         // tunnel captures nothing on its own. Process-scoped and takes no `Context`; it
         // opens no socket at all until `BOOMIO_OVERLAY_ADDR` is set, and every client

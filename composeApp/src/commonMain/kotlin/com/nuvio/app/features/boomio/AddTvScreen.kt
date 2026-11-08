@@ -71,7 +71,10 @@ fun AddTvScreen(
         }
         item {
             if (signedIn) {
-                EnterCodeCard()
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    EnterCodeCard()
+                    TvServerAdvertCard()
+                }
             } else {
                 NeedsAccountCard()
             }
