@@ -474,6 +474,14 @@ internal object OverlayEndpointDiscovery {
     fun current(): OverlayEndpoint? = current
 
     /**
+     * The publication the ladder last learned — the addresses and ports a v2 record named.
+     *
+     * Read by [TvServerAdvert] so the phone can hand a nearby TV the `wan=` plane it already
+     * holds, rather than re-deriving it (or asking the person to type it).
+     */
+    fun publishedTargets(): OverlayDiscoveryTargets? = discoveryTargets
+
+    /**
      * Walks the rungs and publishes the first endpoint that passes the gate.
      *
      * Safe to call repeatedly; concurrent calls serialise rather than racing each other into

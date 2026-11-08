@@ -84,7 +84,10 @@ fun EnrollTvScreen(
         }
         item {
             if (signedIn) {
-                EnrollBody()
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    EnrollBody()
+                    TvServerAdvertCard()
+                }
             } else {
                 NeedsAccountCard()
             }

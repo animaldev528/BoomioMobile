@@ -19,6 +19,7 @@ import com.nuvio.app.features.addons.AddonRepository
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellationException
@@ -609,6 +610,15 @@ internal object OverlayLocalDiscovery {
             Log.d(TAG, "No usable IPv4 address for '${info.serviceName}'")
             return null
         }
+        // ⚠️ **A device that advertises the server for a nearby TV must not then take its own
+        // advert as the server.** With Android's NSD the SRV target is always the advertising
+        // device, so on the phone that is running [TvServerAdvert] this advert's address is the
+        // phone — and rung 1 would build a tunnel endpoint pointing at itself. Other hosts are
+        // unaffected: this only rejects an address belonging to this very device.
+        if (address.isOwnAddress()) {
+            Log.d(TAG, "Ignoring advert from this device at ${address.hostAddress}")
+            return null
+        }
         if (tuple.serverPublicKeyBase64 == null) {
             // Not fatal to the *pin* — the address is what Tier 1 pins, and it is valid
             // regardless. It is fatal to the *ladder* rung, which needs the whole tuple, so it
@@ -664,6 +674,24 @@ internal object OverlayLocalDiscovery {
 
     private fun InetAddress.isUsableLanAddress(): Boolean =
         !isLoopbackAddress && !isMulticastAddress && !isAnyLocalAddress && !isLinkLocalAddress
+
+    /**
+     * True when [this] is one of this device's own interface addresses.
+     *
+     * Enumerated afresh rather than cached: a phone roams between Wi-Fi and cellular, and a stale
+     * set is exactly the kind of answer that would let it treat its own advert as a server after
+     * a network change. Failure reads as "not ours", which keeps the browse working on any
+     * platform whose interface enumeration is restricted.
+     */
+    private fun InetAddress.isOwnAddress(): Boolean {
+        val self = this
+        return runCatching {
+            NetworkInterface.getNetworkInterfaces()
+                ?.toList()
+                .orEmpty()
+                .any { nic -> nic.inetAddresses?.toList().orEmpty().any { it == self } }
+        }.getOrDefault(false)
+    }
 
     /** Blocking; the caller runs it on an IO dispatcher. */
     private fun isReachable(address: InetAddress): Boolean {

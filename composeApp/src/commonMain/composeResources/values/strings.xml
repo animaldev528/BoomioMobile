@@ -591,6 +591,16 @@
          identifiers, only the words a person reads changed. -->
     <string name="compose_settings_page_add_tv">Sign in to TV</string>
     <string name="compose_settings_root_add_tv_description">Sign in a TV with a 6-character code</string>
+    <!-- Shown on both add/enrol TV screens. The phone is only a carrier for the server's own
+         mDNS advert: the TV still shows a code and the admin still approves it. -->
+    <string name="tv_advert_title">TV can\'t find the server?</string>
+    <string name="tv_advert_intro">This phone already knows your server. Share it with a TV on the same Wi-Fi and the TV will find it automatically.</string>
+    <string name="tv_advert_start">Share with a nearby TV</string>
+    <string name="tv_advert_stop">Stop sharing</string>
+    <string name="tv_advert_sharing">Sharing with nearby TVs. Leave this screen open while the TV searches.</string>
+    <string name="tv_advert_already_on_lan">This TV can already find the server on this network — no sharing needed.</string>
+    <string name="tv_advert_not_configured">Connect this phone to your server first, then come back to share it.</string>
+    <string name="tv_advert_failed">Could not start sharing. Try again.</string>
     <string name="add_tv_intro">On the TV, open the sign-in screen and read the 6-character code, then type it here. The TV signs itself in within a few seconds.</string>
     <string name="add_tv_code_label">TV code</string>
     <string name="add_tv_submit">Sign in TV</string>
