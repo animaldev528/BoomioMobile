@@ -21,7 +21,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.DurationUnit
 
@@ -52,6 +51,18 @@ private const val RESUME_TOLERANCE_MS = 45_000L
  * already moved somewhere else.
  */
 private const val MAX_RESUME_SEEKS = 8
+
+/**
+ * How long to leave a resume seek alone before sending another.
+ *
+ * ⚠️ A seek is not free on the server: bsc has to restart its worker at the new
+ * offset and produce the first segments from there, measured at 3-5 s for a
+ * cold burst. Re-seeking on every poll while that happens restarts the burst
+ * over and over, and a receiver whose buffer is still filling answers by
+ * dropping the item (measured 2026-11-09 against a Roku over AirPlay: three
+ * seeks in 13 s, audio segments 4.6-5 s each, `error` at 18 s).
+ */
+private const val RESUME_SEEK_INTERVAL_MS = 12_000L
 
 /**
  * The remote for an AirPlay 2 session, backed by airkast.
@@ -104,6 +115,9 @@ internal actual object CastRemote {
 
     private var resumeSeeksLeft = 0
 
+    /** When the last resume seek was sent, so a recovering burst is not restarted. */
+    private var lastResumeSeekAtMs = 0L
+
     actual fun watch(
         device: CastDevice,
         title: String,
@@ -137,16 +151,24 @@ internal actual object CastRemote {
             title = title,
             capabilities = RemoteCapabilities.AirPlay,
         )
-        // A cast of something already part-watched starts where the viewer
-        // left off. The receiver has the item but may still be loading it, so
-        // this retries for a few seconds instead of racing the load — and the
-        // poll loop below keeps re-seeking until the reported position is
-        // actually there, because a receiver can accept a seek and drop it.
-        resumeTargetMs = startPositionMs
+        // ⛔ Do NOT seek the receiver to the resume point.
+        //
+        // Measured 2026-11-09 against the Roku's AirPlay receiver (Pi edge log +
+        // logcat): the receiver abandons ANY request after 5.0 s — 26 x 499, every
+        // one at 5.0 s — while the first audio-rendition window at an arbitrary
+        // film offset is a fresh ffmpeg on bsc that re-seeks the debrid source and
+        // reads a minute of interleaved bytes: 4.6-5 s at best, 8 s on a retry.
+        // So every cast that resumed mid-film took the item, then errored at 18 s
+        // with its audio buffer empty; retrying the seek only restarted the burst
+        // underneath it. A cast that starts at 0 plays, because opening the audio
+        // playlist warms windows 0-1 during the load.
+        //
+        // Resume (and scrubbing) comes back when bsc can produce those windows
+        // ahead of the request. Until then a cast plays from the beginning, and
+        // the receiver's position is what gets written to watch progress.
+        resumeTargetMs = 0L
         resumeSeeksLeft = MAX_RESUME_SEEKS
-        if (startPositionMs > 0L) {
-            scope.launch { seekToStart(startPositionMs) }
-        }
+        lastResumeSeekAtMs = 0L
         pollJob = scope.launch {
             val renditions = runCatching { session.renditions() }.getOrDefault(emptyList())
             val audio = renditions.filter { it.kind == TrackKind.Audio }
@@ -276,6 +298,7 @@ internal actual object CastRemote {
         context = null
         roku = null
         resumeTargetMs = 0L
+        lastResumeSeekAtMs = 0L
         _state.value = null
     }
 
@@ -343,26 +366,6 @@ internal actual object CastRemote {
     }
 
     /**
-     * Puts the receiver where the viewer left off.
-     *
-     * The item was accepted by [AirPlay.play] before this runs, but the receiver
-     * may still be opening it, so a refused seek is retried a few times. A seek
-     * that cannot land is not fatal: the cast plays from the start, which is
-     * exactly what happened before this existed.
-     */
-    private suspend fun seekToStart(positionMs: Long) {
-        repeat(3) { attempt ->
-            val error = seekTo(positionMs)
-            if (error == null) {
-                remoteLog.d { "resume: the receiver is at ${positionMs}ms" }
-                return
-            }
-            remoteLog.w { "resume seek ${attempt + 1} failed: $error" }
-            delay(1_500)
-        }
-    }
-
-    /**
      * Keeps pushing the receiver towards the resume point until it is there.
      *
      * A receiver still opening the item accepts a seek and drops it, and the
@@ -374,9 +377,16 @@ internal actual object CastRemote {
     private suspend fun reconcileResume(session: AirkastSession) {
         val target = resumeTargetMs
         if (target <= 0L) return
-        val at = _state.value?.positionMs ?: 0L
+        val state = _state.value ?: return
+        // Still opening the item: it takes the seek and drops it, and every extra
+        // seek restarts the server's burst underneath the first one.
+        if (state.loading) return
+        val at = state.positionMs
         if (at <= 0L) return
-        if (abs(at - target) <= RESUME_TOLERANCE_MS) {
+        // At or past the mark is where the viewer asked to be. Playing on from
+        // there is not drift, and seeking back would restart the burst for
+        // nothing — the old test compared the distance in both directions.
+        if (at >= target - RESUME_TOLERANCE_MS) {
             resumeTargetMs = 0L
             remoteLog.d { "resume: the receiver is at ${at}ms" }
             return
@@ -386,6 +396,9 @@ internal actual object CastRemote {
             remoteLog.w { "resume: giving up at ${at}ms, wanted ${target}ms" }
             return
         }
+        val now = System.currentTimeMillis()
+        if (lastResumeSeekAtMs != 0L && now - lastResumeSeekAtMs < RESUME_SEEK_INTERVAL_MS) return
+        lastResumeSeekAtMs = now
         resumeSeeksLeft--
         runCatching { session.seek(target.milliseconds) }.onFailure { error ->
             remoteLog.w { "resume seek failed: ${error.message}" }

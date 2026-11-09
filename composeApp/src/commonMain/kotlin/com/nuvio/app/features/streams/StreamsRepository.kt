@@ -5,6 +5,7 @@ import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.features.addons.AddonRepository
 import com.nuvio.app.features.boomio.BoomioConfig
 import com.nuvio.app.features.boomio.BoomioStreamResolver
+import com.nuvio.app.features.cast.CastAudioFit
 import com.nuvio.app.features.cast.CastSession
 import com.nuvio.app.features.cast.CastTarget
 import com.nuvio.app.features.addons.appendQuery
@@ -27,9 +28,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.getString
 import kotlinx.coroutines.launch
@@ -38,7 +42,21 @@ object StreamsRepository {
     private val log = Logger.withTag("StreamsRepo")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val _uiState = MutableStateFlow(StreamsUiState())
-    val uiState: StateFlow<StreamsUiState> = _uiState.asStateFlow()
+    /**
+     * The state the screens see: [_uiState] with the cast gate applied.
+     *
+     * ⛔ Derived here rather than filtered at publish time because the renderer
+     * can be picked AFTER the list loaded. `CastSession` is null while a title's
+     * sources are fetched from the details screen, so that list is built with no
+     * target and every release comes back; picking the Roku then has to re-gate
+     * the list already on screen. Combining keeps [_uiState] whole, so clearing
+     * the renderer restores every release without a refetch.
+     */
+    val uiState: StateFlow<StreamsUiState> = combine(_uiState, CastSession.target) { state, target ->
+        if (target == null) state else state.copy(
+            groups = state.groups.map { group -> CastAudioFit.group(group, casting = true) },
+        )
+    }.stateIn(scope, SharingStarted.Eagerly, StreamsUiState())
 
     private var activeJob: Job? = null
     private var activeRequestKey: String? = null
@@ -337,8 +355,13 @@ object StreamsRepository {
             }
 
             fun presentStreamGroup(group: AddonStreamGroup): AddonStreamGroup {
+                // ⛔ Every addon's list passes through here, which is the one place
+                // a release can be withheld from a renderer whose audio it cannot
+                // take. BSF gates the lists it builds, but not a third-party
+                // addon's and not one fetched before a renderer was picked.
+                val gated = CastAudioFit.group(group)
                 val badgeGroup = StreamBadgePresentation.apply(
-                    groups = listOf(group),
+                    groups = listOf(gated),
                     rules = streamBadgeRules,
                 ).firstOrNull() ?: group
                 return DebridStreamPresentation.apply(
