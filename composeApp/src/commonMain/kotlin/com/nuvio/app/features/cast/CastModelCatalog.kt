@@ -178,6 +178,10 @@ object CastModelCatalog {
         md: String? = null,
     ): CastDevice {
         val row = when (protocol) {
+            // A Boomio TV's limits live in its own stored row (resolved server-
+            // side from its device id), not in the model table this catalog
+            // indexes. No row here is the honest answer.
+            CastProtocol.BOOMIO -> null
             CastProtocol.ROKU -> forRoku(facts)
             // A DIAL description is the only record some Cast receivers answer
             // with, and it names the hardware rather than the Cast product: an

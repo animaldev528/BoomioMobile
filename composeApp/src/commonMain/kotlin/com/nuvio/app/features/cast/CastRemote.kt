@@ -51,6 +51,13 @@ internal data class CastRemoteState(
     val canSeek: Boolean = true,
     /** False for a protocol or item that cannot switch tracks at all. */
     val canPickTracks: Boolean = false,
+    /**
+     * What this target can be asked to do at all. Distinct from [canSeek], which
+     * is per-ITEM (a live stream has no range); this is per-PROTOCOL (a Roku has
+     * no seek-to-position however long the item is). The screen hides a control
+     * when either says no.
+     */
+    val capabilities: RemoteCapabilities = RemoteCapabilities(),
 ) {
     val progress: Float
         get() = if (durationMs <= 0) 0f else (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)

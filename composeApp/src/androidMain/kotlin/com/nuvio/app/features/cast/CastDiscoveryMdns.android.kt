@@ -225,6 +225,10 @@ internal object CastMdns {
         val txt = info.attributes.mapValues { (_, value) -> String(value, Charsets.UTF_8) }
         val serviceName = info.serviceName.substringBefore("._").ifBlank { ip }
         return when (protocol) {
+            // Enrolled Boomio TVs are not discovered on mDNS; they come from the
+            // companion device list. Nothing here can produce one.
+            CastProtocol.BOOMIO -> null
+
             CastProtocol.CAST -> CastModelCatalog.device(
                 protocol = CastProtocol.CAST,
                 ip = ip,

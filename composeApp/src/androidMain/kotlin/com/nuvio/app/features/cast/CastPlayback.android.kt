@@ -34,6 +34,11 @@ internal actual suspend fun playOnRenderer(
         // URL-capable channel. See RokuEcp for why that channel is Media Assistant.
         CastProtocol.ROKU -> RokuEcp.play(device, rendererUrl, title)
         CastProtocol.AIRPLAY -> AirPlay.play(device, rendererUrl, title)
+        // A Boomio TV is not a renderer protocol: it takes a `play` frame on the
+        // companion socket. `StreamDestination` branches to that path before it
+        // ever reaches here, so this branch exists only to keep the `when`
+        // exhaustive — reaching it means the cast was misrouted.
+        CastProtocol.BOOMIO -> CastPlayResult.failed("Boomio TVs play over the companion socket")
     }
     if (!result.ok) log.w { "cast to ${device.protocol}/${device.name} (${device.ip}) failed: ${result.reason}" }
     result

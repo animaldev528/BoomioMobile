@@ -1,6 +1,8 @@
 package com.nuvio.app.features.boomio
 
 import co.touchlab.kermit.Logger
+import com.nuvio.app.features.cast.CastDevice
+import com.nuvio.app.features.cast.CastProtocol
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
@@ -63,7 +65,22 @@ data class CompanionDevice(
     val positionMs: Long,
     val durationMs: Long,
     val isPlaying: Boolean,
-)
+    /** The address bsc sees the TV at, when it reports one. */
+    val ip: String? = null,
+    /** The TV's own LAN address — what a cast stream is bound to. */
+    val lanIp: String? = null,
+    val volumePercent: Int = 0,
+) {
+    /**
+     * The address a cast stream should be bound to.
+     *
+     * `lanIp` is the TV's own view of itself and is the address it fetches from
+     * on the household LAN; `ip` is bsc's view, which is a tunnel address when
+     * the TV is remote. Casting is a LAN action in this client, so the LAN
+     * address wins and `ip` is the fallback.
+     */
+    val castAddress: String? get() = lanIp?.takeIf { it.isNotBlank() } ?: ip?.takeIf { it.isNotBlank() }
+}
 
 /** Inbound TV→phone push events on the companion websocket. */
 sealed interface CompanionEvent {
@@ -325,6 +342,45 @@ object CompanionBridge {
         }
     }
 
+    /**
+     * Pair with [deviceId] and WAIT until the hub has recorded it.
+     *
+     * [pairTo] launches the request and returns immediately, which is right for a
+     * tap on the device list but wrong before a `play` frame: bsc relays that
+     * frame to whichever TV Redis says this phone is paired with, so sending it
+     * while the pair request is still in flight starts the title on the TV the
+     * viewer just cast away from (or answers `not_paired`).
+     *
+     * @return true when the hub accepted the pair, or the phone was already
+     *   paired with this TV. False means the `play` frame must not be sent.
+     */
+    suspend fun pairToAndWait(deviceId: String): Boolean {
+        if (_pairedDeviceId.value == deviceId) return true
+        val token = BoomioSessionRepository.bearerToken() ?: return false
+        return try {
+            val response = http.post("${BoomioConfig.companionRestBaseUrl}/api/companion/pair") {
+                header(HttpHeaders.Authorization, "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(json.encodeToString(PairRequest(deviceId = deviceId)))
+            }
+            if (response.status.isSuccess()) {
+                _pairedDeviceId.value = deviceId
+                BoomioSessionStorage.savePairedDeviceId(deviceId)
+                _deviceListError.value = null
+                true
+            } else {
+                _deviceListError.value = "TV is offline or unreachable (HTTP ${response.status.value})"
+                false
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            log.w(error) { "pairToAndWait failed" }
+            _deviceListError.value = "Could not reach the companion hub."
+            false
+        }
+    }
+
     /** Unpairs from the current TV (keeps the companion session). */
     fun unpair() {
         val token = BoomioSessionRepository.bearerToken() ?: return
@@ -462,6 +518,39 @@ object CompanionBridge {
      * Ask the paired TV to stop forking its audio to this phone. */
     fun stopAudioFork() =
         sendFrame { put("type", "audio_fork_stop") }
+
+    /**
+     * Ask the paired TV to start playing [url] — the companion equivalent of
+     * casting a stream to a renderer.
+     *
+     * The URL is the one `/find` resolved for the TV (bound to its address, token
+     * in the query); the TV does not resolve titles itself, so the phone chooses
+     * the release exactly as it does for a Roku or an Apple TV.
+     *
+     * @return false when there is no live companion socket. Callers must surface
+     *   that, because a dropped frame and a started playback look identical from
+     *   the outside otherwise.
+     */
+    fun playOnTv(
+        url: String,
+        title: String,
+        imdbId: String? = null,
+        season: Int? = null,
+        episode: Int? = null,
+        resumeFromMs: Long = 0L,
+    ): Boolean {
+        if (url.isBlank() || wsSession == null) return false
+        sendFrame {
+            put("type", "play")
+            put("url", url)
+            put("title", title)
+            imdbId?.takeIf { it.isNotBlank() }?.let { put("imdbId", it) }
+            season?.let { put("season", it) }
+            episode?.let { put("episode", it) }
+            if (resumeFromMs > 0L) put("resumeFrom", resumeFromMs)
+        }
+        return true
+    }
 
     /**
      * Put the paired TV on a live IPTV channel.
@@ -703,6 +792,9 @@ private data class CompanionDeviceDto(
     @SerialName("positionMs") val positionMs: Long = 0,
     @SerialName("durationMs") val durationMs: Long = 0,
     @SerialName("isPlaying") val isPlaying: Boolean = false,
+    @SerialName("ip") val ip: String? = null,
+    @SerialName("lanIp") val lanIp: String? = null,
+    @SerialName("volumePercent") val volumePercent: Int = 0,
 )
 
 @Serializable
@@ -720,4 +812,26 @@ private fun CompanionDeviceDto.toModel() = CompanionDevice(
     positionMs = positionMs,
     durationMs = durationMs,
     isPlaying = isPlaying,
+    ip = ip,
+    lanIp = lanIp,
+    volumePercent = volumePercent,
 )
+
+/**
+ * An enrolled Boomio TV as a cast target, or null when it reports no address.
+ *
+ * The details cast picker offers this alongside discovered renderers so one
+ * surface sends to a Roku, an Apple TV, a DLNA panel or a Boomio TV. The device id
+ * is carried through: the server resolves the TV's own stored caps from it, and
+ * the companion socket keys the `play` frame on the same box.
+ */
+fun CompanionDevice.toCastDevice(): CastDevice? {
+    val address = castAddress ?: return null
+    return CastDevice(
+        protocol = CastProtocol.BOOMIO,
+        ip = address,
+        name = name,
+        deviceId = deviceId,
+        model = name,
+    )
+}
