@@ -33,11 +33,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.core.ui.DialogButton
 import com.nuvio.app.core.ui.DialogButtonStyle
 import com.nuvio.app.core.ui.DialogButtons
 import com.nuvio.app.core.ui.DialogSurface
 import com.nuvio.app.core.ui.NuvioLoadingIndicator
+import com.nuvio.app.features.boomio.CompanionBridge
+import com.nuvio.app.features.boomio.toCastDevice
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.*
@@ -45,6 +48,14 @@ import org.jetbrains.compose.resources.stringResource
 
 /**
  * Picks the screen to cast to.
+ *
+ * The sheet lists two kinds of target in one place:
+ *
+ *  - **Enrolled Boomio TVs**, from the companion hub. They are not discovered on
+ *    the LAN — they are already enrolled — and playback starts with a `play`
+ *    frame, so a Boomio TV is as easy to send to as a Roku.
+ *  - **Discovered renderers** (DLNA / Google Cast / Roku ECP / AirPlay), scanned
+ *    when the sheet opens.
  *
  * The scan runs when the sheet opens, not when the app starts: SSDP is a network
  * call and a details screen is not a reason to make one. [rescanToken] re-runs it
@@ -54,7 +65,7 @@ import org.jetbrains.compose.resources.stringResource
  * An AirPlay receiver is prepared before the dialog hands it back: the first cast
  * to an Apple TV pairs with the code on its screen, and this sheet shows the field
  * for it. The pairing is kept by the app, so the same TV is a single tap later.
- * Other protocols need no preparation and are handed back as they are.
+ * Every other protocol needs no preparation and is handed back as it is.
  *
  * A device row states what the server will build for it. Devices whose model the
  * capability table cannot place are shown, not hidden — they still play, at the
@@ -68,7 +79,7 @@ internal fun CastPickerDialog(
 ) {
     var rescanToken by remember { mutableIntStateOf(0) }
     var scanning by remember { mutableStateOf(true) }
-    var devices by remember { mutableStateOf<List<CastDevice>>(emptyList()) }
+    var discovered by remember { mutableStateOf<List<CastDevice>>(emptyList()) }
     // The receiver being prepared, the secret it is waiting for (with the field that
     // answers it), and the last failure — one cast attempt at a time.
     var preparing by remember { mutableStateOf<String?>(null) }
@@ -78,10 +89,26 @@ internal fun CastPickerDialog(
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
+    // Enrolled Boomio TVs are already known to the hub. Starting the companion
+    // bridge here means the details screen works even when the viewer has never
+    // opened Settings → Companion on this launch.
+    val companionDevices by CompanionBridge.devices.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) {
+        CompanionBridge.ensureStarted()
+        CompanionBridge.refreshDevices()
+    }
+
     LaunchedEffect(rescanToken) {
         scanning = true
-        devices = discoverCastDevices()
+        discovered = discoverCastDevices()
         scanning = false
+    }
+
+    // One list, two sources. A Boomio TV with no address is not castable (the
+    // stream has nowhere to be bound), so it is left out rather than offered as a
+    // row that cannot work.
+    val devices = remember(discovered, companionDevices) {
+        (discovered + companionDevices.mapNotNull { it.toCastDevice() }).distinctBy { it.id }
     }
 
     fun select(device: CastDevice) {
@@ -263,10 +290,14 @@ private fun CastDeviceRow(
 
 /**
  * "Roku · Roku TVs" when the table knows the model, and an explicit limit note when
- * it does not — the device still plays, just at the floor.
+ * it does not — the device still plays, just at the floor. An enrolled Boomio TV
+ * is named as such: its limits come from its own stored row, not the model table.
  */
 @Composable
 private fun CastDevice.subtitle(): String {
+    if (protocol == CastProtocol.BOOMIO) {
+        return stringResource(Res.string.cast_target_boomio)
+    }
     val protocol = protocol.name
     val model = model
     return if (model.isNullOrBlank()) {

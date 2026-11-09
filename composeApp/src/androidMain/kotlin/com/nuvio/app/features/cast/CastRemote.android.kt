@@ -132,7 +132,11 @@ internal actual object CastRemote {
         roku = null
         context = WatchContext(streamUrl, imdbId, season, episode)
         pollJob?.cancel()
-        _state.value = CastRemoteState(deviceName = device.name, title = title)
+        _state.value = CastRemoteState(
+            deviceName = device.name,
+            title = title,
+            capabilities = RemoteCapabilities.AirPlay,
+        )
         // A cast of something already part-watched starts where the viewer
         // left off. The receiver has the item but may still be loading it, so
         // this retries for a few seconds instead of racing the load — and the
@@ -245,6 +249,7 @@ internal actual object CastRemote {
             title = title,
             playing = true,
             canSeek = false,
+            capabilities = RemoteCapabilities.RokuEcp,
         )
         pollJob = scope.launch {
             while (isActive) {

@@ -17,10 +17,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import co.touchlab.kermit.Logger
+import com.nuvio.app.features.cast.CastProtocol
 import com.nuvio.app.features.cast.CastRemote
 import com.nuvio.app.features.cast.CastSession
 import com.nuvio.app.features.cast.canHandToRenderer
 import com.nuvio.app.features.cast.playOnRenderer
+import com.nuvio.app.features.boomio.CompanionBridge
 import com.nuvio.app.core.ui.NuvioLoadingIndicator
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.nuvio
@@ -686,6 +688,40 @@ internal fun StreamDestination(
             if (!handable) {
                 NuvioToastController.show(castFailedMessage)
                 startLocalPlayback()
+                return
+            }
+            // A Boomio TV is not a renderer: it takes a `play` frame on the
+            // companion socket. It fetches the URL itself, exactly like a
+            // renderer, so the same header check above applies — and the server
+            // has already bound the stream to the TV and put the token in its
+            // query (the cast target carried this TV's device id).
+            if (castTargetDevice.protocol == CastProtocol.BOOMIO) {
+                val tvDeviceId = castTargetDevice.deviceId
+                castLog.d { "handoff: boomio companion play to ${castTargetDevice.name}" }
+                streamRouteScope.launch {
+                    // Pair the phone to this TV so its remote is where the viewer
+                    // already is if they open the companion screen. Best-effort:
+                    // a cast must not fail because pairing was already set.
+                    tvDeviceId?.let { CompanionBridge.pairTo(it) }
+                    val sent = CompanionBridge.playOnTv(
+                        url = sourceUrl,
+                        title = playerLaunch.title,
+                        imdbId = effectiveVideoId.takeIf { it.startsWith("tt") },
+                        season = launch.seasonNumber,
+                        episode = launch.episodeNumber,
+                        resumeFromMs = playerLaunch.initialPositionMs,
+                    )
+                    StreamsRepository.cancelLoading()
+                    if (sent) {
+                        NuvioToastController.show(castStartedMessage)
+                    } else {
+                        // No live companion socket: the phone is not linked, or
+                        // the hub is unreachable. Play here rather than leaving
+                        // both screens black.
+                        NuvioToastController.show(castFailedMessage)
+                        startLocalPlayback()
+                    }
+                }
                 return
             }
             castLog.d { "handoff: launching cast coroutine" }

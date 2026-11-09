@@ -71,8 +71,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.nuvio.app.features.cast.CastDevice
 import com.nuvio.app.features.cast.CastRemote
+import com.nuvio.app.features.cast.CastRemoteControls
 import com.nuvio.app.features.cast.CastRemoteState
+import com.nuvio.app.features.cast.CastSession
+import com.nuvio.app.features.cast.RemoteCapabilities
+import com.nuvio.app.features.cast.discoverCastDevices
 import com.nuvio.app.core.ui.NuvioScreen
 import com.nuvio.app.core.ui.NuvioScreenHeader
 import com.nuvio.app.core.ui.NuvioSurfaceCard
@@ -83,6 +88,13 @@ import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeSource
 import nuvio.composeapp.generated.resources.Res
+import nuvio.composeapp.generated.resources.cast_action
+import nuvio.composeapp.generated.resources.cast_device_floor
+import nuvio.composeapp.generated.resources.cast_picker_empty
+import nuvio.composeapp.generated.resources.cast_picker_scanning
+import nuvio.composeapp.generated.resources.cast_picker_title
+import nuvio.composeapp.generated.resources.cast_target_clear
+import nuvio.composeapp.generated.resources.cast_target_selected
 import nuvio.composeapp.generated.resources.companion_cancel
 import nuvio.composeapp.generated.resources.companion_cast_controls
 import nuvio.composeapp.generated.resources.companion_cast_loading_on
@@ -219,7 +231,20 @@ fun CompanionScreen(
     // TV plays. When one is live it is shown first, above the companion's own
     // controls, so returning here always offers the way back to it.
     val castState by CastRemote.state.collectAsStateWithLifecycle()
+    val castTargetDevice by CastSession.target.collectAsStateWithLifecycle()
     val castScope = rememberCoroutineScope()
+    var castControlError by remember { mutableStateOf<String?>(null) }
+
+    // Renderers are discovered, Boomio TVs are enrolled — both are targets for
+    // the same surface. The scan is a LAN call, so it runs once on open rather
+    // than on every recomposition.
+    var renderers by remember { mutableStateOf<List<CastDevice>>(emptyList()) }
+    var scanningRenderers by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        scanningRenderers = true
+        renderers = discoverCastDevices()
+        scanningRenderers = false
+    }
 
     // Keep the now-playing line current while linked.
     LaunchedEffect(session) {
@@ -257,12 +282,23 @@ fun CompanionScreen(
         }
         castState?.let { cast ->
             item {
-                ActiveCastCard(
-                    state = cast,
-                    onOpen = onOpenCast,
-                    onToggle = { castScope.launch { CastRemote.togglePlayPause() } },
-                    onStop = { castScope.launch { CastRemote.stopPlayback() } },
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ActiveCastCard(
+                        state = cast,
+                        onOpen = onOpenCast,
+                        onToggle = { castScope.launch { CastRemote.togglePlayPause() } },
+                        onStop = { castScope.launch { CastRemote.stopPlayback() } },
+                    )
+                    // The same remote body the full cast screen uses, drawn here
+                    // so a cast and a Boomio companion are one surface, not two.
+                    // It renders only the controls this target's protocol can
+                    // honour — a Roku gets transport and stop, never a scrubber.
+                    CastRemoteControls(
+                        state = cast,
+                        error = castControlError,
+                        onError = { castControlError = it },
+                    )
+                }
             }
         }
         if (session == null) {
@@ -283,8 +319,23 @@ fun CompanionScreen(
                         pairedDeviceId = pairedId,
                         devices = devices,
                         connected = connected,
+                        // The paired device on this path is always an enrolled
+                        // Boomio TV, whose companion manager implements the whole
+                        // set. A renderer selected below gets its own capability
+                        // set from CastRemote instead.
+                        capabilities = RemoteCapabilities.BoomioTv,
                     )
                 }
+            }
+            // A renderer is a target too. Selecting one here means the next Play
+            // on a details screen is sent to it instead of the phone — the same
+            // intent the details cast button records, reached from the remote.
+            item {
+                RendererTargets(
+                    renderers = renderers,
+                    scanning = scanningRenderers,
+                    selectedId = castTargetDevice?.id,
+                )
             }
             item { UnlinkRow() }
         }
@@ -452,6 +503,105 @@ private fun DevicePicker(
     }
 }
 
+/**
+ * Discovered renderers — DLNA, Google Cast, Roku, AirPlay — as targets on the
+ * same remote surface as a Boomio TV.
+ *
+ * Selecting one sets [CastSession], which is the same slot the details-screen
+ * cast button writes: the next Play is sent there. It does not start a cast by
+ * itself, because a renderer needs a title, and this screen has no title to
+ * offer.
+ */
+@Composable
+private fun RendererTargets(
+    renderers: List<CastDevice>,
+    scanning: Boolean,
+    selectedId: String?,
+) {
+    val title = stringResource(Res.string.cast_picker_title)
+    val scanningLabel = stringResource(Res.string.cast_picker_scanning)
+    val empty = stringResource(Res.string.cast_picker_empty)
+    val castLabel = stringResource(Res.string.cast_action)
+    val selectedLabel = stringResource(Res.string.cast_target_selected)
+    val phoneOnlyLabel = stringResource(Res.string.cast_target_clear)
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        when {
+            scanning && renderers.isEmpty() -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                Text(
+                    scanningLabel,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            renderers.isEmpty() -> NuvioSurfaceCard {
+                Text(
+                    empty,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            else -> {
+                renderers.forEach { device ->
+                    val selected = device.id == selectedId
+                    NuvioSurfaceCard {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(device.name, style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    rendererSubtitle(device),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Button(onClick = {
+                                // Tapping the selected row again returns
+                                // playback to the phone.
+                                if (selected) CastSession.clear() else CastSession.select(device)
+                            }) {
+                                Text(if (selected) selectedLabel else castLabel)
+                            }
+                        }
+                    }
+                }
+                if (selectedId != null) {
+                    TextButton(onClick = { CastSession.clear() }) {
+                        Text(phoneOnlyLabel)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** "DLNA · 1080p · H.264" — what the server will build for this renderer. */
+@Composable
+private fun rendererSubtitle(device: CastDevice): String {
+    val protocol = device.protocol.name
+    val model = device.model
+    return if (model.isNullOrBlank()) {
+        "$protocol · " + stringResource(Res.string.cast_device_floor)
+    } else {
+        listOfNotNull("$protocol · $model", device.ceiling?.takeIf { it.isNotBlank() })
+            .joinToString(" — ")
+    }
+}
+
 // Audio-sync slider domain in ms, relative to the receiver's 100 ms baseline
 // prefill. Kept inside ForkUdpReceiver's clamp window (20..500 ms prefill) so the
 // shown value is always the applied value. 10 ms per discrete step.
@@ -464,6 +614,7 @@ private fun RemoteControls(
     pairedDeviceId: String,
     devices: List<CompanionDevice>,
     connected: Boolean,
+    capabilities: RemoteCapabilities,
 ) {
     val remoteTitle = stringResource(Res.string.companion_remote_title)
     val connectedHub = stringResource(Res.string.companion_connected_hub)
@@ -520,39 +671,54 @@ private fun RemoteControls(
             }
         }
 
-        Button(
-            onClick = { CompanionBridge.togglePlayPause() },
-            modifier = Modifier.fillMaxWidth().height(52.dp),
-        ) {
-            Icon(
-                imageVector = if (device?.isPlaying == true) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                contentDescription = playPauseLabel,
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(playPauseLabel)
+        if (capabilities.transport) {
+            Button(
+                onClick = { CompanionBridge.togglePlayPause() },
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+            ) {
+                Icon(
+                    imageVector = if (device?.isPlaying == true) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    contentDescription = playPauseLabel,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(playPauseLabel)
+            }
         }
 
-        SearchRemoteControl()
+        if (capabilities.search) {
+            SearchRemoteControl()
+        }
 
-        MusicIdentifyCard()
+        if (capabilities.musicIdentify) {
+            MusicIdentifyCard()
+        }
 
-        TvControlPad(
-            label = tvNavigationLabel,
-            upLabel = upLabel,
-            downLabel = downLabel,
-            leftLabel = leftLabel,
-            rightLabel = rightLabel,
-            okLabel = okLabel,
-            backLabel = backLabel,
-        )
+        if (capabilities.dpad) {
+            TvControlPad(
+                label = tvNavigationLabel,
+                upLabel = upLabel,
+                downLabel = downLabel,
+                leftLabel = leftLabel,
+                rightLabel = rightLabel,
+                okLabel = okLabel,
+                backLabel = backLabel,
+            )
+        }
 
-        if (device != null && device.durationMs > 0L) {
+        // ⛔ Gated on the protocol, not just on the duration: a Roku ECP reports a
+        // duration but has no seek-to-position, so the scrubber is removed for it
+        // rather than shown disabled.
+        if (capabilities.seek && device != null && device.durationMs > 0L) {
             SeekBar(device = device)
         }
 
-        VolumeSlider(volumeLabel = volumeLabel)
+        if (capabilities.volume) {
+            VolumeSlider(volumeLabel = volumeLabel)
+        }
 
-        PrivateListeningToggle()
+        if (capabilities.privateListening) {
+            PrivateListeningToggle()
+        }
 
         OutlinedButton(
             onClick = { CompanionBridge.unpair() },

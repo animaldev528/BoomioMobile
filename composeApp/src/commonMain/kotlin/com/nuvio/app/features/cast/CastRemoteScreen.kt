@@ -41,15 +41,17 @@ import com.nuvio.app.core.ui.NuvioSurfaceCard
 import com.nuvio.app.features.boomio.CompanionMusicAnswer
 import com.nuvio.app.features.boomio.CompanionMusicFailure
 import kotlinx.coroutines.launch
+import nuvio.composeapp.generated.resources.Res
+import nuvio.composeapp.generated.resources.cast_remote_none
+import org.jetbrains.compose.resources.stringResource
 
 /**
- * The phone's controls for a cast that is already playing: transport, a
- * scrubber, audio and subtitle tracks, and song identification.
+ * The phone's controls for a cast that is already playing.
  *
- * It is the companion screen's counterpart for a renderer the companion cannot
- * reach — same job, different wire. Every control is shown only when the
- * receiver reports it can honour it: a live stream gets a progress line instead
- * of a scrubber, and a receiver with one audio track gets no picker.
+ * It is the companion screen's counterpart for a renderer: same job, different
+ * wire. The controls on it are chosen by [CastRemoteState.capabilities], so a
+ * Roku gets transport and stop but never a scrubber (ECP has no seek-to-position),
+ * and a receiver that reports no renditions gets no track pickers.
  *
  * ⚠️ No private listening: see [CastRemote]. The renderer holds the audio, and
  * the phone has none to fork.
@@ -60,7 +62,6 @@ internal fun CastRemoteScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by CastRemote.state.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
     var error by remember { mutableStateOf<String?>(null) }
 
     NuvioScreen(modifier = modifier) {
@@ -100,59 +101,105 @@ internal fun CastRemoteScreen(
         }
 
         item {
-            Scrubber(
+            CastRemoteControls(
                 state = current,
-                onSeek = { positionMs -> scope.launch { error = CastRemote.seekTo(positionMs) } },
+                error = error,
+                onError = { error = it },
+                onStopped = onBack,
             )
         }
+    }
+}
 
-        item {
+/**
+ * The capability-gated remote body.
+ *
+ * Shared by the full-screen cast route and by the companion screen, which shows
+ * it inline when a cast is live — so a cast and a Boomio companion are the same
+ * kind of remote on the same surface, and a protocol only draws the controls it
+ * can honour.
+ */
+@Composable
+internal fun CastRemoteControls(
+    state: CastRemoteState,
+    error: String?,
+    onError: (String?) -> Unit,
+    onStopped: () -> Unit = {},
+) {
+    val scope = rememberCoroutineScope()
+    val caps = state.capabilities
+    val hasAnyControl = caps.transport || caps.seek || caps.stop || caps.volume ||
+        caps.tracks || caps.musicIdentify
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // A scrubber is only drawn where seeking is BOTH a protocol capability and
+        // true of this item (a live stream has no seekable range). There is
+        // deliberately no disabled slider: a thumb that cannot move reads as a
+        // broken control, which is exactly what the Roku used to look like.
+        if (caps.seek && state.canSeek) {
+            Scrubber(
+                state = state,
+                onSeek = { positionMs -> scope.launch { onError(CastRemote.seekTo(positionMs)) } },
+            )
+        } else if (state.durationMs > 0L) {
+            PositionLine(state = state)
+        }
+
+        if (caps.transport || caps.stop) {
             TransportRow(
-                state = current,
-                onToggle = { scope.launch { error = CastRemote.togglePlayPause() } },
+                state = state,
+                canToggle = caps.transport,
+                canStop = caps.stop,
+                onToggle = { scope.launch { onError(CastRemote.togglePlayPause()) } },
                 onStop = {
                     scope.launch {
-                        error = CastRemote.stopPlayback()
-                        if (error == null) onBack()
+                        val message = CastRemote.stopPlayback()
+                        onError(message)
+                        if (message == null) onStopped()
                     }
                 },
             )
         }
 
         error?.let { message ->
-            item {
-                Text(
-                    text = message,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-            }
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 8.dp),
+            )
         }
 
-        item { MusicCard() }
-
-        if (current.canPickTracks && current.audio.size > 1) {
-            item {
-                TrackSection(
-                    title = "Audio",
-                    tracks = current.audio,
-                    selected = current.audioId,
-                    // Audio has no "off": a receiver must play something.
-                    onSelect = { id -> id?.let { scope.launch { error = CastRemote.selectAudio(it) } } },
-                )
-            }
+        if (!hasAnyControl) {
+            Text(
+                text = stringResource(Res.string.cast_remote_none),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(vertical = 8.dp),
+            )
         }
-        if (current.canPickTracks && current.subtitles.isNotEmpty()) {
-            item {
-                TrackSection(
-                    title = "Subtitles",
-                    tracks = current.subtitles,
-                    selected = current.subtitleId,
-                    includeOff = true,
-                    onSelect = { id -> scope.launch { error = CastRemote.setSubtitles(id) } },
-                )
-            }
+
+        if (caps.musicIdentify) {
+            MusicCard()
+        }
+
+        if (caps.tracks && state.canPickTracks && state.audio.size > 1) {
+            TrackSection(
+                title = "Audio",
+                tracks = state.audio,
+                selected = state.audioId,
+                // Audio has no "off": a receiver must play something.
+                onSelect = { id -> id?.let { scope.launch { onError(CastRemote.selectAudio(it)) } } },
+            )
+        }
+        if (caps.tracks && state.canPickTracks && state.subtitles.isNotEmpty()) {
+            TrackSection(
+                title = "Subtitles",
+                tracks = state.subtitles,
+                selected = state.subtitleId,
+                includeOff = true,
+                onSelect = { id -> scope.launch { onError(CastRemote.setSubtitles(id)) } },
+            )
         }
     }
 }
@@ -166,35 +213,46 @@ private fun Scrubber(
     var dragValue by remember { mutableFloatStateOf(0f) }
     val value = if (dragging) dragValue else state.progress
     Column(modifier = Modifier.fillMaxWidth()) {
-        if (state.canSeek) {
-            Slider(
-                value = value,
-                onValueChange = {
-                    dragging = true
-                    dragValue = it
-                },
-                onValueChangeFinished = {
-                    dragging = false
-                    onSeek((dragValue * state.durationMs).toLong())
-                },
-            )
-        } else {
-            // Live: the receiver reports no seekable range, so show where it is.
-            Slider(value = value, onValueChange = {}, enabled = false)
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(time(state.positionMs), style = MaterialTheme.typography.labelSmall)
-            Text(time(state.durationMs), style = MaterialTheme.typography.labelSmall)
-        }
+        Slider(
+            value = value,
+            onValueChange = {
+                dragging = true
+                dragValue = it
+            },
+            onValueChangeFinished = {
+                dragging = false
+                onSeek((dragValue * state.durationMs).toLong())
+            },
+        )
+        TimeRow(state = state)
+    }
+}
+
+/**
+ * Where the receiver is, for a target or an item that cannot seek. No slider: the
+ * point of this line is that there is nothing to drag.
+ */
+@Composable
+private fun PositionLine(state: CastRemoteState) {
+    TimeRow(state = state)
+}
+
+@Composable
+private fun TimeRow(state: CastRemoteState) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(time(state.positionMs), style = MaterialTheme.typography.labelSmall)
+        Text(time(state.durationMs), style = MaterialTheme.typography.labelSmall)
     }
 }
 
 @Composable
 private fun TransportRow(
     state: CastRemoteState,
+    canToggle: Boolean,
+    canStop: Boolean,
     onToggle: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -203,15 +261,19 @@ private fun TransportRow(
         horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FilledIconButton(onClick = onToggle, modifier = Modifier.size(56.dp)) {
-            Icon(
-                imageVector = if (state.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                contentDescription = if (state.playing) "Pause" else "Play",
-            )
+        if (canToggle) {
+            FilledIconButton(onClick = onToggle, modifier = Modifier.size(56.dp)) {
+                Icon(
+                    imageVector = if (state.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    contentDescription = if (state.playing) "Pause" else "Play",
+                )
+            }
         }
-        OutlinedButton(onClick = onStop) {
-            Icon(Icons.Rounded.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
-            Text("Stop", modifier = Modifier.padding(start = 8.dp))
+        if (canStop) {
+            OutlinedButton(onClick = onStop) {
+                Icon(Icons.Rounded.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
+                Text("Stop", modifier = Modifier.padding(start = 8.dp))
+            }
         }
     }
 }

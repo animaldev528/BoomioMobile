@@ -29,6 +29,19 @@ enum class CastProtocol {
      * plays H.264/MP4 or HLS only — and the stream must carry its token in the URL.
      */
     AIRPLAY,
+
+    /**
+     * A Boomio TV, reached over the companion socket rather than a renderer
+     * protocol. It is not discovered on the LAN: it is already enrolled and
+     * listed by `GET /api/companion/devices`, and playback starts with a `play`
+     * frame instead of `SetAVTransportURI` / CASTV2 / ECP.
+     *
+     * It lives in this enum so the details cast button can offer ONE target list
+     * — a Boomio TV, a Roku, an Apple TV, a DLNA panel — and the rest of the cast
+     * plumbing (session, stream resolution, the remote surface) does not need a
+     * second code path.
+     */
+    BOOMIO,
 }
 
 /**
@@ -50,13 +63,24 @@ data class CastDevice(
     val ceiling: String? = null,
     /** What the protocol actually told us, kept for the log and for diagnosis. */
     val raw: Map<String, String> = emptyMap(),
+    /**
+     * The enrolled device id of a Boomio TV (`CompanionDevice.deviceId`), or null
+     * for a discovered renderer. It is the stable identity of a TV across DHCP
+     * lease changes, and it is what the server resolves the TV's own caps from —
+     * a renderer has neither, which is why the two are kept distinct here.
+     */
+    val deviceId: String? = null,
 ) {
     /**
-     * Stable across rediscovery so the picker does not grow duplicate rows:
-     * the address is what makes a renderer reachable, and it is the same value
-     * the stream will be bound to.
+     * Stable across rediscovery so the picker does not grow duplicate rows.
+     *
+     * An enrolled Boomio TV is identified by its device id: its address can change
+     * with a lease, and the id is what the server and the companion socket key on.
+     * A renderer has no id, so its address is the identity — the same value the
+     * stream is bound to.
      */
-    val id: String get() = "${protocol.name.lowercase()}:$ip"
+    val id: String
+        get() = deviceId?.let { "boomio:$it" } ?: "${protocol.name.lowercase()}:$ip"
 
     /** True when we can name the row; false means the server's floor applies. */
     val hasCapabilityRow: Boolean
@@ -101,23 +125,37 @@ data class CastTarget(
     val ip: String,
     val ecosystem: String,
     val model: String,
+    /**
+     * An enrolled Boomio TV's device id. When present the server resolves the
+     * target's stored limits from this id (bsm's `/api/internal/device-caps`)
+     * instead of from a model row — a Boomio TV's row is keyed per device, not
+     * per model, and it is the same row its own policy is enforced from.
+     */
+    val deviceId: String? = null,
 ) {
     /**
-     * `?targetEcosystem=…&targetModel=…&targetIp=…` — ready to append to a /find
-     * URL. Encoded by hand because this is commonMain and `URLEncoder` is JVM-only.
+     * `?targetEcosystem=…&targetModel=…&targetIp=…[&targetDeviceId=…]` — ready to
+     * append to a /find URL. Encoded by hand because this is commonMain and
+     * `URLEncoder` is JVM-only.
      */
-    fun queryString(): String =
-        "targetEcosystem=${encode(ecosystem)}" +
-            "&targetModel=${encode(model)}" +
-            "&targetIp=${encode(ip)}"
+    fun queryString(): String = buildString {
+        append("targetEcosystem=").append(encode(ecosystem))
+        append("&targetModel=").append(encode(model))
+        append("&targetIp=").append(encode(ip))
+        deviceId?.takeIf { it.isNotBlank() }?.let {
+            append("&targetDeviceId=").append(encode(it))
+        }
+    }
 
     companion object {
         fun of(device: CastDevice): CastTarget = CastTarget(
             ip = device.ip,
             // A non-empty label keeps the request a cast request; the server's
             // lookup misses on it and applies the floor, which is the intent.
-            ecosystem = device.ecosystem ?: device.protocol.name,
+            ecosystem = device.ecosystem
+                ?: if (device.protocol == CastProtocol.BOOMIO) "boomio" else device.protocol.name,
             model = device.model ?: device.name.ifBlank { "unknown" },
+            deviceId = device.deviceId,
         )
     }
 }
