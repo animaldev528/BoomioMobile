@@ -702,10 +702,7 @@ object CompanionBridge {
                                     // A server-side close is otherwise invisible
                                     // here (?4401 unauthorized? in particular),
                                     // and it reads as a silent drop in the logs.
-                                    log.i {
-                                        "Companion WS closed by server code=${frame.code} " +
-                                            "reason=${frame.reason.ifBlank { "-" }}"
-                                    }
+                                    log.i { "Companion WS closed by server: ${frame.reason}" }
                                     break
                                 }
                                 else -> Unit
