@@ -11,8 +11,11 @@ import io.github.aivanyuk.airkast.Secret
 import io.github.aivanyuk.airkast.SenderIdentity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
 
 private val log = Logger.withTag("AirPlay")
 
@@ -41,6 +44,16 @@ private val log = Logger.withTag("AirPlay")
 internal object AirPlay {
 
     private const val DEFAULT_PORT = 7000
+
+    /**
+     * The budget for waiting on bsc's `master.m3u8` before handing the URL over.
+     * AirPlay's sender allows the receiver ~10 s; bsc's first-segment gate is 15 s
+     * plus a 30 s grace while a worker is alive, so the wait has to be ours.
+     */
+    private const val PREFLIGHT_BUDGET_MS = 35_000L
+    private const val CONNECT_TIMEOUT_MS = 3_000L
+    private const val READ_TIMEOUT_MS = 12_000L
+    private const val PREFLIGHT_RETRY_MS = 1_000L
 
     private val lock = Any()
 
@@ -124,6 +137,17 @@ internal object AirPlay {
             val context = CastAndroidContext.context
                 ?: return@withContext CastPlayResult.failed("AirPlay is not ready yet; open the app and try again")
             log.d { "airplay: ${device.name} media=${url.substringBefore('?')} query=${url.contains("token=")}" }
+            // AirPlay's sender gives the receiver ~10 s to take the item, and bsc
+            // answers master.m3u8 only once the source has produced its first
+            // segment (measured 15 s + a 30 s grace on a cold debrid resolve) —
+            // so a cold cast used to be cancelled by airkast at 9.9-10.0 s
+            // (measured 2026-11-09). Wait for the playlist HERE first, on this
+            // app's own clock, so the sender's short one starts warm.
+            when (val readiness = awaitMasterReady(url)) {
+                MasterReadiness.Ready -> Unit
+                is MasterReadiness.NotReady ->
+                    return@withContext CastPlayResult.failed(readiness.reason)
+            }
             synchronized(lock) {
                 playing?.let { runCatching { it.close() } }
                 playing = null
@@ -164,6 +188,69 @@ internal object AirPlay {
                 .file { File(context.noBackupFilesDir, "airplay-pairings.properties") }
                 .also { credentialStore = it }
         }
+
+    /** Whether the source can be handed to the receiver now. */
+    private sealed interface MasterReadiness {
+        object Ready : MasterReadiness
+        class NotReady(val reason: String) : MasterReadiness
+    }
+
+    /**
+     * Waits until [url] answers as a playlist, or gives up after [PREFLIGHT_BUDGET_MS].
+     *
+     * bsc answers `master.m3u8` with a 503 until the source has produced its first
+     * segment — 15 s on a cold cast, up to 45 s while a worker is still alive — and
+     * then keeps the answer cached, so once this returns [MasterReadiness.Ready] the
+     * receiver's fetch is instant. A 5xx means "not yet" and is retried; a 4xx never
+     * becomes a 200 (an expired token, the media gate) and fails at once. A direct
+     * file URL needs no wait and is left alone: a pre-flight would download it.
+     */
+    private suspend fun awaitMasterReady(url: String): MasterReadiness {
+        if (!url.substringBefore('?').endsWith(".m3u8", ignoreCase = true)) {
+            return MasterReadiness.Ready
+        }
+        val deadline = System.currentTimeMillis() + PREFLIGHT_BUDGET_MS
+        var attempt = 0
+        while (true) {
+            attempt++
+            val remaining = deadline - System.currentTimeMillis()
+            if (remaining <= 0) break
+            var connection: HttpURLConnection? = null
+            try {
+                connection = (URI(url).toURL().openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = minOf(remaining, CONNECT_TIMEOUT_MS).toInt()
+                    readTimeout = minOf(remaining, READ_TIMEOUT_MS).toInt()
+                    useCaches = false
+                    instanceFollowRedirects = true
+                    setRequestProperty("Accept", "application/vnd.apple.mpegurl,application/x-mpegURL,*/*")
+                }
+                val code = connection.responseCode
+                if (code in 200..299) {
+                    log.d { "airplay: master ready after $attempt attempt(s): ${url.substringBefore('?')} HTTP $code" }
+                    return MasterReadiness.Ready
+                }
+                if (code in 400..499) {
+                    log.w { "airplay: master refused, not retrying: ${url.substringBefore('?')} HTTP $code" }
+                    return MasterReadiness.NotReady(
+                        "This link was refused (HTTP $code) — go back and pick the title again",
+                    )
+                }
+                log.d { "airplay: master not ready yet (HTTP $code), attempt $attempt" }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                log.d { "airplay: master not ready yet (${error.message}), attempt $attempt" }
+            } finally {
+                connection?.disconnect()
+            }
+            delay(PREFLIGHT_RETRY_MS)
+        }
+        log.w { "airplay: master never opened within ${PREFLIGHT_BUDGET_MS / 1000} s: ${url.substringBefore('?')}" }
+        return MasterReadiness.NotReady(
+            "This source is taking too long to open — try it again, or pick another result",
+        )
+    }
 
     private suspend fun askFor(
         ask: suspend (AirPlaySecret) -> String?,
