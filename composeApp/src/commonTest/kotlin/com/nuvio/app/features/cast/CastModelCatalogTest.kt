@@ -106,6 +106,55 @@ class CastModelCatalogTest {
     }
 
     @Test
+    fun `a roku found over airplay takes its row from the ecp facts`() {
+        // Roku OS 12.5+ advertises `model=MFiModelGroup/…` — a certification
+        // grouping that names no row. The same box answers ECP, and discovery
+        // adds those facts before building the device. This is the whole point:
+        // the same Roku picked from either list must reach bsf as the same
+        // (ecosystem, model), or the two doors offer different releases.
+        val airplayOnly = mapOf("model" to "MFiModelGroup/KM1234", "deviceid" to "AA:BB:CC:DD:EE:FF")
+        assertNull(CastModelCatalog.forAirplay(airplayOnly))
+
+        val device = CastModelCatalog.device(
+            protocol = CastProtocol.AIRPLAY,
+            ip = "192.168.68.64",
+            name = "Roku Streaming Stick",
+            port = 7000,
+            md = airplayOnly["model"],
+            facts = airplayOnly + mapOf(
+                "model-name" to "Roku Streaming Stick 4K",
+                "is-tv" to "false",
+                "ui-resolution" to "2160p",
+            ),
+        )
+        assertTrue(device.hasCapabilityRow)
+        assertEquals(CastProtocol.AIRPLAY, device.protocol)
+        assertEquals(
+            CastModelCatalog.Row("Roku", "Streaming Stick 4K / Ultra", "4K · HEVC · HDR10"),
+            CastModelCatalog.Row(device.ecosystem.orEmpty(), device.model.orEmpty(), device.ceiling.orEmpty()),
+        )
+        // …and the request carries the same pair the ECP door sends.
+        val target = CastTarget.of(device)
+        assertEquals("Roku", target.ecosystem)
+        assertEquals("Streaming Stick 4K / Ultra", target.model)
+    }
+
+    @Test
+    fun `an apple tv is identified before any ecp probe is considered`() {
+        // AirPlay facts alone already name an Apple TV; nothing probes it.
+        val device = CastModelCatalog.device(
+            protocol = CastProtocol.AIRPLAY,
+            ip = "192.168.68.70",
+            name = "Living Room",
+            port = 7000,
+            facts = mapOf("model" to "AppleTV6,2"),
+            md = "AppleTV6,2",
+        )
+        assertEquals("Apple", device.ecosystem)
+        assertEquals("TV 4K (1st/2nd Gen)", device.model)
+    }
+
+    @Test
     fun `an airplay receiver with no screen is not a target`() {
         assertNull(CastModelCatalog.forAirplay(mapOf("model" to "AudioAccessory5,1")))
         assertTrue(CastModelCatalog.isAudioOnlyAirplay(mapOf("model" to "AudioAccessory5,1")))

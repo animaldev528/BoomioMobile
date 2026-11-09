@@ -189,7 +189,16 @@ object CastModelCatalog {
             // `_airplay._tcp` reports the model in the same record, and the
             // discovery layer passes it as `md`; read the facts so `_raop`'s
             // `am` works too.
-            CastProtocol.AIRPLAY -> forAirplay(facts) ?: forCast(md)
+            //
+            // The Roku fallback is the second door onto the same box: Roku OS
+            // 12.5+ advertises AirPlay with `model=MFiModelGroup/…`, which is a
+            // certification grouping and names no row — but the same box
+            // answers ECP, so discovery adds `query/device-info` to the facts
+            // before building the device. Without this, picking the Roku from
+            // the AirPlay list produced the 1080p floor while picking the very
+            // same Roku from the ECP list produced its real row, and the two
+            // doors offered different release lists.
+            CastProtocol.AIRPLAY -> forAirplay(facts) ?: forRoku(facts) ?: forCast(md)
         }
         return CastDevice(
             protocol = protocol,

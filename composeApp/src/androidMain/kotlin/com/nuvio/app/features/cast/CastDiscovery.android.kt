@@ -3,6 +3,7 @@ package com.nuvio.app.features.cast
 import co.touchlab.kermit.Logger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
@@ -51,6 +52,8 @@ object CastDiscovery {
     private const val CAST_PORT = 8009
     private const val HTTP_TIMEOUT_MS = 1500
     private const val PROBE_TIMEOUT_MS = 400
+    /** ECP answers on the LAN in milliseconds; anything slower is a stranger. */
+    private const val ECP_IDENTITY_TIMEOUT_MS = 900
 
     const val DEFAULT_TIMEOUT_MS = 2500L
 
@@ -79,9 +82,69 @@ object CastDiscovery {
                 // AirPlay row stays: it is the only path that does not need a
                 // Media Assistant channel on the Roku, so hiding it removed the
                 // fallback when ECP could not work (measured 2026-11-06).
-                (ssdp.await() + mdns.await())
+                val viaSsdp = ssdp.await()
+                (viaSsdp + mdns.await())
+                    .identifyAirplayRenderers(viaSsdp)
                     .distinctByIdentified()
             }
+        }
+
+    /**
+     * An AirPlay row that names no capability row is given the ECP identity of
+     * the box it sits on.
+     *
+     * Roku OS 12.5+ advertises `_airplay._tcp` with `model=MFiModelGroup/…` — a
+     * certification grouping, not a model the table knows — so a Roku picked
+     * from the AirPlay list reached bsf unidentified and got the floor, while
+     * the same box picked from the ECP list got its real profile. The two doors
+     * must not hand the viewer different release lists.
+     *
+     * [alreadyAsked] is what SSDP found: when the same address is in it as a
+     * Roku, its facts are reused and no second request is made. Only a target
+     * SSDP missed (mDNS catches boxes the M-SEARCH does not) costs a probe, and
+     * the probes run side by side so one slow box does not delay the others.
+     *
+     * Best-effort throughout: a target whose `:8060` does not answer keeps the
+     * record it already had.
+     */
+    private suspend fun List<CastDevice>.identifyAirplayRenderers(
+        alreadyAsked: List<CastDevice>,
+    ): List<CastDevice> = coroutineScope {
+        val rokuByIp = alreadyAsked
+            .filter { it.protocol == CastProtocol.ROKU }
+            .associateBy { it.ip }
+        map { device -> async { identify(device, rokuByIp[device.ip]) } }.awaitAll()
+    }
+
+    private suspend fun identify(device: CastDevice, seenAsRoku: CastDevice?): CastDevice {
+        if (device.protocol != CastProtocol.AIRPLAY || device.hasCapabilityRow) return device
+        val ecp = seenAsRoku?.raw ?: ecpFacts(device.ip) ?: return device
+        // Protocol stays AIRPLAY: the facts only name the hardware. The AirPlay
+        // path is still the one the viewer chose, and it is the only one that
+        // needs no Media Assistant channel on the Roku.
+        val placed = CastModelCatalog.device(
+            protocol = CastProtocol.AIRPLAY,
+            ip = device.ip,
+            name = device.name,
+            port = device.port,
+            facts = device.raw + ecp,
+            md = device.raw["model"],
+        )
+        return if (placed.hasCapabilityRow) placed else device
+    }
+
+    /**
+     * `GET :8060/query/device-info`, or null when nothing on [ip] answers ECP.
+     * `model-name` is the field the capability table keys on — a document
+     * without it is not an identity, and guessing one is what this file exists
+     * to avoid.
+     */
+    internal suspend fun ecpFacts(ip: String): Map<String, String>? =
+        withContext(Dispatchers.IO) {
+            val xml = httpGet("http://$ip:$ROKU_PORT/query/device-info", ECP_IDENTITY_TIMEOUT_MS)
+                ?: return@withContext null
+            val facts = parseLeafFields(xml)
+            facts.takeIf { !it["model-name"].isNullOrBlank() }
         }
 
     private fun ssdpDevices(timeoutMillis: Long): List<CastDevice> {
@@ -247,15 +310,15 @@ object CastDiscovery {
     private fun portOf(url: String): Int =
         runCatching { URI(url).port }.getOrNull()?.takeIf { it > 0 } ?: 80
 
-    private fun httpGet(url: String): String? {
+    private fun httpGet(url: String, timeoutMs: Int = HTTP_TIMEOUT_MS): String? {
         val connection = try {
             URI(url).toURL().openConnection() as HttpURLConnection
         } catch (_: Exception) {
             return null
         }
         return try {
-            connection.connectTimeout = HTTP_TIMEOUT_MS
-            connection.readTimeout = HTTP_TIMEOUT_MS
+            connection.connectTimeout = timeoutMs
+            connection.readTimeout = timeoutMs
             connection.requestMethod = "GET"
             if (connection.responseCode !in 200..299) return null
             connection.inputStream.bufferedReader().use { it.readText() }
