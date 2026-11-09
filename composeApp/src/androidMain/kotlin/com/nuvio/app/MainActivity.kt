@@ -11,7 +11,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import com.nuvio.app.core.auth.AuthStorage
 import com.nuvio.app.core.mtls.MtlsRegistration
-import com.nuvio.app.core.network.ServerAliases
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.network.ServerConfigurationStorage
 import com.nuvio.app.core.overlay.OverlayEnrollment
@@ -126,8 +125,7 @@ open class MainActivity : AppCompatActivity() {
         ServerConfigurationRepository.active.value
             .takeIf { it.isCustom }
             ?.let {
-                com.nuvio.app.features.boomio.BoomioConfig.serviceOrigin =
-                    ServerAliases.canonicalInput(it.backendUrl)
+                com.nuvio.app.features.boomio.BoomioConfig.serviceOrigin = it.serviceOrigin
             }
         // The deployment's own Trakt/Simkl/MDBList app ids are applied in `NuvioApplication.onCreate`
         // instead of here — the one `initialize` in the app that is not on this list, because it has to
