@@ -20,6 +20,7 @@ import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
+import io.ktor.websocket.readReason
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -702,7 +703,7 @@ object CompanionBridge {
                                     // A server-side close is otherwise invisible
                                     // here (?4401 unauthorized? in particular),
                                     // and it reads as a silent drop in the logs.
-                                    log.i { "Companion WS closed by server: ${frame.reason}" }
+                                    log.i { "Companion WS closed by server: ${frame.readReason()}" }
                                     break
                                 }
                                 else -> Unit
