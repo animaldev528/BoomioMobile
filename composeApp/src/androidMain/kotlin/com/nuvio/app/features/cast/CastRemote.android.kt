@@ -21,7 +21,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.DurationUnit
 
@@ -52,6 +51,18 @@ private const val RESUME_TOLERANCE_MS = 45_000L
  * already moved somewhere else.
  */
 private const val MAX_RESUME_SEEKS = 8
+
+/**
+ * How long to leave a resume seek alone before sending another.
+ *
+ * ⚠️ A seek is not free on the server: bsc has to restart its worker at the new
+ * offset and produce the first segments from there, measured at 3-5 s for a
+ * cold burst. Re-seeking on every poll while that happens restarts the burst
+ * over and over, and a receiver whose buffer is still filling answers by
+ * dropping the item (measured 2026-11-09 against a Roku over AirPlay: three
+ * seeks in 13 s, audio segments 4.6-5 s each, `error` at 18 s).
+ */
+private const val RESUME_SEEK_INTERVAL_MS = 12_000L
 
 /**
  * The remote for an AirPlay 2 session, backed by airkast.
@@ -104,6 +115,9 @@ internal actual object CastRemote {
 
     private var resumeSeeksLeft = 0
 
+    /** When the last resume seek was sent, so a recovering burst is not restarted. */
+    private var lastResumeSeekAtMs = 0L
+
     actual fun watch(
         device: CastDevice,
         title: String,
@@ -144,6 +158,7 @@ internal actual object CastRemote {
         // actually there, because a receiver can accept a seek and drop it.
         resumeTargetMs = startPositionMs
         resumeSeeksLeft = MAX_RESUME_SEEKS
+        lastResumeSeekAtMs = 0L
         if (startPositionMs > 0L) {
             scope.launch { seekToStart(startPositionMs) }
         }
@@ -276,6 +291,7 @@ internal actual object CastRemote {
         context = null
         roku = null
         resumeTargetMs = 0L
+        lastResumeSeekAtMs = 0L
         _state.value = null
     }
 
@@ -374,9 +390,16 @@ internal actual object CastRemote {
     private suspend fun reconcileResume(session: AirkastSession) {
         val target = resumeTargetMs
         if (target <= 0L) return
-        val at = _state.value?.positionMs ?: 0L
+        val state = _state.value ?: return
+        // Still opening the item: it takes the seek and drops it, and every extra
+        // seek restarts the server's burst underneath the first one.
+        if (state.loading) return
+        val at = state.positionMs
         if (at <= 0L) return
-        if (abs(at - target) <= RESUME_TOLERANCE_MS) {
+        // At or past the mark is where the viewer asked to be. Playing on from
+        // there is not drift, and seeking back would restart the burst for
+        // nothing — the old test compared the distance in both directions.
+        if (at >= target - RESUME_TOLERANCE_MS) {
             resumeTargetMs = 0L
             remoteLog.d { "resume: the receiver is at ${at}ms" }
             return
@@ -386,6 +409,9 @@ internal actual object CastRemote {
             remoteLog.w { "resume: giving up at ${at}ms, wanted ${target}ms" }
             return
         }
+        val now = System.currentTimeMillis()
+        if (lastResumeSeekAtMs != 0L && now - lastResumeSeekAtMs < RESUME_SEEK_INTERVAL_MS) return
+        lastResumeSeekAtMs = now
         resumeSeeksLeft--
         runCatching { session.seek(target.milliseconds) }.onFailure { error ->
             remoteLog.w { "resume seek failed: ${error.message}" }
