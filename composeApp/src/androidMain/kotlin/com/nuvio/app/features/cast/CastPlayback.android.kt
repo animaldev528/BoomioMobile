@@ -48,12 +48,13 @@ internal actual suspend fun playOnRenderer(
  * then cannot play: the television opens its player and the phone reports a
  * failure a second later.
  *
- * bsc remuxes any registered stream into HLS on the same streamId
- * (`/proxy/<id>/hls/index.m3u8`, a `-c copy` remux), and the stream is already
- * bound to the renderer's address, so the playlist's relative `seg-N.ts` URIs
- * resolve beside it and are authorised by the same rule the file itself was.
- * AirPlay gets the same playlist: an Apple receiver is HLS-native and no better
- * at MKV than the Cast receiver is.
+ * bsc remuxes any registered stream into HLS on the same streamId — the media
+ * playlist `/proxy/<id>/hls/index.m3u8` (a `-c copy` remux), reached through
+ * `/hls/master.m3u8` on a Roku, whose player cannot hear in-band fMP4 audio
+ * (see `castPlaybackUrl`) — and the stream is already bound to the renderer's
+ * address, so the playlist's relative URIs resolve beside it and are authorised
+ * by the same rule the file itself was. AirPlay gets the same playlist: an
+ * Apple receiver is HLS-native and no better at MKV than the Cast receiver is.
  *
  * A URL that is already playable is returned byte-identical, query included —
  * which also covers a server that has already turned it into a playlist.
@@ -76,7 +77,18 @@ internal fun castPlaybackUrl(device: CastDevice, url: String): String {
     // someone else's route is worse than the URL they gave us.
     if (!file.startsWith("video.")) return url
     val query = url.substringAfter('?', "")
-    val playlist = path.substringBeforeLast('/') + "/hls/index.m3u8"
+    // ⛔ A Roku's player cannot hear audio MUXED into fMP4/CMAF at all: handed
+    // the media playlist it plays the picture and reports `audio="none"`. The
+    // master is the only address at which bsc can declare the audio as a
+    // rendition — and name its codec, or the player refuses the stream at the
+    // master without fetching anything else. Both of Roku's cast doors are
+    // matched by User-Agent server-side, so this choice is only about which
+    // address to hand over. Every other renderer keeps the media playlist byte
+    // for byte: a master there would add a hop and change nothing.
+    val isRoku = device.ecosystem?.equals("Roku", ignoreCase = true) == true ||
+        device.name.contains("Roku", ignoreCase = true)
+    val playlist = path.substringBeforeLast('/') +
+        (if (isRoku) "/hls/master.m3u8" else "/hls/index.m3u8")
     return if (query.isEmpty()) playlist else "$playlist?$query"
 }
 
