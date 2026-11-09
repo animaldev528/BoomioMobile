@@ -50,6 +50,8 @@ object CastDiscovery {
     private const val SSDP_PORT = 1900
     private const val ROKU_PORT = 8060
     private const val CAST_PORT = 8009
+    /** The ecosystem string `CastModelCatalog.forDlna` gives a Fire TV. */
+    private const val AMAZON_ECOSYSTEM = "Amazon"
     private const val HTTP_TIMEOUT_MS = 1500
     private const val PROBE_TIMEOUT_MS = 400
     /** ECP answers on the LAN in milliseconds; anything slower is a stranger. */
@@ -76,52 +78,84 @@ object CastDiscovery {
             coroutineScope {
                 val ssdp = async { ssdpDevices(timeoutMillis) }
                 val mdns = async { CastMdns.discover(timeoutMillis) }
-                // ⚠️ One device can legitimately appear twice: a Roku answers
-                // `roku:ecp` AND advertises AirPlay (Roku OS 12.5+), and the two
-                // rows are two different ways to drive the same screen. The
-                // AirPlay row stays: it is the only path that does not need a
-                // Media Assistant channel on the Roku, so hiding it removed the
-                // fallback when ECP could not work (measured 2026-11-06).
+                // ⛔ The second door onto a Roku is no longer offered — see
+                // `hideDeadDoors`. A Roku does answer `roku:ecp` AND advertise
+                // AirPlay (Roku OS 12.5+), and the AirPlay row was kept on
+                // purpose until 2026-11-09 because it needs no Media Assistant
+                // channel. It does not play, though: see the measurement there.
                 val viaSsdp = ssdp.await()
                 (viaSsdp + mdns.await())
-                    .identifyAirplayRenderers(viaSsdp)
+                    .hideDeadDoors(viaSsdp)
                     .distinctByIdentified()
             }
         }
 
     /**
-     * An AirPlay row that names no capability row is given the ECP identity of
-     * the box it sits on.
+     * Removes the rows this build will not offer, and gives a surviving AirPlay
+     * row the ECP identity of the box it sits on.
      *
-     * Roku OS 12.5+ advertises `_airplay._tcp` with `model=MFiModelGroup/…` — a
-     * certification grouping, not a model the table knows — so a Roku picked
-     * from the AirPlay list reached bsf unidentified and got the floor, while
-     * the same box picked from the ECP list got its real profile. The two doors
-     * must not hand the viewer different release lists.
+     * ⛔ **Two doors are withheld because neither plays.**
      *
-     * [alreadyAsked] is what SSDP found: when the same address is in it as a
-     * Roku, its facts are reused and no second request is made. Only a target
-     * SSDP missed (mDNS catches boxes the M-SEARCH does not) costs a probe, and
-     * the probes run side by side so one slow box does not delay the others.
+     *  - **A Roku's AirPlay row.** `_airplay._tcp` and `roku:ecp` describe the
+     *    same box, and both were offered on purpose until 2026-11-09. Measured
+     *    that night on the Pi: over AirPlay the Roku fetched `master.m3u8`,
+     *    `index.m3u8`, three media segments and one audio window — every one
+     *    `200`, the last inside 570 ms — then stopped asking altogether and
+     *    errored ten seconds later, while the identical master, variants and
+     *    rendition played first time on an Apple TV. The receiver's own client
+     *    is the fault, nothing server-side is left to tune, so the row is hidden
+     *    and the Roku's ECP row (Media Assistant) is the one offered.
+     *  - **A Fire TV's Cast row.** It answers DIAL and opens `:8009`, which is
+     *    enough to be offered as a Cast target, but nothing plays through it.
      *
-     * Best-effort throughout: a target whose `:8060` does not answer keeps the
-     * record it already had.
+     * ⚠️ A Roku is only dropped when SSDP already found it as `roku:ecp`. If the
+     * M-SEARCH missed the box, the AirPlay row is the only way to reach it and
+     * it stays — that is the case the enrichment below exists for.
      */
-    private suspend fun List<CastDevice>.identifyAirplayRenderers(
+    private suspend fun List<CastDevice>.hideDeadDoors(
         alreadyAsked: List<CastDevice>,
     ): List<CastDevice> = coroutineScope {
         val rokuByIp = alreadyAsked
             .filter { it.protocol == CastProtocol.ROKU }
             .associateBy { it.ip }
-        map { device -> async { identify(device, rokuByIp[device.ip]) } }.awaitAll()
+        map { device ->
+            async {
+                if (device.isDeadDoor()) null else identify(device, rokuByIp[device.ip])
+            }
+        }.awaitAll().filterNotNull()
     }
 
-    private suspend fun identify(device: CastDevice, seenAsRoku: CastDevice?): CastDevice {
-        if (device.protocol != CastProtocol.AIRPLAY || device.hasCapabilityRow) return device
-        val ecp = seenAsRoku?.raw ?: ecpFacts(device.ip) ?: return device
-        // Protocol stays AIRPLAY: the facts only name the hardware. The AirPlay
-        // path is still the one the viewer chose, and it is the only one that
-        // needs no Media Assistant channel on the Roku.
+    /**
+     * A row that would be offered but cannot play. An Amazon row is a Fire TV:
+     * the catalog places one from its DIAL/DLNA facts, and the Cast target built
+     * from those facts is dead. The raw facts are checked as well as the placed
+     * row because a mDNS find carries no model the table can key on.
+     */
+    private fun CastDevice.isDeadDoor(): Boolean {
+        if (ecosystem.equals(AMAZON_ECOSYSTEM, ignoreCase = true)) return true
+        val facts = raw.mapKeys { it.key.lowercase() }
+        return facts["manufacturer"]?.contains("amazon", ignoreCase = true) == true ||
+            facts["modelname"]?.startsWith("AFT", ignoreCase = true) == true
+    }
+
+    /**
+     * An AirPlay row that names no capability row is given the ECP identity of
+     * the box it sits on, and one that is a Roku is dropped.
+     *
+     * Roku OS 12.5+ advertises `_airplay._tcp` with `model=MFiModelGroup/…` — a
+     * certification grouping, not a model the table knows. A Roku SSDP already
+     * found is [seenAsRoku] and is dropped: its `ROKU` row is offered instead.
+     *
+     * Best-effort throughout: a target whose `:8060` does not answer keeps the
+     * record it already had.
+     */
+    private suspend fun identify(device: CastDevice, seenAsRoku: CastDevice?): CastDevice? {
+        if (device.protocol != CastProtocol.AIRPLAY) return device
+        if (seenAsRoku != null) return null
+        if (device.hasCapabilityRow) return device
+        val ecp = ecpFacts(device.ip) ?: return device
+        // Protocol stays AIRPLAY: the facts only name the hardware, and this is
+        // the M-SEARCH-missed case, where AirPlay is the only door to the box.
         val placed = CastModelCatalog.device(
             protocol = CastProtocol.AIRPLAY,
             ip = device.ip,
