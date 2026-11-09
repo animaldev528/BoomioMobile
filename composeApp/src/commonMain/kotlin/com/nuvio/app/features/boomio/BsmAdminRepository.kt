@@ -5,6 +5,7 @@ import com.nuvio.app.core.network.SupabaseProvider
 import com.nuvio.app.features.addons.httpRequestRaw
 import com.nuvio.app.features.profiles.ProfileRepository
 import io.github.jan.supabase.auth.auth
+import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -184,7 +185,17 @@ internal object BsmAdminRepository {
      * exists, and why the row is also re-asked on every return to the foreground.
      */
     suspend fun refresh() {
-        val response = request("GET", WHOAMI_PATH)
+        // ⚠️ A 304 IS NOT AN ANSWER, and this method must never read it as one. It carries no body,
+        // so "unchanged" says nothing about who is an administrator — and the caller has already
+        // forgotten the previous answer ([clear]), which turns "keep what we last knew" into a
+        // decision to stay hidden. The request below forbids caching, so OkHttp will not revalidate
+        // on its own; but something else in front of bsm can still answer a conditional request with
+        // 304 (measured on the Pi, 2026-11-09: Express did exactly that for hours after the grant),
+        // so retry once against a URL no cache can key on before calling the exchange inconclusive.
+        var response = request("GET", WHOAMI_PATH)
+        if (response.status == 304) {
+            response = request("GET", "$WHOAMI_PATH?cache-bust=${Random.nextInt()}")
+        }
         when {
             response.status == 200 -> _isAdmin.value = response.payload?.isAdmin == true
             response.status == 401 && response.refusedByServer -> _isAdmin.value = false
@@ -247,11 +258,16 @@ internal object BsmAdminRepository {
     /**
      * Deletes an account and its household. Irreversible from here.
      *
-     * [confirmEmail] is re-checked server-side; the field exists because this is the one verb with no
-     * undo, not because the client's check is trusted.
+     * [confirm] is re-checked server-side; the field exists because this is the one verb with no
+     * undo, not because the client's check is trusted. The token is the account EMAIL, or the
+     * household NAME when the account has no email (a GoTrue anonymous sign-in leaves it empty).
+     *
+     * ⚠️ The JSON key is `confirm`, which is what the route reads. It was sent as `confirm_email`
+     * and the server ignored it — every delete from the app answered "does not match", which is
+     * why the phone could not delete anything at all.
      */
-    suspend fun deleteAccount(id: String, confirmEmail: String): AdminResult<String> {
-        val body = buildJsonObject { put("confirm_email", confirmEmail.trim()) }.toString()
+    suspend fun deleteAccount(id: String, confirm: String): AdminResult<String> {
+        val body = buildJsonObject { put("confirm", confirm.trim()) }.toString()
         val response = request("DELETE", "/tvpair/admin/accounts/${encode(id)}", body)
         return respond(response) { payload -> payload.scope ?: "nuvio" }
     }
@@ -373,6 +389,11 @@ internal object BsmAdminRepository {
                     put("Accept", "application/json")
                     put("Content-Type", "application/json")
                     put("Authorization", "Bearer $token")
+                    // ⚠️ Never let a cached copy answer for the admin plane. Everything here is live
+                    // operator state, and a revalidated GET comes back as 304 with no body — which
+                    // [refresh] cannot read. `no-store` makes OkHttp skip its cache entirely, so no
+                    // If-None-Match is ever sent for these calls.
+                    put("Cache-Control", "no-store")
                     // ⚠️ The header is ABSENT, not empty, when the profile has not loaded. An empty
                     // value would reach bsm as a claim that matches nothing, so the refusal would be
                     // `not_admin` — "you are not an administrator" — instead of `no_profile`, and
