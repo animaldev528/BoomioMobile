@@ -342,6 +342,45 @@ object CompanionBridge {
         }
     }
 
+    /**
+     * Pair with [deviceId] and WAIT until the hub has recorded it.
+     *
+     * [pairTo] launches the request and returns immediately, which is right for a
+     * tap on the device list but wrong before a `play` frame: bsc relays that
+     * frame to whichever TV Redis says this phone is paired with, so sending it
+     * while the pair request is still in flight starts the title on the TV the
+     * viewer just cast away from (or answers `not_paired`).
+     *
+     * @return true when the hub accepted the pair, or the phone was already
+     *   paired with this TV. False means the `play` frame must not be sent.
+     */
+    suspend fun pairToAndWait(deviceId: String): Boolean {
+        if (_pairedDeviceId.value == deviceId) return true
+        val token = BoomioSessionRepository.bearerToken() ?: return false
+        return try {
+            val response = http.post("${BoomioConfig.companionRestBaseUrl}/api/companion/pair") {
+                header(HttpHeaders.Authorization, "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody(json.encodeToString(PairRequest(deviceId = deviceId)))
+            }
+            if (response.status.isSuccess()) {
+                _pairedDeviceId.value = deviceId
+                BoomioSessionStorage.savePairedDeviceId(deviceId)
+                _deviceListError.value = null
+                true
+            } else {
+                _deviceListError.value = "TV is offline or unreachable (HTTP ${response.status.value})"
+                false
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            log.w(error) { "pairToAndWait failed" }
+            _deviceListError.value = "Could not reach the companion hub."
+            false
+        }
+    }
+
     /** Unpairs from the current TV (keeps the companion session). */
     fun unpair() {
         val token = BoomioSessionRepository.bearerToken() ?: return

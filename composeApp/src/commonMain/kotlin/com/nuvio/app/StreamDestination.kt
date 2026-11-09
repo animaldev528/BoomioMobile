@@ -699,11 +699,12 @@ internal fun StreamDestination(
                 val tvDeviceId = castTargetDevice.deviceId
                 castLog.d { "handoff: boomio companion play to ${castTargetDevice.name}" }
                 streamRouteScope.launch {
-                    // Pair the phone to this TV so its remote is where the viewer
-                    // already is if they open the companion screen. Best-effort:
-                    // a cast must not fail because pairing was already set.
-                    tvDeviceId?.let { CompanionBridge.pairTo(it) }
-                    val sent = CompanionBridge.playOnTv(
+                    // Pair FIRST and wait for the hub to record it. bsc relays a
+                    // `play` frame to whichever TV this phone is paired with, so a
+                    // frame sent while the pair request is still in flight would
+                    // start the title on the TV the viewer just cast away from.
+                    val paired = tvDeviceId?.let { CompanionBridge.pairToAndWait(it) } ?: false
+                    val sent = paired && CompanionBridge.playOnTv(
                         url = sourceUrl,
                         title = playerLaunch.title,
                         imdbId = effectiveVideoId.takeIf { it.startsWith("tt") },
