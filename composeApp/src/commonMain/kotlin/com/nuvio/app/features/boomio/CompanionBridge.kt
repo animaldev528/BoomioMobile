@@ -34,8 +34,10 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -355,7 +357,11 @@ object CompanionBridge {
      *   paired with this TV. False means the `play` frame must not be sent.
      */
     suspend fun pairToAndWait(deviceId: String): Boolean {
-        if (_pairedDeviceId.value == deviceId) return true
+        // ⚠️ Always POST, even when the cached pair names this TV. The cache is a
+        // hint that outlives the hub's record (the pair key carries a TTL and is
+        // dropped when either side re-enrols), so trusting it made the phone skip
+        // the one call that guarantees `play` is routed to this TV — and the hub
+        // answered `not_paired` into a socket nobody was reading.
         val token = BoomioSessionRepository.bearerToken() ?: return false
         return try {
             val response = http.post("${BoomioConfig.companionRestBaseUrl}/api/companion/pair") {
@@ -402,7 +408,9 @@ object CompanionBridge {
     // ── Remote commands ───────────────────────────────────────────────────────
 
     /** Play / pause the paired TV. */
-    fun togglePlayPause() = sendFrame { put("type", "stealth_playpause") }
+    fun togglePlayPause() {
+        sendFrame { put("type", "stealth_playpause") }
+    }
 
     /** Absolute seek to [positionMs] on the paired TV. */
     fun seekTo(positionMs: Long) =
@@ -531,16 +539,26 @@ object CompanionBridge {
      *   that, because a dropped frame and a started playback look identical from
      *   the outside otherwise.
      */
-    fun playOnTv(
+    suspend fun playOnTv(
         url: String,
         title: String,
         imdbId: String? = null,
         season: Int? = null,
         episode: Int? = null,
         resumeFromMs: Long = 0L,
+        connectTimeoutMs: Long = 8_000L,
     ): Boolean {
-        if (url.isBlank() || wsSession == null) return false
-        sendFrame {
+        if (url.isBlank()) return false
+        // A cast is usually the first thing that needs the socket after the app
+        // comes up, so the socket is often still connecting — and sometimes not
+        // started at all. Checking `wsSession != null` here raced that handshake
+        // and reported "sent" for a frame that had nowhere to go. Wait for the
+        // connection instead, and say so when it does not arrive.
+        if (!awaitCompanionSocket(connectTimeoutMs)) {
+            log.w { "playOnTv: companion socket not connected — not sending" }
+            return false
+        }
+        val sent = sendFrameChecked {
             put("type", "play")
             put("url", url)
             put("title", title)
@@ -549,7 +567,24 @@ object CompanionBridge {
             episode?.let { put("episode", it) }
             if (resumeFromMs > 0L) put("resumeFrom", resumeFromMs)
         }
-        return true
+        log.d { "playOnTv: play frame queued=$sent title=$title" }
+        if (!sent) log.w { "playOnTv: frame dropped by the outgoing queue" }
+        return sent
+    }
+
+    /**
+     * Waits for a live companion socket, starting the bridge if it was never
+     * started. Returns false on timeout, when there is no session, or when the
+     * socket closes before it becomes usable.
+     */
+    private suspend fun awaitCompanionSocket(timeoutMs: Long): Boolean {
+        if (wsSession != null && _connected.value) return true
+        ensureStarted()
+        val session = BoomioSessionRepository.session.value ?: return false
+        if (wsSession == null && connectJob?.isActive != true && reconnectJob?.isActive != true) {
+            connect(session)
+        }
+        return withTimeoutOrNull(timeoutMs) { _connected.first { it } } ?: false
     }
 
     /**
@@ -620,9 +655,20 @@ object CompanionBridge {
         }
 
     private inline fun sendFrame(build: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit) {
-        val session = wsSession ?: return
+        sendFrameChecked(build)
+    }
+
+    /**
+     * [sendFrame] with the queue result kept. A closed or overflowing outgoing
+     * channel drops the frame silently, and for a `play` handoff that silence is
+     * indistinguishable from success — the caller has to be able to fall back.
+     */
+    private inline fun sendFrameChecked(
+        build: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit,
+    ): Boolean {
+        val session = wsSession ?: return false
         val payload = buildJsonObject(build)
-        session.outgoing.trySend(Frame.Text(payload.toString()))
+        return session.outgoing.trySend(Frame.Text(payload.toString())).isSuccess
     }
 
     // ── Connection lifecycle ──────────────────────────────────────────────────
@@ -652,7 +698,16 @@ object CompanionBridge {
                         for (frame in incoming) {
                             when (frame) {
                                 is Frame.Text -> handleInbound(frame.readText())
-                                is Frame.Close -> break
+                                is Frame.Close -> {
+                                    // A server-side close is otherwise invisible
+                                    // here (?4401 unauthorized? in particular),
+                                    // and it reads as a silent drop in the logs.
+                                    log.i {
+                                        "Companion WS closed by server code=${frame.code} " +
+                                            "reason=${frame.reason.ifBlank { "-" }}"
+                                    }
+                                    break
+                                }
                                 else -> Unit
                             }
                         }
@@ -717,6 +772,18 @@ object CompanionBridge {
         val msg = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
         val type = msg["type"]?.jsonPrimitive?.contentOrNull ?: return
         when (type) {
+            // The hub answers a refused frame with `error` rather than closing:
+            // `not_paired` when the pair record is missing, `method_not_allowed`
+            // when the bsc build predates the frame. Both mean "the frame did
+            // nothing", which must never look like a started cast.
+            "error", "companion:rate_limited" -> {
+                val code = msg["code"]?.jsonPrimitive?.contentOrNull
+                    ?: msg["reason"]?.jsonPrimitive?.contentOrNull
+                log.w { "companion refused a frame: type=$type code=$code" }
+                if (code == "not_paired") {
+                    _deviceListError.value = "This phone is not paired with a TV."
+                }
+            }
             "companion:state_restored" -> {
                 val tvDeviceId = msg["tvDeviceId"]?.jsonPrimitive?.contentOrNull
                 if (tvDeviceId != null) {

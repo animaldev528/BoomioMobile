@@ -15,6 +15,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -30,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -111,6 +114,10 @@ internal fun CastPickerDialog(
         (discovered + companionDevices.mapNotNull { it.toCastDevice() }).distinctBy { it.id }
     }
 
+    // Which row is the current target. `null` means "this device", so the picker
+    // can show the way back and mark it as the active choice.
+    val current by CastSession.target.collectAsStateWithLifecycle()
+
     fun select(device: CastDevice) {
         error = null
         if (device.protocol != CastProtocol.AIRPLAY) {
@@ -142,33 +149,59 @@ internal fun CastPickerDialog(
         onDismissRequest = onDismissRequest,
         title = stringResource(Res.string.cast_picker_title),
     ) {
-        when {
-            scanning -> Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                modifier = Modifier.padding(vertical = 8.dp),
-            ) {
-                NuvioLoadingIndicator(size = 20.dp)
-                Text(
-                    text = stringResource(Res.string.cast_picker_scanning),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+        LazyColumn(
+            modifier = Modifier.heightIn(max = 320.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            // "This device" is a target like any other — and the way back. Once
+            // a renderer is chosen this sheet is the only place that can say
+            // "play here again", so leaving it out made the choice one-way: the
+            // phone kept sending every later Play to the TV with no way out but
+            // clearing the app's state.
+            item(key = "__this_device__") {
+                CastDeviceRow(
+                    name = stringResource(Res.string.cast_this_device),
+                    subtitle = stringResource(Res.string.cast_this_device_subtitle),
+                    icon = Icons.Rounded.Smartphone,
+                    selected = current == null,
+                    onClick = {
+                        CastSession.clear()
+                        onDismissRequest()
+                    },
                 )
             }
-
-            devices.isEmpty() -> Text(
-                text = stringResource(Res.string.cast_picker_empty),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
-
-            else -> LazyColumn(
-                modifier = Modifier.heightIn(max = 320.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                items(devices, key = { it.id }) { device ->
-                    CastDeviceRow(device = device, onClick = { select(device) })
+            items(devices, key = { it.id }) { device ->
+                CastDeviceRow(
+                    name = device.name,
+                    subtitle = device.subtitle(),
+                    icon = Icons.Rounded.Cast,
+                    selected = current?.id == device.id,
+                    onClick = { select(device) },
+                )
+            }
+            if (scanning) {
+                item(key = "__scanning__") {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    ) {
+                        NuvioLoadingIndicator(size = 20.dp)
+                        Text(
+                            text = stringResource(Res.string.cast_picker_scanning),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            } else if (devices.isEmpty()) {
+                item(key = "__empty__") {
+                    Text(
+                        text = stringResource(Res.string.cast_picker_empty),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
                 }
             }
         }
@@ -253,9 +286,13 @@ internal fun CastPickerDialog(
 
 @Composable
 private fun CastDeviceRow(
-    device: CastDevice,
+    name: String,
+    subtitle: String,
+    icon: ImageVector,
+    selected: Boolean,
     onClick: () -> Unit,
 ) {
+    val accent = MaterialTheme.colorScheme.primary
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -265,24 +302,35 @@ private fun CastDeviceRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            imageVector = Icons.Rounded.Cast,
+            imageVector = icon,
             contentDescription = null,
+            tint = if (selected) accent else MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.width(20.dp),
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = device.name,
+                text = name,
                 style = MaterialTheme.typography.titleSmall,
+                color = if (selected) accent else MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = device.subtitle(),
+                text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (selected) {
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.Rounded.Check,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.width(18.dp),
             )
         }
     }

@@ -2733,4 +2733,6 @@
     <string name="cast_target_boomio">Boomio TV</string>
     <string name="cast_target_selected">Selected</string>
     <string name="cast_target_clear">Play on the phone instead</string>
+    <string name="cast_this_device">This device</string>
+    <string name="cast_this_device_subtitle">Play here on this phone</string>
 </resources>
