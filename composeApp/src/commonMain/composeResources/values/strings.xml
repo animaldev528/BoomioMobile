@@ -691,6 +691,7 @@
     <string name="admin_delete_title">Delete this account</string>
     <string name="admin_delete_warning">This deletes the Nuvio account and everything on it, and cannot be undone from here. A verified backup is taken first, so it can still be recovered by hand on the box.</string>
     <string name="admin_delete_confirm_label">Type the account’s email to confirm</string>
+    <string name="admin_delete_confirm_name_label">Type the household’s name to confirm</string>
     <string name="admin_delete">Delete account</string>
     <string name="admin_deleting">Deleting…</string>
     <string name="companion_unlinked_title">Not connected</string>

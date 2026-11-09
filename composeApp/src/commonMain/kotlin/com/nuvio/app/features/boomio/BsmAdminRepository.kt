@@ -258,11 +258,16 @@ internal object BsmAdminRepository {
     /**
      * Deletes an account and its household. Irreversible from here.
      *
-     * [confirmEmail] is re-checked server-side; the field exists because this is the one verb with no
-     * undo, not because the client's check is trusted.
+     * [confirm] is re-checked server-side; the field exists because this is the one verb with no
+     * undo, not because the client's check is trusted. The token is the account EMAIL, or the
+     * household NAME when the account has no email (a GoTrue anonymous sign-in leaves it empty).
+     *
+     * ⚠️ The JSON key is `confirm`, which is what the route reads. It was sent as `confirm_email`
+     * and the server ignored it — every delete from the app answered "does not match", which is
+     * why the phone could not delete anything at all.
      */
-    suspend fun deleteAccount(id: String, confirmEmail: String): AdminResult<String> {
-        val body = buildJsonObject { put("confirm_email", confirmEmail.trim()) }.toString()
+    suspend fun deleteAccount(id: String, confirm: String): AdminResult<String> {
+        val body = buildJsonObject { put("confirm", confirm.trim()) }.toString()
         val response = request("DELETE", "/tvpair/admin/accounts/${encode(id)}", body)
         return respond(response) { payload -> payload.scope ?: "nuvio" }
     }

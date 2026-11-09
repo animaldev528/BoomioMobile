@@ -49,6 +49,7 @@ import nuvio.composeapp.generated.resources.admin_create
 import nuvio.composeapp.generated.resources.admin_creating
 import nuvio.composeapp.generated.resources.admin_delete
 import nuvio.composeapp.generated.resources.admin_delete_confirm_label
+import nuvio.composeapp.generated.resources.admin_delete_confirm_name_label
 import nuvio.composeapp.generated.resources.admin_delete_title
 import nuvio.composeapp.generated.resources.admin_delete_warning
 import nuvio.composeapp.generated.resources.admin_deleting
@@ -477,6 +478,13 @@ private fun AccountView(
 
         DeleteAccountCard(
             accountId = accountId,
+            // The token to type follows what the account actually has: an email, or — for a
+            // GoTrue anonymous sign-in, whose email is empty — the household name. Saying "email"
+            // when there is none is an instruction nobody can follow.
+            confirmHint = stringResource(
+                if (current.account.email == null) Res.string.admin_delete_confirm_name_label
+                else Res.string.admin_delete_confirm_label
+            ),
             confirmEmail = confirmEmail,
             onConfirmEmailChange = { confirmEmail = it; notice = null },
             busy = busy,
@@ -624,12 +632,14 @@ private fun DevicesCard(devices: List<AdminDevice>, onOpenDevice: (String) -> Un
  * The one verb with no undo.
  *
  * A card rather than a dialog on purpose: it needs an explanation sentence and a text field, and a
- * dialog that long is worse than a card in a list. The button stays disabled until the typed email
- * matches, which is a guard against a mis-tap — NOT the guard, which is server-side.
+ * dialog that long is worse than a card in a list. The button stays disabled until the typed token
+ * is non-blank, which is a guard against a mis-tap — NOT the guard, which is server-side. The token
+ * is the account email, or the household name when the account has none (anonymous sign-in).
  */
 @Composable
 private fun DeleteAccountCard(
     accountId: String,
+    confirmHint: String,
     confirmEmail: String,
     onConfirmEmailChange: (String) -> Unit,
     busy: Boolean,
@@ -653,7 +663,7 @@ private fun DeleteAccountCard(
             OutlinedTextField(
                 value = confirmEmail,
                 onValueChange = onConfirmEmailChange,
-                label = { Text(stringResource(Res.string.admin_delete_confirm_label)) },
+                label = { Text(confirmHint) },
                 singleLine = true,
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
