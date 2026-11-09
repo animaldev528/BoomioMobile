@@ -177,9 +177,9 @@ internal object OverlayProvisioning {
         //
         // ⚠️ **One record, two addresses, and off-LAN the second is the one that routes.** The v2
         // record names `lan=` and `wan=` itself, so a single lookup of *this client's* record
-        // (`discoveryRecordName` — the bootstrap name unless this client was given a server of its
-        // own) supplies the whole walk. That is why a rejection below means "try the next address"
-        // and never "give up", and why only a set that all fails ends the search — the LAN literal
+        // (`discoveryRecordName` — the FQDN this client was given) supplies the whole walk. That is
+        // why a rejection below means "try the next address" and never "give up", and why only a
+        // set that all fails ends the search — the LAN literal
         // is readable everywhere but routable in one place, and stopping at it would hand the
         // dialler an address nothing off-LAN can reach, which is precisely the failure this
         // channel exists to remove.
@@ -191,10 +191,10 @@ internal object OverlayProvisioning {
         // dials the target it is handed, once, and falls back to HTTPS rather than retrying), so
         // the probe is the only thing standing between a roam and a spent attempt.
 
-        // The record for THIS client's server, not the compiled bootstrap name: on a deployment
-        // whose host was entered by hand, [PROV_RECORD] names somebody else's box and would hand
-        // the dialler a stranger's targets. See [OverlayEndpointDiscovery.discoveryRecordName].
-        val record = OverlayEndpointDiscovery.discoveryRecordName
+        // The record for THIS client's server — the FQDN it was configured with. There is no
+        // compiled fallback: with no server configured there is no record to read, and the caller
+        // falls back to HTTPS. See [OverlayEndpointDiscovery.discoveryRecordName].
+        val record = OverlayEndpointDiscovery.discoveryRecordName ?: return null
         val resolved = OverlayDnsClient.resolve(context, record, RESOLVE_BUDGET_MS) ?: run {
             Log.i(TAG, "'$record' did not resolve")
             return null

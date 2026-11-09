@@ -5,11 +5,9 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.SystemClock
 import android.util.Log
-import com.nuvio.app.core.network.ServerAliases
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
-import com.nuvio.app.features.boomio.BOOMIO_SERVICE_HOST
 import com.nuvio.app.features.boomio.BoomioConfig
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -87,9 +85,11 @@ private const val GATE_TIMEOUT_MS = 900
 internal object OverlayEndpointDiscovery {
 
     /**
-     * The **one name** — the discovery record, and the service FQDN every URL, SNI and certificate
-     * check stays on. It is [BOOMIO_SERVICE_HOST] and nothing else, declared there so this ladder
-     * and the client's URL floor cannot drift apart.
+     * **How a deployment publishes itself: one name, one record, one tuple.**
+     *
+     * The discovery record sits on the same FQDN the client was given at bootstrap — the name every
+     * URL, SNI and certificate check stays on. There is no second name for the tuple, and no
+     * compiled one to fall back to.
      *
      * ⚠️ **One name, because the split it replaced bought nothing.** `boomio-prov` (carrying the
      * tuple) and `boomio.duckdns.org` (the origin) were two DuckDNS names spending two `TXT` slots
@@ -112,18 +112,19 @@ internal object OverlayEndpointDiscovery {
      * address that cannot work, which is also why it is never baked as a tunnel *endpoint*: it is an
      * origin and a lookup, never a dial target off-LAN.
      *
-     * ⚠️ **This is a bootstrap constant, and it has to be compiled in.** A client that has never
-     * reached the server has never read a publication to learn a name from, so there is nothing to
-     * discover it *from*; it is also what a person types by hand in the absence of anything else,
-     * which is why rung 3 accepts it too.
+     * ⚠️ **There is no compiled-in record name.** The name rung 2 asks about is the server FQDN the
+     * person entered — the one name that also owns the auth backend and every boomio base. A
+     * constant here would be somebody else's server baked into every build, which is exactly how a
+     * client pointed at one deployment silently enrolled against another. With no server configured
+     * the rung is skipped; rung 1 (mDNS) still finds a box on the LAN, and off it the ladder asks
+     * the person for the FQDN rather than guessing.
      *
-     * ⚠️ **`boomio-local.tracemonkey.org` and `boomio-lan.duckdns.org` used to sit in this ladder
-     * and are retired.** `boomio-local` was never published in any form — measured 2026-10-07 as
-     * NXDOMAIN from the house dnsmasq, the router and `1.1.1.1` alike — and `boomio-lan` existed
-     * only to hold the private address this name now holds itself. `boomio-tls.duckdns.org` is
+     * ⚠️ **`boomio-local.tracemonkey.org` and `boomio-lan.duckdns.org` were retired from this
+     * ladder.** `boomio-local` was never published in any form — measured 2026-10-07 as NXDOMAIN
+     * from the house dnsmasq, the router and `1.1.1.1` alike — and `boomio-lan` existed only to
+     * hold the private address the service name now holds itself. `boomio-tls.duckdns.org` is
      * *not* part of that cut: it is still the mTLS plane.
      */
-    internal const val PROV_RECORD = BOOMIO_SERVICE_HOST
 
     /**
      * The record name this process has settled on, when it is no longer in [BoomioConfig].
@@ -148,10 +149,9 @@ internal object OverlayEndpointDiscovery {
      * alternative is a client that forgets its own server.** [BoomioConfig.overlayEndpoint] is
      * runtime state: [accept] overwrites it with the literal it found, and the next process death
      * takes that with it. A deployment entered by hand therefore survived exactly until Android
-     * reclaimed the process — after which the ladder fell back to [PROV_RECORD], which is the
-     * *reference* deployment's name. A client that had been pointed at its own box then silently
-     * began talking to somebody else's, and wiping the app "fixed" nothing because the typed value
-     * had never been app data.
+     * reclaimed the process — after which the ladder had no name at all and no way to recover the
+     * one the person had typed. A client that had been pointed at its own box then lost it, and
+     * wiping the app "fixed" nothing because the typed value had never been app data.
      *
      * Only a value a human supplied is written here. What [accept] learns is a property of the
      * network the client happened to be on, and must not outlive it.
@@ -160,43 +160,42 @@ internal object OverlayEndpointDiscovery {
     private var configuredEndpoint: String? = null
 
     /**
-     * The name rung 2 asks about, and the reason it is not simply [PROV_RECORD].
+     * The name rung 2 asks about — the server FQDN this client was given, or null when it has none.
      *
-     * ⚠️ **[PROV_RECORD] is the BOOTSTRAP name, not this deployment's name.** It is compiled into
-     * every build and it is the reference deployment's. Rung 2 used to resolve it unconditionally,
-     * which made a configured server unreachable in a way that looks like a server bug: a client
-     * whose person had entered their own host still asked DNS about the compiled one, accepted the
-     * tuple it found there, and `applyServicePins` then rewrote the origin from that tuple's `svc`.
-     * The typed server lost to a constant, on every launch, and wiping the app changed nothing
-     * because the constant is not app data.
+     * ⚠️ **It comes from the client's own configuration, never from a constant.** The server is
+     * the FQDN a person entered at bootstrap: the same name that owns the auth backend and every
+     * boomio base. Rung 2 used to resolve a compiled name unconditionally, which made a configured
+     * server unreachable in a way that looks like a server bug: a client whose person had entered
+     * their own host still asked DNS about the compiled one, accepted the tuple it found there, and
+     * `applyServicePins` then rewrote the origin from that tuple's `svc`. The typed server lost to
+     * a constant, on every launch, and wiping the app changed nothing because the constant is not
+     * app data.
      *
-     * A bootstrap default is only correct until the client has been told something. After that the
-     * best answer to "which deployment is this?" is the name in [BoomioConfig.overlayEndpoint], or
-     * — once the ladder has replaced that with the literal it found — [recordInUse].
+     * The order of the three sources is the order in which they become true: the overlay field a
+     * person typed ([configuredEndpoint]), the server chosen in the connection sheet
+     * ([customServerHost]), then the name this process has already resolved ([recordInUse]).
      *
-     * A **literal** never becomes a record name: there is no TXT record to read for an address, and
-     * the deployment that owns [PROV_RECORD] is somebody else's.
+     * A **literal** never becomes a record name: there is no TXT record to read for an address.
+     *
+     * With no server configured this is null, and rung 2 is skipped rather than falling back to a
+     * compiled name belonging to somebody else's deployment.
      */
-    internal val discoveryRecordName: String
-        get() = configuredRecordName() ?: configuredServerRecordName() ?: recordInUse ?: PROV_RECORD
+    internal val discoveryRecordName: String?
+        get() = configuredRecordName() ?: configuredServerRecordName() ?: recordInUse
 
     /** The address this client was told to use: a person's entry first, the configuration second. */
     private fun configuredAuthority(): String =
         configuredEndpoint?.trim()?.takeIf { it.isNotEmpty() }
             ?: BoomioConfig.overlayEndpoint.trim()
 
-    /** [configuredAuthority] as a name, or null when it is blank. */
+    /** [configuredAuthority] as a name, or null when it is blank or a literal. */
     private fun configuredRecordName(): String? {
         val configured = configuredAuthority()
         if (configured.isEmpty()) return null
         val host = parseEndpointAuthority(configured, DEFAULT_WG_PORT)?.first ?: return null
-        // ⚠️ **A known literal is not "no record" — it is the same box in its other spelling.**
-        // A person who typed `192.168.1.65` into the manual field named a deployment that
-        // publishes under `boomiopi.duckdns.org`; refusing the record because the input parsed as
-        // an address would leave rung 2 resolving the compiled name, i.e. the other box.
-        val canonical = ServerAliases.canonicalHost(host)
-        if (canonical != host.trim().lowercase()) return canonical
-        return if (literalOrNull(host) == null) host else null
+        // ⚠️ **A literal names no record.** There is no TXT to read for an address, so rung 2 is
+        // skipped; rung 3 dials the literal as written, which is the no-LAN-DNS case.
+        return normaliseHost(host).takeIf { literalOrNull(it) == null }
     }
 
     /**
@@ -204,23 +203,26 @@ internal object OverlayEndpointDiscovery {
      *
      * The screen that chooses a server writes a Supabase configuration, not an overlay endpoint —
      * but on this deployment they are the same box, and the box publishes one tuple under one
-     * name. Without this, a phone told to use the second box still asked DNS about the compile-time
-     * name and minted/paired/enrolled against the reference deployment: the "VPN came up on the
-     * box I never enrolled to" failure, and the reason a Pi code never appeared on the Pi's page.
+     * name. The name is [ServerConfiguration.serviceOrigin]: the FQDN the person entered at
+     * bootstrap, which is also every boomio base's origin. Without this, a phone told to use a
+     * second box still asked DNS about whatever name the build knew and enrolled against the wrong
+     * deployment.
      */
-    private fun configuredServerRecordName(): String? {
-        val host = customServerHost() ?: return null
-        val canonical = ServerAliases.canonicalHost(host)
-        return canonical.takeIf { literalOrNull(it) == null }
-    }
+    private fun configuredServerRecordName(): String? =
+        customServerHost()
+            ?.let { normaliseHost(it) }
+            ?.takeIf { literalOrNull(it) == null }
 
-    /** The host of the saved custom server, or null when the build's own server is active. */
+    /** The host of the saved custom server's origin, or null when the build's own server is active. */
     private fun customServerHost(): String? =
         ServerConfigurationRepository.active.value
             .takeIf { it.isCustom }
-            ?.backendUrl
+            ?.serviceOrigin
             ?.let { hostOf(it) }
             ?.takeIf { it.isNotBlank() }
+
+    /** Lowercase, no trailing dot — the form a typed host and a published name are compared in. */
+    private fun normaliseHost(host: String): String = host.trim().trimEnd('.').lowercase()
 
     /** Reads the persisted entry back, before anything can walk the ladder against the default. */
     private fun restoreConfiguredEndpoint(context: Context) {
@@ -518,22 +520,21 @@ internal object OverlayEndpointDiscovery {
         // TTL is only ever armed over an answer worth keeping.
         //
         // ⚠️ A configured server is the HTTPS origin from the first walk, not from the first
-        // record. `serviceOrigin` otherwise stays on the compiled bootstrap name until a tuple's
-        // `svc` rewrites it, so a client that HAS been given the right host still sends its REST,
-        // auth and addon calls to the bootstrap deployment until discovery succeeds — and on a
-        // first-ever launch, or on a server whose publisher is not yet running, that is forever.
+        // record. [BoomioConfig.serviceOrigin] is blank on a cold start — there is no compiled name
+        // to floor on — so a client that HAS been given the right host would otherwise send its
+        // REST, auth and addon calls nowhere until discovery succeeded. The configured FQDN fills
+        // it here, before any rung walks.
         //
-        // Only while the origin is still the bootstrap floor: once a record's `svc` has been
-        // applied it is authoritative, because that name is what the certificate is issued for.
-        // Rewriting it back to a typed alias afterwards would fail SNI for the right reason, at
-        // the wrong time. The bootstrap name itself makes this a no-op.
-        if (BoomioConfig.serviceOrigin.trimEnd('/') == "https://$PROV_RECORD") {
-            BoomioConfig.serviceOrigin = "https://${discoveryRecordName}"
-            // The auth plane holds a *snapshot* of the origin ([ServerConfigurationRepository]), so
-            // moving the origin without telling it only moves the media plane. Same hand-off
-            // [applyServicePins] makes for a record's `svc`, and equally a no-op on a cold start
-            // that names the bootstrap host.
-            scope.launch { ServerConfigurationRepository.onServiceOriginChanged() }
+        // Only while blank: once a record's `svc` has been applied it is authoritative, because
+        // that name is what the certificate is issued for.
+        if (BoomioConfig.serviceOrigin.isBlank()) {
+            discoveryRecordName?.let { name ->
+                BoomioConfig.serviceOrigin = "https://$name"
+                // The auth plane holds a *snapshot* of the origin ([ServerConfigurationRepository]),
+                // so moving the origin without telling it only moves the media plane. Same hand-off
+                // [applyServicePins] makes for a record's `svc`.
+                scope.launch { ServerConfigurationRepository.onServiceOriginChanged() }
+            }
         }
 
         // ⚠️ **An explicit answer replaces the ladder rather than joining it.** When a person has
@@ -604,8 +605,9 @@ internal object OverlayEndpointDiscovery {
             scheduleMissRetry()
             return@withLock publish(
                 OverlayEndpointStatus.NeedsManual(
-                    "No boomio server was found — tried mDNS, ${discoveryRecordName} and any saved " +
-                        "address. Enter the server's address to continue.",
+                    "No boomio server was found — tried mDNS, " +
+                        "${discoveryRecordName ?: "the saved server"} and the published " +
+                        "addresses. Enter the server's FQDN to continue.",
                 ),
             )
         }
@@ -672,8 +674,8 @@ internal object OverlayEndpointDiscovery {
     }
 
     /**
-     * Rung 2 — the discovery record, [discoveryRecordName] (the bootstrap [PROV_RECORD]
-     * unless this client was given a server of its own).
+     * Rung 2 — the discovery record, [discoveryRecordName] (the server FQDN this client was given;
+     * skipped when it has none).
      *
      * ⚠️ **A record with no `TXT` is not an endpoint, and is not treated as one.** An address
      * without the server's public key cannot produce a handshake, so accepting it would stop the
@@ -692,7 +694,7 @@ internal object OverlayEndpointDiscovery {
     private suspend fun rung2DiscoveryRecord(context: Context): OverlayEndpoint? {
         // The name this client owns when there is one; see [discoveryRecordName]. Remembered here
         // as well, because [accept] is about to overwrite the configuration with a literal.
-        val record = discoveryRecordName
+        val record = discoveryRecordName ?: return null
         recordInUse = record
         val resolved = OverlayDnsClient.resolve(context, record, RUNG2_BUDGET_MS) ?: return null
         // Same reasoning as rung 1: recorded whether or not this record's key is usable, because
@@ -853,13 +855,13 @@ internal object OverlayEndpointDiscovery {
             ?.let { parseEndpointAuthority(it, DEFAULT_WG_PORT)?.first }
             ?: customServerHost()
             ?: return true
-        val canonical = ServerAliases.canonicalHost(configuredHost)
+        val canonical = normaliseHost(configuredHost)
         // Either spelling may appear on the wire — the advert always names the deployment by its
-        // published `svc=`, while a person may have typed the address (see [ServerAliases]) — so
-        // both sides are compared through the table rather than as strings.
+        // published `svc=`, while a person may have typed the same name with different case or a
+        // trailing dot — so both sides are compared in normalised form.
         val svc = targets.svcName?.trim()?.takeIf { it.isNotEmpty() }
-        if (svc != null && ServerAliases.sameHost(svc, canonical)) return true
-        return targets.inOrder().any { ServerAliases.sameHost(it.host, canonical) }
+        if (svc != null && normaliseHost(svc) == canonical) return true
+        return targets.inOrder().any { normaliseHost(it.host) == canonical }
     }
 
     /**

@@ -2,25 +2,17 @@ package com.nuvio.app.core.overlay
 
 import android.content.Context
 import android.util.Log
-import com.nuvio.app.features.boomio.BOOMIO_SERVICE_HOST
 import com.nuvio.app.features.boomio.BoomioConfig
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 
 private const val TAG = "OverlayProbe"
 
-/**
- * What the probe queries when [BoomioConfig.serviceOrigin] yields no host.
- *
- * Belt and braces rather than a real path: the origin's own default is a well-formed URL, so this
- * only fires if a caller has written something unparseable into that field. Naming a host anyway
- * is better than probing the empty string, which would report a DNS failure and be read as a
- * broken tunnel.
- *
- * It is [BOOMIO_SERVICE_HOST] rather than a fourth copy of the literal: the probe and the ladder
- * must agree about the name, or a debug run would report a failure that is really a typo.
+/*
+ * The probe has no compiled-in DNS name. It asks about the host the client is actually configured
+ * to dial — [BoomioConfig.serviceOrigin] — and refuses to run when there is none, because probing
+ * an empty name reports a DNS failure that reads as a broken tunnel.
  */
-private const val DEFAULT_PROBE_DNS_NAME = BOOMIO_SERVICE_HOST
 
 /**
  * Debug-only: proves the userspace tunnel works **inside an installed APK**.
@@ -87,9 +79,11 @@ object OverlayProbe {
      *
      * A `get()` rather than a `const`: the origin changes at runtime, and a probe that ran before
      * discovery finished would otherwise be frozen on the default for the life of the process.
+     *
+     * Null until the client has been given a server; [runInternal] refuses to probe without one.
      */
-    private val PROBE_DNS_NAME: String
-        get() = hostOf(BoomioConfig.serviceOrigin) ?: DEFAULT_PROBE_DNS_NAME
+    private val PROBE_DNS_NAME: String?
+        get() = hostOf(BoomioConfig.serviceOrigin)
 
     /**
      * Wall-clock bound on the in-tunnel query.
@@ -137,6 +131,14 @@ object OverlayProbe {
             return report.toString().also { Log.i(TAG, it) }
         }
 
+        val probeDnsName = PROBE_DNS_NAME
+        if (probeDnsName == null) {
+            report.appendLine()
+            report.appendLine("RESULT: cannot run — no server configured.")
+            report.appendLine("        Enter the server's FQDN in the app first.")
+            return report.toString().also { Log.i(TAG, it) }
+        }
+
         // The client's public key, printed *before* the tunnel comes up, because it is needed
         // server-side to enroll this peer and the operator has to see it even if `up()` then
         // fails. This is the one step that is still manual: adding the peer is a write to the
@@ -164,8 +166,8 @@ object OverlayProbe {
         }
 
         report.appendLine()
-        report.appendLine("in-tunnel query: TCP $PROBE_DNS_HOST:$PROBE_DNS_PORT for $PROBE_DNS_NAME")
-        report.appendLine(queryOverTunnel(tunnel))
+        report.appendLine("in-tunnel query: TCP $PROBE_DNS_HOST:$PROBE_DNS_PORT for $probeDnsName")
+        report.appendLine(queryOverTunnel(tunnel, probeDnsName))
 
         report.appendLine()
         report.appendLine("wireguard-go status: ${tunnel.status()}")
@@ -183,7 +185,7 @@ object OverlayProbe {
      * the same path the relay will use, so a pass here exercises the U2 seam as well as the
      * transport.
      */
-    private fun queryOverTunnel(tunnel: OverlayWgTunnel): String {
+    private fun queryOverTunnel(tunnel: OverlayWgTunnel, dnsName: String): String {
         var result = "(no result — the query did not finish)"
         val worker = Thread {
             result = try {
@@ -191,7 +193,7 @@ object OverlayProbe {
                     .dial(PROBE_DNS_HOST, PROBE_DNS_PORT)
                     .use { connection ->
                         val id = 0x4F57 // arbitrary but fixed, so the reply can be matched
-                        val query = dnsQuery(PROBE_DNS_NAME, id)
+                        val query = dnsQuery(dnsName, id)
 
                         connection.output.write(byteArrayOf((query.size ushr 8).toByte(), query.size.toByte()))
                         connection.output.write(query)
@@ -207,7 +209,7 @@ object OverlayProbe {
                         if (replyId != id) {
                             "CARRIED but the reply is for a different query (id=$replyId)"
                         } else {
-                            "CARRIED — $length bytes back, $answers answer(s) for $PROBE_DNS_NAME"
+                            "CARRIED — $length bytes back, $answers answer(s) for $dnsName"
                         }
                     }
             } catch (t: Throwable) {

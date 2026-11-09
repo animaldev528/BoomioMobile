@@ -24,6 +24,29 @@ data class ServerConfiguration(
 
     val isPublicHost: Boolean
         get() = isPublicServerHost(backendUrl)
+
+    /**
+     * The origin the person entered at bootstrap — the server's one name, and the source every
+     * boomio base is derived from.
+     *
+     * ⚠️ **The entered discovery URL is the identity; `backend_url` is a property of it.** The
+     * person types one FQDN, discovery reads `/.well-known/nuvio` from it, and the document's
+     * `backend_url` names the auth backend — which a deployment may serve from a different host.
+     * A client configured by one name must therefore derive its service origin from the name it
+     * was given, not from whatever host the document happens to point at. [backendUrl] is only
+     * the fallback for a configuration restored without a discovery URL.
+     */
+    val serviceOrigin: String
+        get() = discoveryUrl
+            ?.let { runCatching { io.ktor.http.Url(it) }.getOrNull() }
+            ?.let { url ->
+                val host = if (':' in url.host) "[${url.host}]" else url.host
+                val defaultPort = if (url.protocol.name == "https") 443 else 80
+                val port = if (url.port == defaultPort) "" else ":${url.port}"
+                "${url.protocol.name}://$host$port"
+            }
+            ?.takeIf { it.isNotBlank() }
+            ?: backendUrl.trim().trimEnd('/')
 }
 
 object ServerConfigurationRepository {
@@ -78,8 +101,14 @@ object ServerConfigurationRepository {
 /**
  * The auth backend's origin.
  *
- * ⚠️ **A baked build value wins; a build that names none gets the *runtime* origin, never
- * `""`.** [SupabaseConfig.URL] is a compile-time constant, so a build made without
+ * ⚠️ **The runtime origin wins, and the baked value is only its floor.** A client is configured
+ * by the one server FQDN a person enters; that origin must move every seam with it, including
+ * auth. A baked [SupabaseConfig.URL] therefore stands in only until a server has been named —
+ * otherwise a build carrying one deployment's name would keep signing in there after the person
+ * pointed the client somewhere else, which is the "entered my server, talked to theirs" defect
+ * this precedence removes.
+ *
+ * [SupabaseConfig.URL] is a compile-time constant, so a build made without
  * `NUVIO_SUPABASE_URL` used to hand [officialConfiguration] the empty string — and an empty
  * base is not inert. supabase-kt builds its client on Ktor, whose `URLBuilder` defaults an
  * absent host to `localhost`, so every sign-in went to `http://localhost/auth/v1/authorize`
@@ -95,7 +124,7 @@ object ServerConfigurationRepository {
  * private address as the endpoint would work on exactly one of those.
  */
 internal fun resolveBackendUrl(bakedUrl: String, serviceOrigin: String): String =
-    bakedUrl.trim().trimEnd('/').ifBlank { serviceOrigin.trim().trimEnd('/') }
+    serviceOrigin.trim().trimEnd('/').ifBlank { bakedUrl.trim().trimEnd('/') }
 
 internal fun officialConfiguration() = ServerConfiguration(
     backendUrl = resolveBackendUrl(SupabaseConfig.URL, BoomioConfig.serviceOrigin),

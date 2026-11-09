@@ -1,7 +1,6 @@
 package com.nuvio.app.core.overlay
 
 import android.app.Application
-import com.nuvio.app.features.boomio.BOOMIO_SERVICE_HOST
 import com.nuvio.app.features.boomio.BoomioConfig
 import java.io.ByteArrayOutputStream
 import java.time.Duration
@@ -466,7 +465,7 @@ class OverlayEndpointDiscoveryTest {
     fun `a service name is normalised to the one form a URL and a certificate both use`() {
         // Case and a trailing root dot are two spellings of one name, and only one of them
         // compares equal to what the wire, a log line, or a certificate SAN expects.
-        assertEquals(SERVICE_NAME, validDiscoveryNameOrNull("  BOOMIO.DuckDNS.org.  "))
+        assertEquals(SERVICE_NAME, validDiscoveryNameOrNull("  SERVER.Example.Test.  "))
         assertEquals(SERVICE_NAME, validDiscoveryNameOrNull(SERVICE_NAME))
         assertNull(validDiscoveryNameOrNull(null))
         assertNull(validDiscoveryNameOrNull(""))
@@ -687,7 +686,15 @@ class OverlayEndpointDiscoveryTest {
             // Reachable from a test without a `Context`, which is why `wireManualEntry` is split
             // out of `initialize`: the ladder's observers and the ConnectivityManager have
             // nothing to do with this one assignment.
-            OverlayEndpointState.submitManual("not an address")
+            //
+            // ⚠️ **`:51820` is rejected by the parser, and that is the point.** A wordier string
+            // with no colon — `not an address` — is a legal *name* to [parseEndpointAuthority], so
+            // it is accepted, persisted into [BoomioConfig.overlayEndpoint] and walked; with no
+            // `Context` the walk answers `Unavailable`, and the test then fails for a reason that
+            // has nothing to do with the wiring under test. A port with no host is the one shape
+            // the parser refuses outright, so this asserts the handler without leaving global
+            // state behind for the next test.
+            OverlayEndpointState.submitManual(":51820")
             val status = OverlayEndpointState.status.value
             assertTrue(
                 status is OverlayEndpointStatus.NeedsManual,
@@ -819,24 +826,39 @@ class OverlayEndpointDiscoveryTest {
     private class Answer(val type: Int, val rdata: ByteArray)
 
     // -----------------------------------------------------------------------------------------
-    // The one name — the record and the origin cannot drift apart
+    // The one name — whatever FQDN the client was given, never a compiled one
     // -----------------------------------------------------------------------------------------
 
     @Test
-    fun `the discovery record and the client's service origin are the same name`() {
-        // ⚠️ This is the whole point of the collapse, and the test that would have caught the state
-        // it replaced. The tuple used to live on `boomio-prov.duckdns.org` while the certificate and
-        // every URL lived on `boomio.duckdns.org` — two names, declared in two files, doing one job.
-        // A deployment that renamed one and not the other failed rung 2 for a reason that had
-        // nothing to do with DNS, and nothing in either file could notice.
+    fun `no server name is compiled into the ladder`() {
+        // The rung asks about the FQDN this client was given and nothing else. An unconfigured
+        // client therefore has no record to ask about: rung 1 (mDNS) can still find a box on the
+        // LAN, and off it the ladder asks the person. A compiled default here is how a client
+        // pointed at one deployment silently enrolled against another.
         //
-        // ⚠️ **The literal is pinned as well as the equality, deliberately.** An equality alone
-        // still holds if a later edit moves *both* to a third name while meaning to move only one.
-        assertEquals("boomio.duckdns.org", BOOMIO_SERVICE_HOST)
-        assertEquals(BOOMIO_SERVICE_HOST, OverlayEndpointDiscovery.PROV_RECORD)
-        // And the origin the four base URLs are derived from is that same name, so a client that
-        // has read no publication still aims at the server the ladder is looking for.
-        assertEquals(BOOMIO_SERVICE_HOST, hostOf(BoomioConfig.serviceOrigin))
+        // ⚠️ The overlay field is blanked rather than assumed blank: `BoomioConfig` is process
+        // state and another test that typed a value would otherwise make this assert about that
+        // test's leftovers instead of about a compiled default.
+        val saved = BoomioConfig.overlayEndpoint
+        try {
+            BoomioConfig.overlayEndpoint = ""
+            assertNull(OverlayEndpointDiscovery.discoveryRecordName)
+        } finally {
+            BoomioConfig.overlayEndpoint = saved
+        }
+    }
+
+    @Test
+    fun `the configured FQDN is the record the ladder asks about`() {
+        // The typed server is the source of truth for rung 2. Case, a trailing dot and a bare port
+        // are all spellings of the same name.
+        val saved = BoomioConfig.overlayEndpoint
+        try {
+            BoomioConfig.overlayEndpoint = "MyServer.Example.Test:51820"
+            assertEquals("myserver.example.test", OverlayEndpointDiscovery.discoveryRecordName)
+        } finally {
+            BoomioConfig.overlayEndpoint = saved
+        }
     }
 
     @Test
@@ -959,15 +981,13 @@ class OverlayEndpointDiscoveryTest {
         const val PROVISIONING_KEY_B64 = "ERERERERERERERERERERERERERERERERERERERERERE="
 
         /**
-         * The one name the publisher writes into both channels — the service FQDN every URL, SNI
-         * and certificate check stays on. See `overlay/overlay-duckdns.py`.
+         * A service FQDN, as a publisher writes it into both channels.
          *
-         * ⚠️ **Read from the production constant rather than spelled again.** This fixture used to
-         * be a fourth copy of the literal, which meant a test could agree with itself about a name
-         * the ladder no longer resolved. Taking it from [OverlayEndpointDiscovery.PROV_RECORD] makes
-         * these fixtures fail if that constant is ever pointed somewhere else — which is the point.
+         * ⚠️ **Arbitrary on purpose: the ladder has no compiled name.** The fixtures must not
+         * borrow one from production — a test that read a real constant could agree with itself
+         * about a name no client resolves.
          */
-        const val SERVICE_NAME = OverlayEndpointDiscovery.PROV_RECORD
+        const val SERVICE_NAME = "server.example.test"
 
         /** The server's address at home, as the record publishes it: a literal, never a name. */
         const val LAN_ADDR = "192.168.68.65"
