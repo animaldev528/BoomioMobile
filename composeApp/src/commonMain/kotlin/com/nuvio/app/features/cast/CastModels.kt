@@ -132,11 +132,27 @@ data class CastTarget(
      * per model, and it is the same row its own policy is enforced from.
      */
     val deviceId: String? = null,
+    /**
+     * The ceiling the RENDERER declared for itself, when the protocol tells us.
+     *
+     * ⛔ The model row describes the BOX, not the receiver we are handing a URL
+     * to. A Roku Streaming Stick 4K decodes 4K HEVC/DV in its own player, but its
+     * AirPlay 2 receiver advertises 1080p / SDR / `avc1` only — and the pick is
+     * made from the row. Measured 2026-11-09: a 4K DV x265 remux (25.7 Mbps) was
+     * cast to that receiver, which played a few seconds, stuttered, and died.
+     *
+     * bsf already parses these (`targetMaxResolution`, `targetHdr`,
+     * `targetVideoCodecs`) and can only ever NARROW the row with them, so
+     * declaring nothing was leaving the receiver's own limits unsaid.
+     */
+    val maxResolution: String? = null,
+    val hdr: String? = null,
+    val videoCodecs: String? = null,
 ) {
     /**
-     * `?targetEcosystem=…&targetModel=…&targetIp=…[&targetDeviceId=…]` — ready to
-     * append to a /find URL. Encoded by hand because this is commonMain and
-     * `URLEncoder` is JVM-only.
+     * `?targetEcosystem=…&targetModel=…&targetIp=…[&targetDeviceId=…][&caps]` —
+     * ready to append to a /find URL. Encoded by hand because this is commonMain
+     * and `URLEncoder` is JVM-only.
      */
     fun queryString(): String = buildString {
         append("targetEcosystem=").append(encode(ecosystem))
@@ -145,18 +161,52 @@ data class CastTarget(
         deviceId?.takeIf { it.isNotBlank() }?.let {
             append("&targetDeviceId=").append(encode(it))
         }
+        maxResolution?.takeIf { it.isNotBlank() }?.let {
+            append("&targetMaxResolution=").append(encode(it))
+        }
+        hdr?.takeIf { it.isNotBlank() }?.let {
+            append("&targetHdr=").append(encode(it))
+        }
+        videoCodecs?.takeIf { it.isNotBlank() }?.let {
+            append("&targetVideoCodecs=").append(encode(it))
+        }
     }
 
     companion object {
-        fun of(device: CastDevice): CastTarget = CastTarget(
-            ip = device.ip,
-            // A non-empty label keeps the request a cast request; the server's
-            // lookup misses on it and applies the floor, which is the intent.
-            ecosystem = device.ecosystem
-                ?: if (device.protocol == CastProtocol.BOOMIO) "boomio" else device.protocol.name,
-            model = device.model ?: device.name.ifBlank { "unknown" },
-            deviceId = device.deviceId,
-        )
+        /**
+         * ⛔ An AirPlay 2 receiver is a NARROWER renderer than the box under it,
+         * and it is the one that fetches and decodes these bytes. The AirPlay
+         * discovery path reads only the `_airplay._tcp` TXT record — it never
+         * asks the receiver `GET :7000/info`, which is where the real
+         * `widthPixelsMax` / `HDRSupportedModes` live — so the receiver's own
+         * ceiling is not available here to forward.
+         *
+         * What is available is what we know about the protocol's receivers: an
+         * Apple TV over AirPlay does 4K HDR, everything else on this LAN answers
+         * `_airplay._tcp` as a compatibility receiver and is H.264 / 1080p / SDR
+         * (measured on the Roku: `avc1.64002a`, `HDRMode: SDR`, 1920x1080).
+         * Declaring that ceiling costs nothing when it is right and is the
+         * difference between playing and dying in seconds when it is.
+         */
+        private fun airPlayCeiling(device: CastDevice): Boolean =
+            device.protocol == CastProtocol.AIRPLAY &&
+                !device.ecosystem.equals("Apple", ignoreCase = true)
+
+        fun of(device: CastDevice): CastTarget {
+            val narrowToAirPlay = airPlayCeiling(device)
+            return CastTarget(
+                ip = device.ip,
+                // A non-empty label keeps the request a cast request; the server's
+                // lookup misses on it and applies the floor, which is the intent.
+                ecosystem = device.ecosystem
+                    ?: if (device.protocol == CastProtocol.BOOMIO) "boomio" else device.protocol.name,
+                model = device.model ?: device.name.ifBlank { "unknown" },
+                deviceId = device.deviceId,
+                maxResolution = if (narrowToAirPlay) "1080p" else null,
+                hdr = if (narrowToAirPlay) "0" else null,
+                videoCodecs = if (narrowToAirPlay) "h264" else null,
+            )
+        }
     }
 }
 

@@ -137,6 +137,34 @@ class CastModelCatalogTest {
         val target = CastTarget.of(device)
         assertEquals("Roku", target.ecosystem)
         assertEquals("Streaming Stick 4K / Ultra", target.model)
+        // ⛔ …PLUS the ceiling the receiver itself lives under. The row says
+        // 4K/HEVC/HDR10 (true for Roku's own player); this receiver answers
+        // `_airplay._tcp` with `avc1.64002a` and SDR only, and must not be handed
+        // a 4K x265 remux. bsf narrows on these and can never widen with them.
+        assertEquals(
+            "targetEcosystem=Roku&targetModel=Streaming%20Stick%204K%20%2F%20Ultra"
+                + "&targetIp=192.168.68.64&targetMaxResolution=1080p&targetHdr=0&targetVideoCodecs=h264",
+            target.queryString(),
+        )
+    }
+
+    @Test
+    fun `an apple tv over airplay declares no ceiling`() {
+        // An Apple TV 4K plays 4K HDR over AirPlay; narrowing it would be a
+        // regression on the one receiver whose AirPlay path is not a shim.
+        val device = CastModelCatalog.device(
+            protocol = CastProtocol.AIRPLAY,
+            ip = "192.168.68.70",
+            name = "Living Room",
+            port = 7000,
+            facts = mapOf("model" to "AppleTV6,2"),
+            md = "AppleTV6,2",
+        )
+        val target = CastTarget.of(device)
+        assertNull(target.maxResolution)
+        assertNull(target.hdr)
+        assertNull(target.videoCodecs)
+        assertFalse(target.queryString().contains("targetMaxResolution"))
     }
 
     @Test
